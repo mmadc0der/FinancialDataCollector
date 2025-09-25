@@ -19,4 +19,9 @@ This project provides a resilient, configurable kernel for ingesting high-freque
 
 See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 
+### Infrastructure setup
+- See `docs/infrastructure.md` for Redis and Postgres user setup and configuration.
+- Initial Postgres migration: `migrations/0001_init.sql`.
+
+
 # FinancialDataCollector

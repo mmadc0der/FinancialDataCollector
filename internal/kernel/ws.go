@@ -1,15 +1,15 @@
 package kernel
 
 import (
-	"encoding/json"
-	"log"
-	"net/http"
-	"sync"
-	"time"
+    "encoding/json"
+    "net/http"
+    "sync"
+    "time"
 
-	"github.com/example/data-kernel/internal/kernelcfg"
-	"github.com/example/data-kernel/internal/protocol"
-	"github.com/gorilla/websocket"
+    "github.com/example/data-kernel/internal/kernelcfg"
+    "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/protocol"
+    "github.com/gorilla/websocket"
 )
 
 type wsServer struct {
@@ -46,8 +46,8 @@ func (s *wsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	c, err := s.upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("ws upgrade error: %v", err)
+    if err != nil {
+        logging.Warn("ws_upgrade_error", logging.F("err", err.Error()))
 		return
 	}
 	s.mu.Lock()
@@ -69,9 +69,9 @@ func (s *wsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 
 	for {
-		_, msg, err := c.ReadMessage()
-		if err != nil {
-			log.Printf("ws read error: %v", err)
+        _, msg, err := c.ReadMessage()
+        if err != nil {
+            logging.Warn("ws_read_error", logging.F("err", err.Error()))
 			return
 		}
         var env protocol.Envelope
@@ -80,9 +80,9 @@ func (s *wsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		// Basic echo ack for now
-		ack := protocol.NewAck(env.ID)
+        ack := protocol.NewAck(env.ID)
 		buf, _ := json.Marshal(ack)
-		_ = c.WriteMessage(websocket.TextMessage, buf)
+        _ = c.WriteMessage(websocket.TextMessage, buf)
         if s.onMessage != nil {
             s.onMessage(msg)
         }

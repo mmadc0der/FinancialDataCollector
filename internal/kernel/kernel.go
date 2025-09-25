@@ -3,11 +3,11 @@ package kernel
 import (
     "context"
     "fmt"
-    "log"
     "net/http"
     "time"
 
     "github.com/example/data-kernel/internal/kernelcfg"
+    "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/supervisor"
 )
 
@@ -26,7 +26,9 @@ func NewKernel(configPath string) (*Kernel, error) {
 }
 
 func (k *Kernel) Start(ctx context.Context) error {
-	log.Printf("kernel starting on %s", k.cfg.Server.Listen)
+    stopLog := logging.Init(k.cfg.Logging)
+    defer stopLog()
+    logging.Info("kernel_start", logging.F("listen", k.cfg.Server.Listen))
 
     r, err := newRouter(k.cfg)
     if err != nil {
@@ -39,11 +41,9 @@ func (k *Kernel) Start(ctx context.Context) error {
 
     // start supervisor for modules
     sup := supervisor.NewSupervisor(k.cfg.Modules.Dir)
-    if err := sup.Start(ctx); err != nil {
-        log.Printf("supervisor error: %v", err)
-    }
+    _ = sup.Start(ctx)
 
-	go func() {
+    go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

@@ -11,6 +11,9 @@ type Config struct {
 	Server ServerConfig `yaml:"server"`
 	Sinks  SinksConfig  `yaml:"sinks"`
 	Modules ModulesConfig `yaml:"modules"`
+    Postgres PostgresConfig `yaml:"postgres"`
+    Redis RedisConfig `yaml:"redis"`
+    Logging LoggingConfig `yaml:"logging"`
 }
 
 type ServerConfig struct {
@@ -34,6 +37,30 @@ type FileSinkConfig struct {
 
 type ModulesConfig struct {
 	Dir string `yaml:"dir"`
+}
+
+type PostgresConfig struct {
+    Enabled bool `yaml:"enabled"`
+    DSN string `yaml:"dsn"`
+    MaxConns int `yaml:"max_conns"`
+    ConnMaxLifetimeMs int `yaml:"conn_max_lifetime_ms"`
+    ApplyMigrations bool `yaml:"apply_migrations"`
+}
+
+type RedisConfig struct {
+    Enabled bool `yaml:"enabled"`
+    Addr string `yaml:"addr"`
+    Username string `yaml:"username"`
+    Password string `yaml:"password"`
+    DB int `yaml:"db"`
+    Stream string `yaml:"stream"`
+    MaxLenApprox int64 `yaml:"maxlen_approx"`
+}
+
+type LoggingConfig struct {
+    Level string `yaml:"level"`
+    Buffer int `yaml:"buffer"`
+    Output string `yaml:"output"`
 }
 
 func Load(path string) (*Config, error) {

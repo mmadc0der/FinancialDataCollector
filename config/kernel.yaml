@@ -15,3 +15,24 @@ sinks:
 modules:
   dir: "./modules.d"
 
+postgres:
+  enabled: false
+  dsn: "postgres://data_kernel:CHANGE_ME_STRONG@127.0.0.1:5432/data_kernel_db?sslmode=disable"
+  max_conns: 8
+  conn_max_lifetime_ms: 600000
+  apply_migrations: true
+
+redis:
+  enabled: false
+  addr: "127.0.0.1:6379"
+  username: "data_kernel"
+  password: "CHANGE_ME_STRONG"
+  db: 0
+  stream: "events"
+  maxlen_approx: 1000000
+
+logging:
+  level: "info"
+  buffer: 4096
+  output: "stdout"
+
