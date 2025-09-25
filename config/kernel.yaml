@@ -1,0 +1,17 @@
+server:
+  listen: ":7600"
+  auth_token: "devtoken"
+  max_message_bytes: 1048576
+  read_timeout_ms: 15000
+
+sinks:
+  file:
+    enabled: true
+    directory: "./data"
+    rotate_mb: 512
+    rotate_daily: false
+    compression: "none"
+
+modules:
+  dir: "./modules.d"
+
