@@ -50,3 +50,30 @@ func ErrorEnvelope(code, message string) []byte {
 	return b
 }
 
+// ValidateEnvelope performs lightweight validation of the envelope shape.
+func ValidateEnvelope(e Envelope) error {
+    if e.Version == "" || e.Version != Version {
+        return &Err{Code: "bad_version", Message: "invalid or mismatched version"}
+    }
+    switch e.Type {
+    case "data", "heartbeat", "control", "ack", "error":
+    default:
+        return &Err{Code: "bad_type", Message: "unsupported type"}
+    }
+    if e.ID == "" {
+        return &Err{Code: "bad_id", Message: "missing id"}
+    }
+    if e.TS == 0 {
+        return &Err{Code: "bad_ts", Message: "missing ts"}
+    }
+    // data may be empty for some control/ack messages
+    return nil
+}
+
+type Err struct {
+    Code    string
+    Message string
+}
+
+func (e *Err) Error() string { return e.Code + ": " + e.Message }
+

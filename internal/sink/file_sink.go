@@ -4,6 +4,7 @@ import (
     "bufio"
     "encoding/json"
     "fmt"
+    "compress/gzip"
     "os"
     "path/filepath"
     "sync"
@@ -18,6 +19,7 @@ type NDJSONFileSink struct {
 	mu    sync.Mutex
 	file  *os.File
 	buf   *bufio.Writer
+    gz    *gzip.Writer
 	size  int64
 	day   int
 }
@@ -41,17 +43,25 @@ func (s *NDJSONFileSink) rotate() error {
 		return nil
 	}
 	if s.file != nil {
-		s.buf.Flush()
+        s.buf.Flush()
+        if s.gz != nil { s.gz.Flush(); s.gz.Close(); s.gz = nil }
 		s.file.Close()
 	}
-	name := fmt.Sprintf("%s_%s.ndjson", time.Now().Format("20060102"), ulid.Make().String())
+    ext := "ndjson"
+    if s.cfg.Compression == "gzip" { ext = "ndjson.gz" }
+    name := fmt.Sprintf("%s_%s.%s", time.Now().Format("20060102"), ulid.Make().String(), ext)
 	path := filepath.Join(s.cfg.Directory, name)
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
 	s.file = f
-	s.buf = bufio.NewWriterSize(f, 1<<20)
+    if s.cfg.Compression == "gzip" {
+        s.gz = gzip.NewWriter(f)
+        s.buf = bufio.NewWriterSize(s.gz, 1<<20)
+    } else {
+        s.buf = bufio.NewWriterSize(f, 1<<20)
+    }
 	s.size = 0
 	s.day = time.Now().Day()
 	return nil
@@ -84,7 +94,13 @@ func (s *NDJSONFileSink) WriteJSON(obj any) error {
 	if err := s.buf.WriteByte('\n'); err != nil {
 		return err
 	}
-	s.size += int64(len(b) + 1)
+    s.size += int64(len(b) + 1)
+    // metrics
+    // avoid importing metrics here to keep sink generic; optionally hook via router
+    // periodic flush to bound data loss
+    if s.size% (1<<20) == 0 { // every ~1MiB
+        _ = s.buf.Flush()
+    }
 	return nil
 }
 
@@ -94,6 +110,7 @@ func (s *NDJSONFileSink) Close() error {
 	if s.buf != nil {
 		s.buf.Flush()
 	}
+    if s.gz != nil { s.gz.Flush(); s.gz.Close() }
 	if s.file != nil {
 		return s.file.Close()
 	}

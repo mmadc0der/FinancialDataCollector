@@ -117,7 +117,7 @@ func (s *Supervisor) runLoop(ctx context.Context, path string, mp *managedProc) 
         stderr, _ := cmd.StderrPipe()
         if err := cmd.Start(); err != nil {
             log.Printf("start %s: %v", path, err)
-            time.Sleep(backoff(&mp.backoff))
+            time.Sleep(jitter(backoff(&mp.backoff)))
             continue
         }
         mp.cmd = cmd
@@ -127,13 +127,17 @@ func (s *Supervisor) runLoop(ctx context.Context, path string, mp *managedProc) 
         if err != nil {
             log.Printf("proc exit %s: %v", path, err)
         }
-        time.Sleep(backoff(&mp.backoff))
+        time.Sleep(jitter(backoff(&mp.backoff)))
     }
 }
 
 func stream(kind, path string, r io.ReadCloser) {
     defer r.Close()
     s := bufio.NewScanner(r)
+    // increase max token size to handle long lines
+    const maxBuf = 1024 * 1024
+    buf := make([]byte, 64*1024)
+    s.Buffer(buf, maxBuf)
     for s.Scan() {
         log.Printf("%s %s: %s", kind, path, s.Text())
     }
@@ -144,6 +148,15 @@ func backoff(b *time.Duration) time.Duration {
     *b *= 2
     if *b > 15*time.Second { *b = 15*time.Second }
     return *b
+}
+
+func jitter(d time.Duration) time.Duration {
+    // simple +/- 20%% jitter
+    n := time.Now().UnixNano()
+    sign := 1
+    if n&1 == 1 { sign = -1 }
+    j := time.Duration(int64(d) / 5)
+    return d + time.Duration(sign)*j
 }
 
 func (s *Supervisor) stopAll() {

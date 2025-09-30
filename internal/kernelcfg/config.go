@@ -21,6 +21,9 @@ type ServerConfig struct {
 	AuthToken       string `yaml:"auth_token"`
 	MaxMessageBytes int64  `yaml:"max_message_bytes"`
 	ReadTimeoutMs   int    `yaml:"read_timeout_ms"`
+    AllowedOrigins  []string `yaml:"allowed_origins"`
+    WindowSize      int    `yaml:"window_size"`
+    IngestQueueSize int    `yaml:"ingest_queue_size"`
 }
 
 type SinksConfig struct {
@@ -45,6 +48,7 @@ type PostgresConfig struct {
     MaxConns int `yaml:"max_conns"`
     ConnMaxLifetimeMs int `yaml:"conn_max_lifetime_ms"`
     ApplyMigrations bool `yaml:"apply_migrations"`
+    QueueSize int `yaml:"queue_size"`
 }
 
 type RedisConfig struct {
@@ -55,6 +59,7 @@ type RedisConfig struct {
     DB int `yaml:"db"`
     Stream string `yaml:"stream"`
     MaxLenApprox int64 `yaml:"maxlen_approx"`
+    QueueSize int `yaml:"queue_size"`
 }
 
 type LoggingConfig struct {
@@ -87,6 +92,25 @@ func Load(path string) (*Config, error) {
 	if cfg.Modules.Dir == "" {
 		cfg.Modules.Dir = "./modules.d"
 	}
+    // Env overrides for secrets
+    if v := os.Getenv("KERNEL_AUTH_TOKEN"); v != "" {
+        cfg.Server.AuthToken = v
+    }
+    if v := os.Getenv("KERNEL_AUTH_TOKEN_FILE"); v != "" {
+        if b, err := os.ReadFile(v); err == nil { cfg.Server.AuthToken = strings.TrimSpace(string(b)) }
+    }
+    if v := os.Getenv("KERNEL_PG_DSN"); v != "" {
+        cfg.Postgres.DSN = v
+    }
+    if v := os.Getenv("KERNEL_PG_DSN_FILE"); v != "" {
+        if b, err := os.ReadFile(v); err == nil { cfg.Postgres.DSN = strings.TrimSpace(string(b)) }
+    }
+    if v := os.Getenv("KERNEL_REDIS_PASSWORD"); v != "" {
+        cfg.Redis.Password = v
+    }
+    if v := os.Getenv("KERNEL_REDIS_PASSWORD_FILE"); v != "" {
+        if b, err := os.ReadFile(v); err == nil { cfg.Redis.Password = strings.TrimSpace(string(b)) }
+    }
 	return &cfg, nil
 }
 

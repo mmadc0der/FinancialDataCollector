@@ -3,6 +3,9 @@ server:
   auth_token: "devtoken"
   max_message_bytes: 1048576
   read_timeout_ms: 15000
+  allowed_origins: []
+  window_size: 0
+  ingest_queue_size: 8192
 
 sinks:
   file:
@@ -21,6 +24,7 @@ postgres:
   max_conns: 8
   conn_max_lifetime_ms: 600000
   apply_migrations: true
+  queue_size: 1024
 
 redis:
   enabled: false
@@ -30,6 +34,7 @@ redis:
   db: 0
   stream: "events"
   maxlen_approx: 1000000
+  queue_size: 2048
 
 logging:
   level: "info"
