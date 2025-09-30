@@ -39,7 +39,8 @@ func (r *Redis) XAdd(ctx context.Context, id string, payload []byte) error {
     defer cancel()
     return r.c.XAdd(cctx, &redis.XAddArgs{
         Stream: r.stream,
-        MaxLenApprox: r.maxLenApprox,
+        MaxLen: r.maxLenApprox,
+        Approx: true,
         Values: map[string]any{"id": id, "payload": payload},
     }).Err()
 }
