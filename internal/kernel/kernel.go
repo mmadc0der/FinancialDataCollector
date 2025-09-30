@@ -87,6 +87,7 @@ func (k *Kernel) enqueueRaw(msg []byte) {
     case k.inbound <- msg:
     default:
         logging.Warn("ingest_drop", logging.F("reason", "queue_full"))
+        // metrics.IngestDropped.Add(1) // avoid import cycle; accounted in WS metrics
     }
 }
 

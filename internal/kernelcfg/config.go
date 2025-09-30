@@ -1,10 +1,11 @@
 package kernelcfg
 
 import (
-	"fmt"
-	"os"
+    "fmt"
+    "os"
+    "strings"
 
-	"gopkg.in/yaml.v3"
+    "gopkg.in/yaml.v3"
 )
 
 type Config struct {

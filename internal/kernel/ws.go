@@ -105,13 +105,19 @@ func (s *wsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
     }
 
     // heartbeat: use ping frames periodically
+    done := make(chan struct{})
     go func() {
         ticker := time.NewTicker(time.Duration(s.cfg.Server.ReadTimeoutMs/3) * time.Millisecond)
         defer ticker.Stop()
         for {
             select {
             case <-ticker.C:
-                _ = c.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second))
+                if err := c.WriteControl(websocket.PingMessage, []byte("ping"), time.Now().Add(2*time.Second)); err != nil {
+                    close(done)
+                    return
+                }
+            case <-done:
+                return
             }
         }
     }()
@@ -120,7 +126,8 @@ func (s *wsServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
         _, msg, err := c.ReadMessage()
         if err != nil {
             logging.Warn("ws_read_error", logging.F("err", err.Error()))
-			return
+            close(done)
+            return
 		}
         var env protocol.Envelope
         if err := json.Unmarshal(msg, &env); err != nil {
