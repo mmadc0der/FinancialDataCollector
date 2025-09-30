@@ -1,0 +1,78 @@
+## Infrastructure: Redis and Postgres
+
+This guide describes creating service users and configuring the kernel to use Redis and Postgres.
+
+### Postgres
+
+Assumptions:
+- Postgres 13+ is running locally or reachable.
+- You have superuser access to run `psql`.
+
+Create user, database, and grants:
+
+```bash
+psql -h 127.0.0.1 -U postgres -W <<'SQL'
+CREATE ROLE data_kernel WITH LOGIN PASSWORD 'CHANGE_ME_STRONG';
+CREATE DATABASE data_kernel_db OWNER data_kernel;
+\c data_kernel_db
+GRANT ALL PRIVILEGES ON DATABASE data_kernel_db TO data_kernel;
+-- Future tables will grant automatically via default privileges:
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO data_kernel;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO data_kernel;
+SQL
+```
+
+Initial migration (table `envelopes` to store normalized protocol envelopes): see `migrations/0001_init.sql`.
+
+Apply migration:
+
+```bash
+psql -h 127.0.0.1 -U data_kernel -d data_kernel_db -W -f migrations/0001_init.sql | cat
+```
+
+Kernel configuration (example):
+
+```yaml
+postgres:
+  enabled: true
+  dsn: "postgres://data_kernel:CHANGE_ME_STRONG@127.0.0.1:5432/data_kernel_db?sslmode=disable"
+  max_conns: 8
+  conn_max_lifetime_ms: 600000
+  apply_migrations: true
+```
+
+### Redis
+
+Assumptions:
+- Redis 6+ with ACLs enabled.
+
+Create an ACL user with limited permissions for publishing to a stream:
+
+```bash
+redis-cli <<'REDIS'
+ACL SETUSER data_kernel on >CHANGE_ME_STRONG ~events* +xadd +ping +auth +client
+SAVE
+REDIS
+```
+
+Kernel configuration (example):
+
+```yaml
+redis:
+  enabled: true
+  addr: "127.0.0.1:6379"
+  username: "data_kernel"
+  password: "CHANGE_ME_STRONG"
+  db: 0
+  stream: "events"
+  maxlen_approx: 1000000
+```
+
+### Security notes
+- Store passwords as environment variables or secret files; avoid committing secrets.
+- Prefer local loopback or VPN; add TLS in front of Redis/Postgres when exposed.
+
+### Observability
+- Postgres: enable `log_min_duration_statement` for slow queries.
+- Redis: monitor memory and stream trimming.
+
