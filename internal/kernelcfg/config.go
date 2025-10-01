@@ -37,6 +37,7 @@ type FileSinkConfig struct {
 	RotateMB      int    `yaml:"rotate_mb"`
 	RotateDaily   bool   `yaml:"rotate_daily"`
 	Compression   string `yaml:"compression"` // none|gzip
+    FlushEveryWrites int  `yaml:"flush_every_writes"`
 }
 
 type ModulesConfig struct {

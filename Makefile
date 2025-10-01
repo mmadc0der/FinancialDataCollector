@@ -1,4 +1,4 @@
-.PHONY: all build run test lint fmt clean
+.PHONY: all build run test test-unit test-integration lint fmt clean
 
 APP:=kernel
 BIN:=bin/$(APP)
@@ -12,8 +12,13 @@ build:
 run: build
 	./$(BIN) --config ./config/kernel.yaml | cat
 
-test:
+test: test-unit
+
+test-unit:
 	go test -race -cover ./...
+
+test-integration:
+	go test -race -cover -tags=integration ./...
 
 lint:
 	go vet ./...

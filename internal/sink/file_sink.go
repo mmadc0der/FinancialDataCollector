@@ -22,6 +22,7 @@ type NDJSONFileSink struct {
     gz    *gzip.Writer
 	size  int64
 	day   int
+    writes int
 }
 
 func NewNDJSONFileSink(cfg kernelcfg.FileSinkConfig) (*NDJSONFileSink, error) {
@@ -95,10 +96,11 @@ func (s *NDJSONFileSink) WriteJSON(obj any) error {
 		return err
 	}
     s.size += int64(len(b) + 1)
-    // metrics
-    // avoid importing metrics here to keep sink generic; optionally hook via router
+    s.writes++
     // periodic flush to bound data loss
-    if s.size% (1<<20) == 0 { // every ~1MiB
+    if s.cfg.FlushEveryWrites > 0 {
+        if s.writes % s.cfg.FlushEveryWrites == 0 { _ = s.buf.Flush() }
+    } else if s.size % (1<<20) == 0 { // every ~1MiB
         _ = s.buf.Flush()
     }
 	return nil
