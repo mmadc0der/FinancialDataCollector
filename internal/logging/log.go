@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,6 +40,8 @@ var (
 	logCh    chan event
 	dropped  atomic.Int64
 	stopCh   chan struct{}
+	mu       sync.Mutex
+	drained  chan struct{}
 	writer   io.Writer = os.Stdout
 )
 
@@ -57,26 +60,47 @@ func parseLevel(s string) Level {
 }
 
 func Init(cfg kernelcfg.LoggingConfig) func() {
-	if cfg.Buffer <= 0 {
-		cfg.Buffer = 4096
-	}
-	logCh = make(chan event, cfg.Buffer)
-	logLevel.Store(int32(parseLevel(cfg.Level)))
-	stopCh = make(chan struct{})
-	// output
-	switch cfg.Output {
-	case "stderr":
-		writer = os.Stderr
-	case "stdout", "":
-		writer = os.Stdout
-	default:
-		f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err == nil {
-			writer = f
-		}
-	}
-	go drain()
-	return func() { close(stopCh) }
+    mu.Lock()
+    defer mu.Unlock()
+    // stop any previous drain cleanly
+    if stopCh != nil {
+        close(stopCh)
+        if drained != nil {
+            <-drained
+        }
+    }
+    if cfg.Buffer <= 0 {
+        cfg.Buffer = 4096
+    }
+    logCh = make(chan event, cfg.Buffer)
+    logLevel.Store(int32(parseLevel(cfg.Level)))
+    stopCh = make(chan struct{})
+    // output
+    switch cfg.Output {
+    case "stderr":
+        writer = os.Stderr
+    case "stdout", "":
+        writer = os.Stdout
+    default:
+        f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+        if err == nil {
+            writer = f
+        }
+    }
+    drained = make(chan struct{})
+    go drain()
+    return func() {
+        mu.Lock()
+        defer mu.Unlock()
+        if stopCh != nil {
+            close(stopCh)
+            if drained != nil {
+                <-drained
+            }
+            stopCh = nil
+            drained = nil
+        }
+    }
 }
 
 func drain() {
@@ -92,7 +116,8 @@ func drain() {
 				_ = enc.Encode(event{TS: time.Now().UnixNano(), Level: "warn", Msg: "logs_dropped", Fields: map[string]any{"count": n}})
 			}
 		case <-stopCh:
-			return
+            close(drained)
+            return
 		}
 	}
 }
