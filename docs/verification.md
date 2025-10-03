@@ -7,6 +7,10 @@
    - `kernel_redis_read_total`, `kernel_redis_ack_total` increase
    - `kernel_pg_batch_size`, `kernel_pg_batch_seconds` present
 3. Check DLQ behavior by pushing malformed payload and verifying `events:dlq`.
+4. Observe performance metrics:
+   - `kernel_pg_batch_size`, `kernel_pg_batch_seconds`, `kernel_pg_commit_total`, `kernel_pg_errors_total`
+   - `kernel_redis_batch_seconds`, `kernel_redis_pending`, `kernel_redis_stream_len`
+   - `kernel_spill_write_total`, `kernel_spill_bytes_total`, `kernel_spill_files`, `kernel_spill_replay_total`
 
 ## Verification Pipeline
 
@@ -17,8 +21,8 @@
 
 ### Layers
 1. Static checks: lint, format, schema generation and validation for messages.
-2. Unit tests: kernel components (config, logging, supervisor, ws server, sinks).
-3. Integration tests: spin up kernel, launch example module, assert protocol handshakes, acks, flow control.
+2. Unit tests: kernel components (config, logging, Redis consumer, router batcher, spill/replay).
+3. Integration tests: spin up kernel, publish to Redis (no WS/control), assert acks after durable persistence.
 4. Fault-injection tests: simulate slow sink, message bursts, oversized messages, protocol violations, crashes.
 5. End-to-end snapshot: record NDJSON output, validate against JSON Schemas and invariants (monotonic seq, timestamps ordering, required fields).
 

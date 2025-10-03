@@ -36,7 +36,7 @@ Minimal schema to unify spot/derivatives:
 - Kernel annotates `ts_kernel` on ingest. Ordering is per connection. Cross-connection ordering is best-effort; sinks include connection id.
 
 ### Configuration
-- `config/kernel.yaml`: global (ports, limits, sinks). `modules.d/*.yaml`: module definitions (command, args/env, credentials via env/secret files).
+- `config/kernel.yaml`: server, postgres, redis, logging, spill settings.
 
 ### Observability
 - Structured logging (JSON). Metrics via Prometheus on localhost port. Health endpoints.

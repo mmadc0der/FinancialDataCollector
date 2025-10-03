@@ -1,27 +1,25 @@
-## Data Distributor Kernel and Pluggable Collector Modules
+## Data Kernel (Redis ingest, Postgres-first)
 
-This project provides a resilient, configurable kernel for ingesting high-frequency financial market data from pluggable, hot-reloadable collector modules, and distributing normalized timeseries events for downstream training and storage.
+This project provides a resilient, configurable kernel for ingesting high-frequency financial market data from Redis Streams and persisting normalized timeseries events into Postgres, with spill-to-disk fallback and optional Redis re-publish.
 
 ### High-level goals
 - Per-second (or higher) updates with rich event payloads
-- Strict `collector-module` ↔ `kernel` protocol boundary with encapsulated broker logic
-- Hot-reload-like module lifecycle management with isolation and backoff
-- Fault-tolerant kernel resistant to arbitrary module behavior
+- Strict `collector-module` ↔ `kernel` boundary via Redis Streams
+- Fault-tolerant kernel with backpressure, batching, and DLQ
 - Vendor-neutral, no enterprise licenses, single-node friendly
 
 ### Tech stack
-- Kernel: Go 1.22+
-- Collector modules: Polyglot (example: Python 3.10+)
-- Transport: WebSocket (secure optional), JSON/NDJSON wire format
-- Storage/Sinks: File NDJSON (rotated), optional Redis Stream/SQLite for demos
-- Config: YAML/TOML
+- Kernel: Go 1.23+
+- Modules: external producers (any language) publishing to Redis Streams
+- Transport: Redis Streams (JSON envelopes)
+- Storage: Postgres (primary), spill-to-disk as fallback; optional Redis re-publish
+- Config: YAML
 - CI: GitHub Actions
 
 See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 
 ### Infrastructure setup
-- See `docs/infrastructure.md` for Redis and Postgres user setup and configuration.
+- See `docs/infrastructure.md` for Redis and Postgres setup and configuration.
 - Initial Postgres migration: `migrations/0001_init.sql`.
-
 
 # FinancialDataCollector

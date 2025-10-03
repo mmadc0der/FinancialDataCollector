@@ -8,13 +8,11 @@ import (
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
     "github.com/example/data-kernel/internal/protocol"
-    "github.com/example/data-kernel/internal/sink"
     "github.com/example/data-kernel/internal/spill"
     "github.com/example/data-kernel/internal/logging"
 )
 
 type router struct {
-    sinks *sink.NDJSONFileSink
     pg   *data.Postgres
     rd   *data.Redis
     sp   *spill.Writer
@@ -29,11 +27,7 @@ type router struct {
 }
 
 func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) {
-	fs, err := sink.NewNDJSONFileSink(cfg.Sinks.File)
-	if err != nil {
-		return nil, err
-	}
-    r := &router{sinks: fs, publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack}
+    r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack}
     if cfg.Postgres.Enabled {
         if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
             r.pg = pg

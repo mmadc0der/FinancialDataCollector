@@ -10,7 +10,6 @@ import (
 
 type Config struct {
     Server ServerConfig `yaml:"server"`
-    Sinks  SinksConfig  `yaml:"sinks"`
     Postgres PostgresConfig `yaml:"postgres"`
     Redis RedisConfig `yaml:"redis"`
     Logging LoggingConfig `yaml:"logging"`
@@ -24,17 +23,7 @@ type ServerConfig struct {
     IngestQueueSize int    `yaml:"ingest_queue_size"`
 }
 
-type SinksConfig struct {
-	File FileSinkConfig `yaml:"file"`
-}
-
-type FileSinkConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	Directory     string `yaml:"directory"`
-	RotateMB      int    `yaml:"rotate_mb"`
-	RotateDaily   bool   `yaml:"rotate_daily"`
-	Compression   string `yaml:"compression"` // none|gzip
-}
+// sinks removed (file sink was deprecated)
 
 // removed ModulesConfig; modules are external
 
@@ -101,9 +90,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Server.ReadTimeoutMs == 0 {
 		cfg.Server.ReadTimeoutMs = 15000
 	}
-	if cfg.Sinks.File.Directory == "" {
-		cfg.Sinks.File.Directory = "./data"
-	}
+    // no file sink defaults
     // Env overrides for secrets
     if v := os.Getenv("KERNEL_PG_DSN"); v != "" {
         cfg.Postgres.DSN = v
@@ -129,6 +116,6 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) String() string {
-	return fmt.Sprintf("listen=%s file.dir=%s modules.dir=%s", c.Server.Listen, c.Sinks.File.Directory, c.Modules.Dir)
+    return fmt.Sprintf("listen=%s", c.Server.Listen)
 }
 

@@ -8,9 +8,7 @@ import (
 )
 
 var (
-    WSConnections = prom.NewGauge(prom.GaugeOpts{Name: "kernel_ws_connections", Help: "Active WS connections"})
     IngestDropped = prom.NewCounter(prom.CounterOpts{Name: "kernel_ingest_dropped_total", Help: "Dropped messages due to backpressure"})
-    FileSinkBytes = prom.NewCounter(prom.CounterOpts{Name: "kernel_filesink_bytes_total", Help: "Bytes written to file sink"})
     RedisReadTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_redis_read_total", Help: "Messages read from Redis"})
     RedisAckTotal  = prom.NewCounter(prom.CounterOpts{Name: "kernel_redis_ack_total", Help: "Messages acked to Redis"})
     RedisDLQTotal  = prom.NewCounter(prom.CounterOpts{Name: "kernel_redis_dlq_total", Help: "Messages sent to DLQ"})
@@ -28,7 +26,7 @@ var (
 )
 
 func init() {
-    prom.MustRegister(WSConnections, IngestDropped, FileSinkBytes, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge)
+    prom.MustRegister(IngestDropped, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge)
 }
 
 func Handler() http.Handler { return promhttp.Handler() }

@@ -4,15 +4,6 @@ server:
   read_timeout_ms: 15000
   ingest_queue_size: 8192
 
-sinks:
-  file:
-    enabled: false
-    directory: "./data"
-    rotate_mb: 512
-    rotate_daily: false
-    compression: "none"
-
-
 postgres:
   enabled: false
   dsn: "postgres://data_kernel:CHANGE_ME_STRONG@127.0.0.1:5432/data_kernel_db?sslmode=disable"
