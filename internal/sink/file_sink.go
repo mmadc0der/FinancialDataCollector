@@ -11,6 +11,7 @@ import (
     "time"
 
     "github.com/example/data-kernel/internal/kernelcfg"
+    "github.com/example/data-kernel/internal/metrics"
     ulid "github.com/oklog/ulid/v2"
 )
 
@@ -95,6 +96,7 @@ func (s *NDJSONFileSink) WriteJSON(obj any) error {
 		return err
 	}
     s.size += int64(len(b) + 1)
+    metrics.FileSinkBytes.Add(float64(len(b) + 1))
     // metrics
     // avoid importing metrics here to keep sink generic; optionally hook via router
     // periodic flush to bound data loss

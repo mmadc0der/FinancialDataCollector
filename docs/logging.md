@@ -27,3 +27,7 @@ logging:
 - Single allocation per field where possible.
 - Dropped log count reported periodically at `warn` level.
 
+### Tips
+- Include message ids and stream offsets when debugging Redis ingest.
+- Record DLQ reasons for troubleshooting (`events:dlq`).
+

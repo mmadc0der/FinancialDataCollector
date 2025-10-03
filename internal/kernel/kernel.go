@@ -9,14 +9,15 @@ import (
     "github.com/example/data-kernel/internal/kernelcfg"
     "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/metrics"
-    "github.com/example/data-kernel/internal/supervisor"
+    "github.com/example/data-kernel/internal/data"
+    "github.com/example/data-kernel/internal/protocol"
+    "encoding/json"
 )
 
 type Kernel struct {
 	cfg *kernelcfg.Config
-	ws  *wsServer
     rt  *router
-    inbound chan []byte
+    rd   *data.Redis
 }
 
 func NewKernel(configPath string) (*Kernel, error) {
@@ -32,40 +33,35 @@ func (k *Kernel) Start(ctx context.Context) error {
     defer stopLog()
     logging.Info("kernel_start", logging.F("listen", k.cfg.Server.Listen))
 
-    r, err := newRouter(k.cfg)
+    // Router handles durable persistence (Postgres-first, spill fallback) and optional publish
+    r, err := newRouter(k.cfg, func(ids ...string) {
+        if k.rd == nil || len(ids) == 0 { return }
+        // best-effort ack with short timeout per batch
+        _ = k.rd.Ack(context.Background(), ids...)
+        metrics.RedisAckTotal.Add(float64(len(ids)))
+    })
     if err != nil {
         return err
     }
     k.rt = r
 
-    // Bounded ingest queue for backpressure
-    qsize := k.cfg.Server.IngestQueueSize
-    if qsize <= 0 {
-        qsize = 8192
-    }
-    k.inbound = make(chan []byte, qsize)
-
-    // Start dispatcher goroutine
-    go func() {
-        for {
-            select {
-            case <-ctx.Done():
-                return
-            case msg := <-k.inbound:
-                k.routeRaw(msg)
-            }
-        }
-    }()
-
-    k.ws = newWSServer(k.cfg, k.enqueueRaw)
     mux := http.NewServeMux()
-    mux.Handle("/ws", k.ws)
     mux.Handle("/metrics", metrics.Handler())
+    mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ok")) })
+    mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ready")) })
     server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux}
 
-    // start supervisor for modules
-    sup := supervisor.NewSupervisor(k.cfg.Modules.Dir)
-    _ = sup.Start(ctx)
+    // Start Redis consumer if enabled
+    if k.cfg.Redis.Enabled && k.cfg.Redis.ConsumerEnabled {
+        if rd, err := data.NewRedis(k.cfg.Redis); err == nil {
+            k.rd = rd
+            // best-effort create group
+            _ = k.rd.EnsureGroup(ctx)
+            go k.consumeRedis(ctx)
+        } else {
+            logging.Warn("redis_consumer_init_error", logging.Err(err))
+        }
+    }
 
     go func() {
 		<-ctx.Done()
@@ -81,14 +77,65 @@ func (k *Kernel) Start(ctx context.Context) error {
 }
 
 
-// enqueueRaw attempts to enqueue without blocking; drops when full
-func (k *Kernel) enqueueRaw(msg []byte) {
-    select {
-    case k.inbound <- msg:
-    default:
-        logging.Warn("ingest_drop", logging.F("reason", "queue_full"))
-        // metrics.IngestDropped.Add(1) // avoid import cycle; accounted in WS metrics
+// consumeRedis reads events from Redis Streams and enqueues to router
+func (k *Kernel) consumeRedis(ctx context.Context) {
+    consumer := fmt.Sprintf("%s-%d", "kernel", time.Now().UnixNano())
+    count := k.cfg.Redis.ReadCount
+    if count <= 0 { count = 100 }
+    block := time.Duration(k.cfg.Redis.BlockMs) * time.Millisecond
+    if block <= 0 { block = 5 * time.Second }
+    dlq := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.DLQStream)
+    for ctx.Err() == nil {
+        t0 := time.Now()
+        streams, err := k.rd.ReadBatch(ctx, consumer, count, block)
+        if err != nil {
+            // backoff on errors
+            time.Sleep(500 * time.Millisecond)
+            continue
+        }
+        if len(streams) > 0 { metrics.RedisBatchDuration.Observe(time.Since(t0).Seconds()) }
+        for _, s := range streams {
+            for _, m := range s.Messages {
+                metrics.RedisReadTotal.Add(1)
+                id, payload := data.DecodeEnvelope(m)
+                if len(payload) == 0 {
+                    _ = k.rd.ToDLQ(ctx, dlq, id, []byte("{}"), "empty_payload")
+                    metrics.RedisDLQTotal.Add(1)
+                    _ = k.rd.Ack(ctx, m.ID)
+                    metrics.RedisAckTotal.Add(1)
+                    continue
+                }
+                // validate envelope before routing
+                var env struct{ Version string `json:"version"`; Type string `json:"type"`; ID string `json:"id"`; TS int64 `json:"ts"`; Data json.RawMessage `json:"data"` }
+                if err := json.Unmarshal(payload, &env); err != nil || env.ID == "" || env.Version == "" || env.TS == 0 {
+                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_envelope")
+                    metrics.RedisDLQTotal.Add(1)
+                    _ = k.rd.Ack(ctx, m.ID)
+                    metrics.RedisAckTotal.Add(1)
+                    continue
+                }
+                // route for durable handling; ack will be done after persistence via router callback
+                k.rt.handleRedis(m.ID, protocolEnvelope(env))
+            }
+        }
     }
 }
+
+func prefixed(prefix, key string) string {
+    if prefix == "" { return key }
+    return prefix + key
+}
+
+// protocolEnvelope adapts a lightweight parsed struct into protocol.Envelope
+func protocolEnvelope(e struct{ Version string `json:"version"`; Type string `json:"type"`; ID string `json:"id"`; TS int64 `json:"ts"`; Data json.RawMessage `json:"data"` }) protocol.Envelope {
+    return protocol.Envelope{Version: e.Version, Type: e.Type, ID: e.ID, TS: e.TS, Data: e.Data}
+}
+
+
+
+
+
+
+
 
 

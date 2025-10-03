@@ -8,6 +8,8 @@ import (
 
     "github.com/example/data-kernel/internal/kernelcfg"
     "github.com/jackc/pgx/v5/pgxpool"
+    "github.com/jackc/pgx/v5"
+    "github.com/example/data-kernel/internal/metrics"
 )
 
 type Postgres struct {
@@ -67,6 +69,34 @@ func (p *Postgres) InsertEnvelope(ctx context.Context, id, typ, version string, 
         id, typ, version, ts, source, symbol, data,
     )
     return err
+}
+
+// InsertEnvelopesBatch inserts multiple rows efficiently using CopyFrom.
+func (p *Postgres) InsertEnvelopesBatch(ctx context.Context, rows []EnvelopeRow) error {
+    if p.pool == nil || len(rows) == 0 { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    conn, err := p.pool.Acquire(cctx)
+    if err != nil { return err }
+    defer conn.Release()
+    input := make([][]any, 0, len(rows))
+    for _, r := range rows {
+        input = append(input, []any{r.ID, r.Type, r.Version, r.TS, r.Source, r.Symbol, r.Data})
+    }
+    _, err = conn.Conn().CopyFrom(cctx, pgx.Identifier{"envelopes"}, []string{"msg_id","msg_type","msg_version","msg_ts","source","symbol","data"}, pgx.CopyFromRows(input))
+    if err != nil { metrics.PGErrorsTotal.Inc(); return err }
+    metrics.PGPersistTotal.Add(float64(len(rows)))
+    return nil
+}
+
+type EnvelopeRow struct {
+    ID string
+    Type string
+    Version string
+    TS time.Time
+    Source string
+    Symbol string
+    Data []byte
 }
 
 func (p *Postgres) Close() {

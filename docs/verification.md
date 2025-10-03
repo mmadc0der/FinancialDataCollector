@@ -1,3 +1,13 @@
+## Redis Ingest Verification
+
+1. Create group and push a test event:
+   - `XGROUP CREATE events kernel $ MKSTREAM`
+   - `XADD events * id test payload '{"version":"0.1.0","type":"data","id":"01TEST","ts":1727200000000000,"data":{}}'`
+2. Start kernel and check metrics at `/metrics`:
+   - `kernel_redis_read_total`, `kernel_redis_ack_total` increase
+   - `kernel_pg_batch_size`, `kernel_pg_batch_seconds` present
+3. Check DLQ behavior by pushing malformed payload and verifying `events:dlq`.
+
 ## Verification Pipeline
 
 ### Goals

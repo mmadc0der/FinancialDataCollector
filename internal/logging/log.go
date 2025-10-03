@@ -26,6 +26,10 @@ type Field struct {
 }
 
 func F(key string, value any) Field { return Field{Key: key, Value: value} }
+func Err(err error) Field {
+    if err == nil { return Field{Key: "err", Value: nil} }
+    return Field{Key: "err", Value: err.Error()}
+}
 
 type event struct {
 	TS    int64          `json:"ts"`

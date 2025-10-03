@@ -5,8 +5,6 @@ go 1.23
 toolchain go1.24.2
 
 require (
-	github.com/fsnotify/fsnotify v1.7.0
-	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.5.4
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/redis/go-redis/v9 v9.5.1

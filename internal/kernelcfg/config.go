@@ -9,21 +9,18 @@ import (
 )
 
 type Config struct {
-	Server ServerConfig `yaml:"server"`
-	Sinks  SinksConfig  `yaml:"sinks"`
-	Modules ModulesConfig `yaml:"modules"`
+    Server ServerConfig `yaml:"server"`
+    Sinks  SinksConfig  `yaml:"sinks"`
     Postgres PostgresConfig `yaml:"postgres"`
     Redis RedisConfig `yaml:"redis"`
     Logging LoggingConfig `yaml:"logging"`
+    Spill SpillConfig `yaml:"spill"`
 }
 
 type ServerConfig struct {
 	Listen          string `yaml:"listen"`
-	AuthToken       string `yaml:"auth_token"`
 	MaxMessageBytes int64  `yaml:"max_message_bytes"`
 	ReadTimeoutMs   int    `yaml:"read_timeout_ms"`
-    AllowedOrigins  []string `yaml:"allowed_origins"`
-    WindowSize      int    `yaml:"window_size"`
     IngestQueueSize int    `yaml:"ingest_queue_size"`
 }
 
@@ -39,9 +36,7 @@ type FileSinkConfig struct {
 	Compression   string `yaml:"compression"` // none|gzip
 }
 
-type ModulesConfig struct {
-	Dir string `yaml:"dir"`
-}
+// removed ModulesConfig; modules are external
 
 type PostgresConfig struct {
     Enabled bool `yaml:"enabled"`
@@ -50,6 +45,8 @@ type PostgresConfig struct {
     ConnMaxLifetimeMs int `yaml:"conn_max_lifetime_ms"`
     ApplyMigrations bool `yaml:"apply_migrations"`
     QueueSize int `yaml:"queue_size"`
+    BatchSize int `yaml:"batch_size"`
+    BatchMaxWaitMs int `yaml:"batch_max_wait_ms"`
 }
 
 type RedisConfig struct {
@@ -58,9 +55,26 @@ type RedisConfig struct {
     Username string `yaml:"username"`
     Password string `yaml:"password"`
     DB int `yaml:"db"`
+    KeyPrefix string `yaml:"key_prefix"`
     Stream string `yaml:"stream"`
     MaxLenApprox int64 `yaml:"maxlen_approx"`
     QueueSize int `yaml:"queue_size"`
+    // Ingest (consumer) settings
+    ConsumerEnabled bool   `yaml:"consumer_enabled"`
+    ConsumerGroup   string `yaml:"consumer_group"`
+    ConsumerName    string `yaml:"consumer_name"`
+    ReadCount       int    `yaml:"read_count"`
+    BlockMs         int    `yaml:"block_ms"`
+    DLQStream       string `yaml:"dlq_stream"`
+    // Producer (publisher) feature flag
+    PublishEnabled  bool   `yaml:"publish_enabled"`
+}
+
+type SpillConfig struct {
+    Enabled bool `yaml:"enabled"`
+    Directory string `yaml:"directory"`
+    RotateMB int `yaml:"rotate_mb"`
+    Compression string `yaml:"compression"`
 }
 
 type LoggingConfig struct {
@@ -90,16 +104,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Sinks.File.Directory == "" {
 		cfg.Sinks.File.Directory = "./data"
 	}
-	if cfg.Modules.Dir == "" {
-		cfg.Modules.Dir = "./modules.d"
-	}
     // Env overrides for secrets
-    if v := os.Getenv("KERNEL_AUTH_TOKEN"); v != "" {
-        cfg.Server.AuthToken = v
-    }
-    if v := os.Getenv("KERNEL_AUTH_TOKEN_FILE"); v != "" {
-        if b, err := os.ReadFile(v); err == nil { cfg.Server.AuthToken = strings.TrimSpace(string(b)) }
-    }
     if v := os.Getenv("KERNEL_PG_DSN"); v != "" {
         cfg.Postgres.DSN = v
     }
@@ -112,6 +117,14 @@ func Load(path string) (*Config, error) {
     if v := os.Getenv("KERNEL_REDIS_PASSWORD_FILE"); v != "" {
         if b, err := os.ReadFile(v); err == nil { cfg.Redis.Password = strings.TrimSpace(string(b)) }
     }
+    // Defaults for Redis consumer
+    if cfg.Redis.ConsumerGroup == "" { cfg.Redis.ConsumerGroup = "kernel" }
+    if cfg.Redis.ReadCount <= 0 { cfg.Redis.ReadCount = 100 }
+    if cfg.Redis.BlockMs <= 0 { cfg.Redis.BlockMs = 5000 }
+    if cfg.Redis.DLQStream == "" && cfg.Redis.Stream != "" { cfg.Redis.DLQStream = cfg.Redis.Stream + ":dlq" }
+    // Defaults for Postgres batching
+    if cfg.Postgres.BatchSize <= 0 { cfg.Postgres.BatchSize = 1000 }
+    if cfg.Postgres.BatchMaxWaitMs <= 0 { cfg.Postgres.BatchMaxWaitMs = 200 }
 	return &cfg, nil
 }
 

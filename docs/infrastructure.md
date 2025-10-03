@@ -50,7 +50,7 @@ Create an ACL user with limited permissions for publishing to a stream:
 
 ```bash
 redis-cli <<'REDIS'
-ACL SETUSER data_kernel on >CHANGE_ME_STRONG ~events* +xadd +ping +auth +client
+ACL SETUSER data_kernel on >CHANGE_ME_STRONG ~fdc:* +xadd +ping +auth +client
 SAVE
 REDIS
 ```
@@ -64,6 +64,7 @@ redis:
   username: "data_kernel"
   password: "CHANGE_ME_STRONG"
   db: 0
+  key_prefix: "fdc:"
   stream: "events"
   maxlen_approx: 1000000
 ```
@@ -75,4 +76,6 @@ redis:
 ### Observability
 - Postgres: enable `log_min_duration_statement` for slow queries.
 - Redis: monitor memory and stream trimming.
+- Prometheus: scrape `/metrics` on the kernel (add job in Prometheus config).
+- Grafana: import the dashboard JSON in `docs/grafana/kernel.json`.
 

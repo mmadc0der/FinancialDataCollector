@@ -1,22 +1,17 @@
 server:
   listen: ":7600"
-  auth_token: "devtoken"
   max_message_bytes: 1048576
   read_timeout_ms: 15000
-  allowed_origins: []
-  window_size: 0
   ingest_queue_size: 8192
 
 sinks:
   file:
-    enabled: true
+    enabled: false
     directory: "./data"
     rotate_mb: 512
     rotate_daily: false
     compression: "none"
 
-modules:
-  dir: "./modules.d"
 
 postgres:
   enabled: false
@@ -25,6 +20,8 @@ postgres:
   conn_max_lifetime_ms: 600000
   apply_migrations: true
   queue_size: 1024
+  batch_size: 1000
+  batch_max_wait_ms: 200
 
 redis:
   enabled: false
@@ -32,12 +29,26 @@ redis:
   username: "data_kernel"
   password: "CHANGE_ME_STRONG"
   db: 0
+  key_prefix: "fdc:"
   stream: "events"
   maxlen_approx: 1000000
   queue_size: 2048
+  publish_enabled: false   # publish to Redis from router (feature flag)
+  consumer_enabled: true   # enable kernel consumer of Redis stream
+  consumer_group: "kernel"
+  consumer_name: "kernel-1" # optional; kernel will append timestamp
+  read_count: 100
+  block_ms: 5000
+  dlq_stream: "events:dlq"
 
 logging:
   level: "info"
   buffer: 4096
   output: "stdout"
+
+spill:
+  enabled: true
+  directory: "./spill"
+  rotate_mb: 512
+  compression: "none"
 

@@ -1,9 +1,9 @@
 ## Architecture
 
 ### Components
-- Kernel: core orchestrator. Responsibilities: module supervision, protocol server, routing to sinks, backpressure, config, telemetry.
-- Collector Module: per-broker/exchange adapter. Encapsulates auth, API nuances, rate limits, reconnection, and maps remote payloads to normalized events.
-- Sinks: pluggable outputs (initial: NDJSON file with rotation). Future: Redis Streams, SQLite/WAL, Parquet batcher.
+- Kernel: core orchestrator. Responsibilities: Redis ingest (consumer group), routing to Postgres (primary), spill-to-disk fallback, optional Redis re-publish, backpressure, config, telemetry.
+- Collector Module: external processes publish to Redis Streams; they are not supervised by the kernel.
+- Sinks: Postgres (primary), spill files only on PG outages. Redis Streams is the ingress bus.
 
 ### Data model (normalized event)
 Minimal schema to unify spot/derivatives:
@@ -17,7 +17,7 @@ Minimal schema to unify spot/derivatives:
 - meta: object (module version, region, connection id)
 
 ### Protocol boundary
-- Transport: WebSocket. One connection per module instance. Bidirectional: module->kernel data; kernel->module control.
+- Data-plane: Redis Streams. Modules XADD into `events` (or per-module streams). Kernel consumes via consumer group `kernel`.
 - Message envelope:
   - type: data|heartbeat|control|ack|error
   - version: semver of protocol
@@ -26,13 +26,11 @@ Minimal schema to unify spot/derivatives:
   - data: event or control payload
 
 ### Supervision
-- Each module runs as a separate process. Kernel supervises via a module runner and health pings.
-- Hot-reload: on config change or new binary/script, kernel restarts module with exponential backoff and jitter. Rolling apply: per module instance.
-- Isolation: stdio and WS boundaries; kernel enforces rate limits and message size/time.
+- Not applicable. Modules are external and not managed by the kernel.
 
 ### Resilience/backpressure
-- Kernel maintains bounded queues. When sinks are slow, kernel can drop non-critical events under configured policy (e.g., sample quotes) but never control/heartbeats.
-- Per-connection flow control via credit-based acks (window size N). Module sends up to N unacked messages.
+- Redis Streams provides durable decoupling (at-least-once). Kernel acknowledges messages only after Postgres commit or successful spill write; DLQ on parse/validation errors.
+- Kernel batches to Postgres with backoff; on failures, spills to disk and later replays. Bounded internal queues with drop policy for extreme pressure.
 
 ### Time/ordering
 - Kernel annotates `ts_kernel` on ingest. Ordering is per connection. Cross-connection ordering is best-effort; sinks include connection id.
@@ -42,4 +40,5 @@ Minimal schema to unify spot/derivatives:
 
 ### Observability
 - Structured logging (JSON). Metrics via Prometheus on localhost port. Health endpoints.
+- Key metrics: `kernel_redis_read_total`, `kernel_redis_ack_total`, `kernel_redis_dlq_total`, `kernel_redis_batch_seconds`, `kernel_pg_batch_size`, `kernel_pg_batch_seconds`.
 

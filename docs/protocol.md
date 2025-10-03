@@ -3,11 +3,10 @@
 Version: 0.1.0 (DRAFT)
 
 ### Transport
-- WebSocket over TCP. Optional TLS termination in front proxy. Default: ws://127.0.0.1:7600
-- One connection per module instance. Modules authenticate with static token from config.
+- Data-plane: Redis Streams. Modules publish to `events` with XADD (fields include `payload` as the envelope JSON). Kernel consumes with XREADGROUP and acknowledges after durable write (Postgres or spill).
 
 ### Envelope
-```
+```json
 {
   "version": "0.1.0",
   "type": "data|heartbeat|control|ack|error",
@@ -16,10 +15,10 @@ Version: 0.1.0 (DRAFT)
   "data": { /* payload */ }
 }
 ```
-
+1 `
 ### Data payloads
 - type=data: `kind` field defines event schema.
-```
+```json
 {
   "kind": "trade|quote|orderbook|ohlc|status",
   "source": "binance",
@@ -33,16 +32,17 @@ Version: 0.1.0 (DRAFT)
 ```
 
 ### Heartbeats
-- Module sends heartbeat every `heartbeat_interval_ms`. Kernel replies with `ack` containing last seen id and server time.
+- Not used by the kernel; modules may implement their own health mechanisms.
 
 ### Flow control
-- Windowed acking: Kernel advertises `window_size`. Module may have up to `window_size` unacked messages. Acks may cover ranges via `last_id`.
+- Redis provides buffering. Module can add `MAXLEN ~` at XADD to cap stream length.
+- WS windowed acking applies only to control messages if used.
 
 ### Errors
 - Kernel may return type=error with `code` and `message`. Fatal errors lead to connection close.
 
 ### Control
-- Kernel may send `control` messages: `pause`, `resume`, `reload`, `shutdown`. Modules must respond with `ack` and state.
+- No control-plane from kernel. Modules are decoupled and only push data to Redis.
 
 ### Limits
 - Max message size: configurable (default 1 MiB). Max send rate: configurable (msgs/sec), enforced with 429-like errors.
