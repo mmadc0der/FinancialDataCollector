@@ -41,10 +41,12 @@ func (r *Replayer) Start(ctx context.Context, pg *data.Postgres) {
 func (r *Replayer) replayOnce(ctx context.Context, pg *data.Postgres) error {
     entries, err := os.ReadDir(r.cfg.Directory)
     if err != nil { return err }
+    files := 0
     for _, e := range entries {
         if e.IsDir() { continue }
         name := e.Name()
         if !strings.HasPrefix(name, "spill_") || !strings.HasSuffix(name, ".ndjson") { continue }
+        files++
         path := filepath.Join(r.cfg.Directory, name)
         f, err := os.Open(path)
         if err != nil { continue }
@@ -69,6 +71,7 @@ func (r *Replayer) replayOnce(ctx context.Context, pg *data.Postgres) error {
             _ = os.Remove(path)
         }
     }
+    metrics.SpillFilesGauge.Set(float64(files))
     return nil
 }
 

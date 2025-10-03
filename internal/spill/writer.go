@@ -62,4 +62,12 @@ func (w *Writer) WriteEnvelopes(envs []protocol.Envelope) error {
     return nil
 }
 
+func (w *Writer) Close() error {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    if w.buf != nil { _ = w.buf.Flush() }
+    if w.f != nil { return w.f.Close() }
+    return nil
+}
+
 

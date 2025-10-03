@@ -68,6 +68,12 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
     return r, nil
 }
 
+func (r *router) close() {
+    if r.sp != nil { _ = r.sp.Close() }
+    if r.pg != nil { r.pg.Close() }
+    if r.rd != nil { _ = r.rd.Close() }
+}
+
 // handleRedis enqueues a message coming from Redis for durable processing and optional re-publish
 func (r *router) handleRedis(redisID string, env protocol.Envelope) {
     // Optional publish to Redis stream

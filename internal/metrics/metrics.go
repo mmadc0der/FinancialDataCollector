@@ -22,10 +22,13 @@ var (
     SpillWriteTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_spill_write_total", Help: "Envelopes written to spill"})
     SpillBytesTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_spill_bytes_total", Help: "Bytes written to spill"})
     SpillReplayTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_spill_replay_total", Help: "Envelopes replayed from spill"})
+    RedisPendingGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_redis_pending", Help: "Approx pending messages in consumer group"})
+    RedisStreamLenGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_redis_stream_len", Help: "Approx length of the ingest stream"})
+    SpillFilesGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_spill_files", Help: "Number of spill files on disk"})
 )
 
 func init() {
-    prom.MustRegister(WSConnections, IngestDropped, FileSinkBytes, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal)
+    prom.MustRegister(WSConnections, IngestDropped, FileSinkBytes, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge)
 }
 
 func Handler() http.Handler { return promhttp.Handler() }

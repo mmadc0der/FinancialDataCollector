@@ -12,6 +12,7 @@ import (
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/protocol"
     "encoding/json"
+    "strings"
 )
 
 type Kernel struct {
@@ -64,11 +65,14 @@ func (k *Kernel) Start(ctx context.Context) error {
     }
 
     go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
+        <-ctx.Done()
+        shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        // simple shutdown: stop HTTP, close router resources, close Redis
+        _ = server.Shutdown(shutdownCtx)
+        if k.rt != nil { k.rt.close() }
+        if k.rd != nil { _ = k.rd.Close() }
+    }()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
@@ -94,6 +98,16 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
             continue
         }
         if len(streams) > 0 { metrics.RedisBatchDuration.Observe(time.Since(t0).Seconds()) }
+        // Update stream length and pending approximations (best-effort)
+        if k.rd != nil && k.rd.C() != nil {
+            info, _ := k.rd.C().XInfoStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)).Result()
+            if info.Length > 0 { metrics.RedisStreamLenGauge.Set(float64(info.Length)) }
+            // pending: XINFO GROUPS returns per-group pending
+            groups, _ := k.rd.C().XInfoGroups(ctx, prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)).Result()
+            for _, g := range groups {
+                if strings.EqualFold(g.Name, k.cfg.Redis.ConsumerGroup) { metrics.RedisPendingGauge.Set(float64(g.Pending)) }
+            }
+        }
         for _, s := range streams {
             for _, m := range s.Messages {
                 metrics.RedisReadTotal.Add(1)
