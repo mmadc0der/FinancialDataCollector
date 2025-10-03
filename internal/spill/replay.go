@@ -3,7 +3,6 @@ package spill
 import (
     "bufio"
     "encoding/json"
-    "io/fs"
     "os"
     "path/filepath"
     "strings"

@@ -10,6 +10,7 @@ import (
     "github.com/example/data-kernel/internal/protocol"
     "github.com/example/data-kernel/internal/spill"
     "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/metrics"
 )
 
 type router struct {
@@ -87,15 +88,7 @@ func (r *router) handleRedis(redisID string, env protocol.Envelope) {
     }
 }
 
-func (k *Kernel) routeRaw(msg []byte) {
-    var env protocol.Envelope
-    if err := json.Unmarshal(msg, &env); err != nil {
-        return
-    }
-    if k.rt != nil {
-        k.rt.handle(env)
-    }
-}
+// routeRaw is no longer used for WS; kept for compatibility if needed.
 
 type pgMsg struct { RedisID string; Env protocol.Envelope }
 
