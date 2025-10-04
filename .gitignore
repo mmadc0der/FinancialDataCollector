@@ -21,4 +21,5 @@ config/kernel.yaml
 
 # Data (should be ignored inly in project root)
 /data/
+/spill/
 
