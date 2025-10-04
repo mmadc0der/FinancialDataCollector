@@ -10,6 +10,7 @@ import (
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/jackc/pgx/v5"
     "github.com/example/data-kernel/internal/metrics"
+    "github.com/example/data-kernel/internal/logging"
 )
 
 type Postgres struct {
@@ -37,7 +38,9 @@ func NewPostgres(cfg kernelcfg.PostgresConfig) (*Postgres, error) {
     }
     pg := &Postgres{cfg: cfg, pool: pool}
     if cfg.ApplyMigrations {
-        _ = pg.applyMigrations(context.Background())
+        if err := pg.applyMigrations(context.Background()); err != nil {
+            logging.Error("pg_apply_migrations_error", logging.Err(err))
+        }
     }
     return pg, nil
 }
@@ -46,14 +49,23 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
     if p.pool == nil {
         return errors.New("pg pool nil")
     }
-    b, err := os.ReadFile("migrations/0001_init.sql")
-    if err != nil {
-        return err
+    // 0001
+    if b, err := os.ReadFile("migrations/0001_init.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0001_init.sql"))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        defer cancel()
+        if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
+    } else {
+        logging.Warn("pg_migration_missing", logging.F("file", "0001_init.sql"))
     }
-    cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-    defer cancel()
-    _, err = p.pool.Exec(cctx, string(b))
-    return err
+    // 0002 (optional perf)
+    if b, err := os.ReadFile("migrations/0002_perf.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0002_perf.sql"))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        defer cancel()
+        if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
+    }
+    return nil
 }
 
 func (p *Postgres) InsertEnvelope(ctx context.Context, id, typ, version string, ts time.Time, source, symbol string, data []byte) error {
