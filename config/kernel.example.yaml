@@ -3,7 +3,7 @@ server:
   max_message_bytes: 1048576
   read_timeout_ms: 15000
   ingest_queue_size: 8192
-
+  
 postgres:
   enabled: false
   dsn: "postgres://data_kernel:CHANGE_ME_STRONG@127.0.0.1:5432/data_kernel_db?sslmode=disable"
