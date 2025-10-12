@@ -83,7 +83,7 @@ func (p *Postgres) IngestEventsJSON(ctx context.Context, batch any) error {
     if err != nil { return err }
     cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
     defer cancel()
-    _, err = p.pool.Exec(cctx, `SELECT ingest_events($1::jsonb)`, b)
+    _, err = p.pool.Exec(cctx, `SELECT public.ingest_events($1::jsonb)`, b)
     if err != nil { metrics.PGErrorsTotal.Inc(); return err }
     return nil
 }

@@ -61,12 +61,26 @@ func (r *Replayer) replayOnce(ctx context.Context, pg *data.Postgres) error {
         }
         _ = f.Close()
         if len(envs) == 0 { _ = os.Remove(path); continue }
-        rows := make([]data.EnvelopeRow, 0, len(envs))
+        // Re-ingest via the same database ingest function
+        events := make([]map[string]any, 0, len(envs))
         for _, e := range envs {
-            rows = append(rows, data.EnvelopeRow{ID: e.ID, Type: e.Type, Version: e.Version, TS: time.Unix(0, e.TS), Data: e.Data})
+            var payload map[string]any
+            _ = json.Unmarshal(e.Data, &payload)
+            tags := make([]map[string]string, 0, 2)
+            if s, ok := payload["source"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.source","value":s}) }
+            if s, ok := payload["symbol"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.symbol","value":s}) }
+            events = append(events, map[string]any{
+                "event_id": e.ID,
+                "ts": time.Unix(0, e.TS).UTC().Format(time.RFC3339Nano),
+                "subject_id": nil,
+                "producer_id": nil,
+                "schema_id": nil,
+                "payload": payload,
+                "tags": tags,
+            })
         }
-        if err := pg.InsertEnvelopesBatch(ctx, rows); err == nil {
-            metrics.SpillReplayTotal.Add(float64(len(rows)))
+        if err := pg.IngestEventsJSON(ctx, events); err == nil {
+            metrics.SpillReplayTotal.Add(float64(len(events)))
             _ = os.Remove(path)
         }
     }

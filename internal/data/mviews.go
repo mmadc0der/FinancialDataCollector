@@ -11,12 +11,12 @@ import (
 func RefreshRoutingMaterializedViews(ctx context.Context, pool *pgxpool.Pool, concurrently bool) error {
     if pool == nil { return nil }
     if concurrently {
-        if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY subject_months_mv"); err != nil { return err }
-        if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY tag_months_mv"); err != nil { return err }
+        if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY public.subject_months_mv"); err != nil { return err }
+        if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW CONCURRENTLY public.tag_months_mv"); err != nil { return err }
         return nil
     }
-    if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW subject_months_mv"); err != nil { return err }
-    if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW tag_months_mv"); err != nil { return err }
+    if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW public.subject_months_mv"); err != nil { return err }
+    if _, err := pool.Exec(ctx, "REFRESH MATERIALIZED VIEW public.tag_months_mv"); err != nil { return err }
     return nil
 }
 

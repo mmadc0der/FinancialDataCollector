@@ -129,12 +129,12 @@ func (r *router) pgWorkerBatch() {
         err := r.pg.IngestEventsJSON(context.Background(), events)
         metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
         if err == nil {
-            logging.Info("pg_batch_commit", logging.F("batch_size", len(rows)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
+            logging.Info("pg_batch_commit", logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
             if r.ack != nil { r.ack(redisIDs...) }
             buf = buf[:0]
             return
         }
-        logging.Warn("pg_batch_error", logging.F("err", err.Error()), logging.F("batch_size", len(rows)))
+        logging.Warn("pg_batch_error", logging.F("err", err.Error()), logging.F("batch_size", len(events)))
         // Retry a few times with exponential backoff
         const maxRetries = 3
         backoff := 200 * time.Millisecond
@@ -142,7 +142,7 @@ func (r *router) pgWorkerBatch() {
             time.Sleep(backoff)
             t1 := time.Now()
             if e := r.pg.IngestEventsJSON(context.Background(), events); e == nil {
-                logging.Info("pg_batch_commit_retry", logging.F("attempt", i), logging.F("batch_size", len(rows)), logging.F("duration_ms", time.Since(t1).Milliseconds()))
+                logging.Info("pg_batch_commit_retry", logging.F("attempt", i), logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t1).Milliseconds()))
                 if r.ack != nil { r.ack(redisIDs...) }
                 buf = buf[:0]
                 return
