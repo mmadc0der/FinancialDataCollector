@@ -11,9 +11,7 @@ Core tables:
 - `producers(producer_id uuid, name, schema_id)`
 - `subjects(subject_id uuid, subject_key, attrs jsonb)`
 - `tags(tag_id bigserial, key citext, value citext)`
-- `events(event_id uuid, ts timestamptz, tenant_id uuid NULL, subject_id uuid NULL, producer_id uuid, schema_id uuid, payload jsonb)` partitioned by `ts`
-- `event_tags(event_id uuid, ts timestamptz, tag_id bigint)` partitioned by `ts`
-- `event_index(event_id uuid, ts timestamptz, tenant_id uuid NULL, subject_id uuid NULL, partition_month date generated)`
+- See `docs/database.md` for the canonical schema. Core relations include `schemas`, `producers`, `subjects`, `tags`, `event_index`, partitioned `events`, and partitioned `event_tags`.
 
 Notes:
 - Event IDs are stored as UUID (uuidv7 recommended at the edge). No TEXT IDs.
