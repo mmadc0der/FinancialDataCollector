@@ -3,6 +3,7 @@ package data
 import (
     "context"
     "errors"
+    "encoding/json"
     "os"
     "time"
 
@@ -58,13 +59,32 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
     } else {
         logging.Warn("pg_migration_missing", logging.F("file", "0001_init.sql"))
     }
-    // 0002 (optional perf)
-    if b, err := os.ReadFile("migrations/0002_perf.sql"); err == nil {
-        logging.Info("pg_apply_migration", logging.F("file", "0002_perf.sql"))
+    // 0002 (db features)
+    if b, err := os.ReadFile("migrations/0002_db_features.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0002_db_features.sql"))
         cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
         defer cancel()
         if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
     }
+    // 0003 (developer views)
+    if b, err := os.ReadFile("migrations/0003_dev_views.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0003_dev_views.sql"))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        defer cancel()
+        if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
+    }
+    return nil
+}
+
+// IngestEventsJSON calls the database ingest function with a JSON array payload.
+func (p *Postgres) IngestEventsJSON(ctx context.Context, batch any) error {
+    if p.pool == nil { return nil }
+    b, err := json.Marshal(batch)
+    if err != nil { return err }
+    cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+    defer cancel()
+    _, err = p.pool.Exec(cctx, `SELECT ingest_events($1::jsonb)`, b)
+    if err != nil { metrics.PGErrorsTotal.Inc(); return err }
     return nil
 }
 
@@ -115,6 +135,19 @@ func (p *Postgres) Close() {
     if p.pool != nil {
         p.pool.Close()
     }
+}
+
+// Pool exposes the underlying pgx pool for helper components.
+func (p *Postgres) Pool() *pgxpool.Pool { return p.pool }
+
+// EnsureMonthlyPartitions delegates to the helper using this instance's pool.
+func (p *Postgres) EnsureMonthlyPartitions(ctx context.Context, monthsAhead int) error {
+    return EnsureMonthlyPartitions(ctx, p.pool, monthsAhead)
+}
+
+// RefreshRoutingMaterializedViews delegates to the helper using this pool.
+func (p *Postgres) RefreshRoutingMaterializedViews(ctx context.Context, concurrently bool) error {
+    return RefreshRoutingMaterializedViews(ctx, p.pool, concurrently)
 }
 
 

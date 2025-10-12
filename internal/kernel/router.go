@@ -25,10 +25,13 @@ type router struct {
     // batching
     pgBatchSize int
     pgBatchWait time.Duration
+    // ingest config
+    prodID string
+    schID  string
 }
 
 func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) {
-    r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack}
+    r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack, prodID: cfg.Ingest.ProducerID, schID: cfg.Ingest.SchemaID}
     if cfg.Postgres.Enabled {
         if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
             r.pg = pg
@@ -98,21 +101,32 @@ func (r *router) pgWorkerBatch() {
     defer timer.Stop()
     flush := func() {
         if len(buf) == 0 { return }
-        // Build rows for PG
-        rows := make([]data.EnvelopeRow, 0, len(buf))
+        // Build events array for ingest_events(jsonb)
+        events := make([]map[string]any, 0, len(buf))
         redisIDs := make([]string, 0, len(buf))
         for _, m := range buf {
-            var dataObj map[string]any
-            _ = json.Unmarshal(m.Env.Data, &dataObj)
-            var source, symbol string
-            if s, ok := dataObj["source"].(string); ok { source = s }
-            if s, ok := dataObj["symbol"].(string); ok { symbol = s }
-            rows = append(rows, data.EnvelopeRow{ID: m.Env.ID, Type: m.Env.Type, Version: m.Env.Version, TS: time.Unix(0, m.Env.TS), Source: source, Symbol: symbol, Data: m.Env.Data})
+            var payload map[string]any
+            _ = json.Unmarshal(m.Env.Data, &payload)
+            // derive minimal tags from payload
+            tags := make([]map[string]string, 0, 2)
+            if s, ok := payload["source"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.source","value":s}) }
+            if s, ok := payload["symbol"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.symbol","value":s}) }
+            // build event object
+            ev := map[string]any{
+                "event_id": m.Env.ID,
+                "ts": time.Unix(0, m.Env.TS).UTC().Format(time.RFC3339Nano),
+                "subject_id": nil,
+                "producer_id": r.producerID(),
+                "schema_id": r.schemaID(),
+                "payload": payload,
+                "tags": tags,
+            }
+            events = append(events, ev)
             redisIDs = append(redisIDs, m.RedisID)
         }
-        metrics.PGBatchSize.Observe(float64(len(rows)))
+        metrics.PGBatchSize.Observe(float64(len(events)))
         t0 := time.Now()
-        err := r.pg.InsertEnvelopesBatch(context.Background(), rows)
+        err := r.pg.IngestEventsJSON(context.Background(), events)
         metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
         if err == nil {
             logging.Info("pg_batch_commit", logging.F("batch_size", len(rows)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
@@ -127,7 +141,7 @@ func (r *router) pgWorkerBatch() {
         for i := 1; i <= maxRetries; i++ {
             time.Sleep(backoff)
             t1 := time.Now()
-            if e := r.pg.InsertEnvelopesBatch(context.Background(), rows); e == nil {
+            if e := r.pg.IngestEventsJSON(context.Background(), events); e == nil {
                 logging.Info("pg_batch_commit_retry", logging.F("attempt", i), logging.F("batch_size", len(rows)), logging.F("duration_ms", time.Since(t1).Milliseconds()))
                 if r.ack != nil { r.ack(redisIDs...) }
                 buf = buf[:0]
@@ -137,12 +151,26 @@ func (r *router) pgWorkerBatch() {
             }
             if backoff < 5*time.Second { backoff *= 2 }
         }
-        // Batch failed after retries; try per-row fallback and track failures
+        // Batch failed after retries; try per-row fallback and track failures (still via ingest)
         failed := make([]pgMsg, 0, len(buf))
         succeededIDs := make([]string, 0, len(buf))
-        for i, row := range rows {
-            if e := r.pg.InsertEnvelope(context.Background(), row.ID, row.Type, row.Version, row.TS, row.Source, row.Symbol, row.Data); e != nil {
-                failed = append(failed, buf[i])
+        for i, m := range buf {
+            var payload map[string]any
+            _ = json.Unmarshal(m.Env.Data, &payload)
+            tags := make([]map[string]string, 0, 2)
+            if s, ok := payload["source"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.source","value":s}) }
+            if s, ok := payload["symbol"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.symbol","value":s}) }
+            ev := []map[string]any{{
+                "event_id": m.Env.ID,
+                "ts": time.Unix(0, m.Env.TS).UTC().Format(time.RFC3339Nano),
+                "subject_id": nil,
+                "producer_id": r.producerID(),
+                "schema_id": r.schemaID(),
+                "payload": payload,
+                "tags": tags,
+            }}
+            if e := r.pg.IngestEventsJSON(context.Background(), ev); e != nil {
+                failed = append(failed, m)
             } else {
                 succeededIDs = append(succeededIDs, redisIDs[i])
             }
@@ -189,5 +217,15 @@ func (r *router) rdWorker() {
     for m := range r.rdCh {
         _ = r.rd.XAdd(context.Background(), m.ID, m.Payload)
     }
+}
+
+// helpers to provide producer/schema ids (may return nil to signal missing)
+func (r *router) producerID() any {
+    if r.prodID == "" { return nil }
+    return r.prodID
+}
+func (r *router) schemaID() any {
+    if r.schID == "" { return nil }
+    return r.schID
 }
 

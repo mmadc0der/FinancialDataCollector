@@ -5,23 +5,30 @@
 - Collector Module: external processes publish to Redis Streams; they are not supervised by the kernel.
 - Sinks: Postgres (primary), spill files only on PG outages. Redis Streams is the ingress bus.
 
-### Data model (normalized event)
-Minimal schema to unify spot/derivatives:
-- event_type: quote|trade|orderbook|ohlc|heartbeat|status
-- source: broker/exchange identifier
-- symbol: instrument identifier (e.g., BTC-USD)
-- ts_event: nanosecond epoch of exchange event
-- ts_collector: nanosecond epoch at module
-- ts_kernel: nanosecond epoch at kernel ingest
-- payload: object (type-specific fields). Include sequence numbers when available.
-- meta: object (module version, region, connection id)
+### Data model (normalized, type-agnostic events)
+Core tables:
+- `schemas(schema_id uuid, name, version, body jsonb)`
+- `producers(producer_id uuid, name, schema_id)`
+- `subjects(subject_id uuid, subject_key, attrs jsonb)`
+- `tags(tag_id bigserial, key citext, value citext)`
+- `events(event_id uuid, ts timestamptz, tenant_id uuid NULL, subject_id uuid NULL, producer_id uuid, schema_id uuid, payload jsonb)` partitioned by `ts`
+- `event_tags(event_id uuid, ts timestamptz, tag_id bigint)` partitioned by `ts`
+- `event_index(event_id uuid, ts timestamptz, tenant_id uuid NULL, subject_id uuid NULL, partition_month date generated)`
+
+Notes:
+- Event IDs are stored as UUID (uuidv7 recommended at the edge). No TEXT IDs.
+- Payload is a single JSON object; if raw is in object storage, include its URI inside payload.
+- Tags are normalized via `tags` and `event_tags`.
+
+Incomplete (to be implemented):
+- Producer registration and authentication by tokens, mapping to `producer_id` UUIDs at ingest. Temporary config-based IDs will be removed; do not rely on them.
 
 ### Protocol boundary
 - Data-plane: Redis Streams. Modules XADD into `events` (or per-module streams). Kernel consumes via consumer group `kernel`.
 - Message envelope:
   - type: data|heartbeat|control|ack|error
   - version: semver of protocol
-  - id: ULID of message
+  - id: UUIDv7 of message
   - ts: nanoseconds epoch at sender
   - data: event or control payload
 

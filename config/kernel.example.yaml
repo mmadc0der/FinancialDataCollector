@@ -43,3 +43,9 @@ spill:
   rotate_mb: 512
   compression: "none"
 
+ingest:
+  use_ingest_function: true
+  # Set to your registered producer/schema UUIDs
+  producer_id: "00000000-0000-0000-0000-000000000000"
+  schema_id:   "00000000-0000-0000-0000-000000000000"
+
