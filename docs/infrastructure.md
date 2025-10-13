@@ -32,6 +32,8 @@ psql -h 127.0.0.1 -U data_kernel -d data_kernel_db -W -f migrations/0003_dev_vie
 
 See `docs/database.md` for the schema, ingest function, partitioning helper, stats tables, and dev views.
 
+Start from `config/kernel.example.yaml`: copy it to `config/kernel.yaml` and update values.
+
 Kernel configuration (example):
 
 ```yaml

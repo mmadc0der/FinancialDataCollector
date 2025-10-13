@@ -44,5 +44,5 @@
 
 ### Performance Gates
 - Minimum throughput: 10k msgs/min sustained in local env.
-- Max p99 ingest latency: < 50ms with file sink enabled.
+- Max p99 ingest latency: < 50ms with spill feature enabled.
 

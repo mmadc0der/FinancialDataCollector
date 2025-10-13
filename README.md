@@ -18,8 +18,12 @@ This project provides a resilient, configurable kernel for ingesting high-freque
 
 See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 
+### Quick start
+- Build: `make build` or `go build -o bin/kernel ./cmd/kernel`
+- Copy config: `cp config/kernel.example.yaml config/kernel.yaml` and edit values
+- Run: `./bin/kernel --config ./config/kernel.yaml`
+
 ### Infrastructure setup
 - See `docs/infrastructure.md` for Redis and Postgres setup and configuration.
 - Initial Postgres migration: `migrations/0001_init.sql`.
 
-# FinancialDataCollector

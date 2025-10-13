@@ -44,6 +44,6 @@ Incomplete (to be implemented):
 - `config/kernel.yaml`: server, postgres, redis, logging, spill settings.
 
 ### Observability
-- Structured logging (JSON). Metrics via Prometheus on localhost port. Health endpoints.
+- Structured logging (JSON). Metrics via Prometheus on `/metrics`. Health endpoints at `/healthz` and `/readyz`.
 - Key metrics: `kernel_redis_read_total`, `kernel_redis_ack_total`, `kernel_redis_dlq_total`, `kernel_redis_batch_seconds`, `kernel_pg_batch_size`, `kernel_pg_batch_seconds`.
 

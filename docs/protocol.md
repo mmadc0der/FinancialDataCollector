@@ -15,7 +15,6 @@ Version: 0.1.0 (DRAFT)
   "data": { /* payload */ }
 }
 ```
-1 `
 ### Data payloads
 - type=data: `kind` field defines event schema.
 ```json
@@ -35,8 +34,8 @@ Version: 0.1.0 (DRAFT)
 - Not used by the kernel; modules may implement their own health mechanisms.
 
 ### Flow control
-- Redis provides buffering. Module can add `MAXLEN ~` at XADD to cap stream length.
-- WS windowed acking applies only to control messages if used.
+- Redis provides buffering. Modules may set `MAXLEN ~` on XADD to cap stream length.
+- Kernel acknowledges only after durable persistence (Postgres commit) or successful spill write.
 
 ### Errors
 - Kernel may return type=error with `code` and `message`. Fatal errors lead to connection close.
@@ -45,5 +44,7 @@ Version: 0.1.0 (DRAFT)
 - No control-plane from kernel. Modules are decoupled and only push data to Redis.
 
 ### Limits
-- Max message size: configurable (default 1 MiB). Max send rate: configurable (msgs/sec), enforced with 429-like errors.
+- Max message size: configurable (default 1 MiB).
+- Stream trimming: approximate via Redis `MAXLEN ~` when publishing.
+- No built-in rate limiting in the kernel; producers should self-throttle as needed.
 
