@@ -56,3 +56,12 @@ Version: 0.1.0 (DRAFT)
 - Minimal signed tokens (Ed25519) are supported. Tokens bind to a specific `producer_id` and carry `iss`, `aud`, `exp`, `nbf`, `jti` claims. The kernel validates signature and checks `jti` against the allowlist/blacklist in Postgres. A Redis cache accelerates validation.
 - Include the token via XADD field `token`. Without a valid token, the message is rejected.
 
+### Registration and Refresh (optional)
+- Producers can request registration or token refresh by publishing to `fdc:register` (configurable) with fields:
+  - `pubkey`: OpenSSH public key (text)
+  - `payload`: JSON with metadata (producer hint, contact)
+  - `nonce`: random string
+  - `sig`: base64 signature over `SHA256(payload||"."||nonce)` using the provided `pubkey`
+- If the `pubkey` fingerprint is already approved and bound to a known `producer_id`, the kernel can auto-issue a token.
+- Otherwise, the request is stored as pending for administrator review.
+

@@ -82,6 +82,8 @@ func (k *Kernel) Start(ctx context.Context) error {
             // best-effort create group
             _ = k.rd.EnsureGroup(ctx)
             go k.consumeRedis(ctx)
+            // registration stream consumer (separate goroutine)
+            go k.consumeRegister(ctx)
         } else {
             logging.Warn("redis_consumer_init_error", logging.Err(err))
         }

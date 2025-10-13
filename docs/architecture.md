@@ -24,6 +24,11 @@ Incomplete (to be implemented):
 ### Protocol boundary
 - Data-plane: Redis Streams. Modules XADD into `events` (or per-module streams). Kernel consumes via consumer group `kernel`.
 - Message envelope:
+### Registration flow (optional)
+- Stream: `fdc:register` (configurable). Kernel verifies producer signatures over registration payloads.
+- Known, approved keys: auto-issue tokens (rate-limited) and respond out-of-band (admin reviews available in DB).
+- Unknown keys: create `producer_keys` row in `pending` and `producer_registrations` pending record; admin approval binds fingerprint to `producer_id` and allows issuing.
+
   - type: data|heartbeat|control|ack|error
   - version: semver of protocol
   - id: UUIDv7 of message

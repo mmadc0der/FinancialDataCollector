@@ -80,6 +80,13 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
         defer cancel()
         if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
     }
+    // 0005 (registration)
+    if b, err := os.ReadFile("migrations/0005_registration.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0005_registration.sql"))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        defer cancel()
+        if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
+    }
     return nil
 }
 

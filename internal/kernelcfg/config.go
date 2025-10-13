@@ -48,6 +48,7 @@ type RedisConfig struct {
     DB int `yaml:"db"`
     KeyPrefix string `yaml:"key_prefix"`
     Stream string `yaml:"stream"`
+    RegisterStream string `yaml:"register_stream"`
     MaxLenApprox int64 `yaml:"maxlen_approx"`
     QueueSize int `yaml:"queue_size"`
     // Ingest (consumer) settings
@@ -91,6 +92,7 @@ type AuthConfig struct {
     PrivateKey string `yaml:"private_key"`
     // Admin endpoint shared token for management actions
     AdminToken string `yaml:"admin_token"`
+    AdminSSHCA  string `yaml:"admin_ssh_ca"` // OpenSSH CA public key (text)
     // Cache and clock skew
     CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
     SkewSeconds int `yaml:"skew_seconds"`
