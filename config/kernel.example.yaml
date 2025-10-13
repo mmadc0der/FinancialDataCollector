@@ -23,6 +23,7 @@ redis:
   key_prefix: "fdc:"
   stream: "events"
   register_stream: "register"
+  register_resp_stream: "register:resp"
   maxlen_approx: 1000000
   queue_size: 2048
   publish_enabled: false   # publish to Redis from router (feature flag)
@@ -61,7 +62,6 @@ auth:
     kid-1: "<BASE64_PUBLIC_KEY>"
   # Private key is optional, only needed for issuing tokens via admin API
   private_key: "<BASE64_PRIVATE_KEY>"
-  admin_token: "CHANGE_ME_ADMIN"
   admin_ssh_ca: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLE_CA_PUBKEY comment"
   cache_ttl_seconds: 300
   skew_seconds: 60

@@ -246,4 +246,15 @@ func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload,
     return err
 }
 
+// ApproveProducerKey approves a fingerprint, optionally creating a new producer, and returns the producer_id
+func (p *Postgres) ApproveProducerKey(ctx context.Context, fingerprint, name, schemaID, reviewer, notes string) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    var pid string
+    err := p.pool.QueryRow(cctx, `SELECT public.approve_producer_key($1,$2,$3::uuid,$4,$5)`, fingerprint, name, schemaID, reviewer, notes).Scan(&pid)
+    if err != nil { return "", err }
+    return pid, nil
+}
+
 

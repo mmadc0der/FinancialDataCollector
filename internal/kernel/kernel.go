@@ -53,9 +53,10 @@ func (k *Kernel) Start(ctx context.Context) error {
     mux.Handle("/metrics", metrics.Handler())
     mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ok")) })
     mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ready")) })
-    // Admin: minimal endpoints to issue/revoke tokens if enabled
+    // Admin: pending/approve/revoke endpoints if enabled
     if k.cfg.Auth.Enabled {
-        mux.HandleFunc("/admin/issue", k.handleIssueToken)
+        mux.HandleFunc("/admin/pending", k.handleListPending)
+        mux.HandleFunc("/admin/approve", k.handleApprove)
         mux.HandleFunc("/admin/revoke", k.handleRevokeToken)
     }
     server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux}

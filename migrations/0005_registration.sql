@@ -23,3 +23,66 @@ CREATE TABLE IF NOT EXISTS public.producer_registrations (
     reviewer TEXT
 );
 
+-- Enforce DB-backed nonce uniqueness per fingerprint
+DO $$ BEGIN IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='idx_producer_registrations_fp_nonce'
+) THEN
+    EXECUTE 'CREATE UNIQUE INDEX idx_producer_registrations_fp_nonce ON public.producer_registrations(fingerprint, nonce)';
+END IF; END $$;
+
+-- Approve a producer key and optionally create a producer, binding the key to it
+-- Returns the bound/created producer_id
+CREATE OR REPLACE FUNCTION public.approve_producer_key(
+    _fingerprint TEXT,
+    _name TEXT,
+    _schema_id UUID,
+    _reviewer TEXT,
+    _notes TEXT
+) RETURNS UUID LANGUAGE plpgsql AS $$
+DECLARE v_producer_id UUID;
+BEGIN
+    IF _fingerprint IS NULL OR length(_fingerprint) = 0 THEN
+        RAISE EXCEPTION 'fingerprint required';
+    END IF;
+    -- Key must exist and not be revoked
+    IF NOT EXISTS (SELECT 1 FROM public.producer_keys WHERE fingerprint = _fingerprint) THEN
+        RAISE EXCEPTION 'unknown fingerprint %', _fingerprint;
+    END IF;
+    IF EXISTS (SELECT 1 FROM public.producer_keys WHERE fingerprint = _fingerprint AND status = 'revoked') THEN
+        RAISE EXCEPTION 'fingerprint revoked %', _fingerprint;
+    END IF;
+    -- Use existing producer if already bound
+    SELECT producer_id INTO v_producer_id FROM public.producer_keys WHERE fingerprint = _fingerprint;
+    IF v_producer_id IS NULL THEN
+        IF _schema_id IS NULL THEN
+            RAISE EXCEPTION 'schema_id required to create producer';
+        END IF;
+        IF _name IS NULL OR length(_name) = 0 THEN
+            RAISE EXCEPTION 'producer name required to create producer';
+        END IF;
+        v_producer_id := gen_random_uuid();
+        INSERT INTO public.producers(producer_id, name, description, schema_id)
+        VALUES (v_producer_id, _name, COALESCE(_notes, ''), _schema_id);
+    END IF;
+    UPDATE public.producer_keys
+    SET producer_id = v_producer_id,
+        status = 'approved',
+        approved_at = now(),
+        notes = COALESCE(_notes, notes)
+    WHERE fingerprint = _fingerprint;
+    UPDATE public.producer_registrations
+    SET status = 'approved',
+        reviewed_at = now(),
+        reviewer = NULLIF(_reviewer, '')
+    WHERE fingerprint = _fingerprint AND status = 'pending';
+    RETURN v_producer_id;
+END;
+$$;
+
+-- Auto-issue rate limiting (one per hour per fingerprint)
+CREATE TABLE IF NOT EXISTS public.producer_auto_issues (
+    fingerprint TEXT NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (fingerprint, window_start)
+);
+

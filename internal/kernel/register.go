@@ -56,7 +56,14 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                 if err == nil {
                     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
-                            // Try raw message verification
+                            // Canonicalize payload JSON deterministically
+                            var tmp any
+                            if json.Unmarshal([]byte(payloadStr), &tmp) == nil {
+                                if cb, err := json.Marshal(tmp); err == nil {
+                                    payloadStr = string(cb)
+                                }
+                            }
+                            // Verify over exact canonical bytes
                             msg := []byte(payloadStr + "." + nonce)
                             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                             if decErr != nil {
@@ -64,12 +71,6 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                             }
                             if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) {
                                 validSig = true
-                            } else {
-                                // Fallback: verify over SHA256 digest if producers sign digests
-                                h := sha256.Sum256(msg)
-                                if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, h[:], sigBytes) {
-                                    validSig = true
-                                }
                             }
                         }
                     }
@@ -90,9 +91,17 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                         }
                     }
                     if allow {
-                        if tok, _, _, err := k.au.Issue(ctx, *producerID, time.Hour, "auto-refresh"); err == nil {
+                        if tok, _, _, err := k.au.Issue(ctx, *producerID, time.Hour, "auto-refresh", fp); err == nil {
                             logging.Info("register_auto_issue", logging.F("fingerprint", fp))
-                            _ = tok // future: respond to a stream
+                            // respond on register response stream if configured
+                            if k.cfg.Redis.RegisterRespStream != "" && k.rd != nil && k.rd.C() != nil {
+                                _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{
+                                    Stream: prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterRespStream),
+                                    MaxLen: k.cfg.Redis.MaxLenApprox,
+                                    Approx: true,
+                                    Values: map[string]any{"fingerprint": fp, "token": tok},
+                                }).Err()
+                            }
                         }
                     }
                 }

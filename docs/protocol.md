@@ -59,10 +59,12 @@ Version: 0.1.0 (DRAFT)
 ### Registration and Refresh (optional)
 - Producers can request registration or token refresh by publishing to `fdc:register` (configurable) with fields:
   - `pubkey`: OpenSSH public key (text)
-  - `payload`: JSON with metadata (producer hint, contact)
+  - `payload`: canonical JSON string (RFC8785 or sorted-keys compact form)
   - `nonce`: random string
-  - `sig`: base64 signature over `SHA256(payload||"."||nonce)` using the provided `pubkey`
-- If the `pubkey` fingerprint is already approved and bound to a known `producer_id`, the kernel can auto-issue a token.
+  - `sig`: base64 signature over `payload + "." + nonce` using the provided `pubkey` (payload must be canonicalized)
+ - If the `pubkey` fingerprint is already approved and bound to a known `producer_id`, the kernel can auto-issue a token.
 - Otherwise, the request is stored as pending for administrator review.
+ - Admin flow: `GET /admin/pending` for list, `POST /admin/approve` binds key, creates a `producer` if needed (UUIDv4 generated SQL-side), and issues a token.
+ - Optional response stream: if configured, kernel publishes `{fingerprint, token}` to `register_resp_stream` on auto-issue.
  - Anti-replay: nonces are cached with TTL; duplicate nonces are rejected.
 

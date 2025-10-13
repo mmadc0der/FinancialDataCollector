@@ -57,13 +57,15 @@ type claims struct {
     Nbf int64  `json:"nbf"`
     Exp int64  `json:"exp"`
     Jti string `json:"jti"`
+    Fp  string `json:"fp,omitempty"`
 }
 
 func b64url(b []byte) string { return base64.RawStdEncoding.EncodeToString(b) }
 func parseB64(s string) ([]byte, error) { return base64.RawStdEncoding.DecodeString(s) }
 
 // Issue signs a token for a producer (if private key configured) and records JTI.
-func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Duration, notes string) (string, string, time.Time, error) {
+// Optionally binds the token to a producer key fingerprint (fp).
+func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Duration, notes string, fp string) (string, string, time.Time, error) {
     if len(v.priv) == 0 {
         return "", "", time.Time{}, errors.New("issuer private key not configured")
     }
@@ -71,7 +73,7 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
     exp := now.Add(ttl)
     jti := ulid.Make().String()
     hdr := header{Alg: "EdDSA", Kid: v.cfg.KeyID, Typ: "FDC"}
-    cl := claims{Iss: v.cfg.Issuer, Aud: v.cfg.Audience, Sub: producerID, Iat: now.Unix(), Nbf: now.Unix() - int64(v.cfg.SkewSeconds), Exp: exp.Unix(), Jti: jti}
+    cl := claims{Iss: v.cfg.Issuer, Aud: v.cfg.Audience, Sub: producerID, Iat: now.Unix(), Nbf: now.Unix() - int64(v.cfg.SkewSeconds), Exp: exp.Unix(), Jti: jti, Fp: fp}
     hb, _ := json.Marshal(hdr)
     cb, _ := json.Marshal(cl)
     signing := b64url(hb) + "." + b64url(cb)
@@ -79,6 +81,13 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
     tok := signing + "." + b64url(sig)
     if v.pg != nil {
         _ = v.pg.InsertProducerToken(ctx, producerID, jti, exp, notes)
+    }
+    // cache JTI in Redis for fast validation
+    if v.rd != nil && v.rd.C() != nil {
+        ttlSeconds := int(exp.Sub(now).Seconds())
+        if ttlSeconds > 0 {
+            _ = v.rd.C().Set(ctx, "auth:jti:"+jti, producerID+"|"+fp, time.Duration(ttlSeconds)*time.Second).Err()
+        }
     }
     return tok, jti, exp, nil
 }
@@ -109,15 +118,42 @@ func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, erro
     if c.Iss != v.cfg.Issuer || c.Aud != v.cfg.Audience { return "", "", errors.New("bad_issuer_audience") }
     if c.Nbf > now+int64(v.cfg.SkewSeconds) { return "", "", errors.New("token_not_yet_valid") }
     if c.Exp < now-int64(v.cfg.SkewSeconds) { return "", "", errors.New("token_expired") }
+    // Redis cache: fast revoke check
+    if v.rd != nil && v.rd.C() != nil {
+        if ok, _ := v.rd.C().Exists(ctx, "revoked:jti:"+c.Jti).Result(); ok > 0 {
+            return "", "", errors.New("token_revoked")
+        }
+        if s, _ := v.rd.C().Get(ctx, "auth:jti:"+c.Jti).Result(); s != "" {
+            // Optionally validate producer_id match
+            if idx := strings.IndexByte(s, '|'); idx > 0 {
+                pid := s[:idx]
+                if pid == c.Sub { return c.Sub, c.Jti, nil }
+            } else if s == c.Sub {
+                return c.Sub, c.Jti, nil
+            }
+        }
+    }
     if v.pg == nil { return "", "", errors.New("auth_db_disabled") }
     ok, prod := v.pg.TokenExists(ctx, c.Jti)
     if !ok || prod != c.Sub { return "", "", errors.New("unknown_or_mismatched_token") }
     if v.pg.IsTokenRevoked(ctx, c.Jti) { return "", "", errors.New("token_revoked") }
+    // Cache allow in Redis for remaining TTL
+    if v.rd != nil && v.rd.C() != nil {
+        ttl := time.Until(time.Unix(c.Exp, 0))
+        if ttl > 0 {
+            _ = v.rd.C().Set(ctx, "auth:jti:"+c.Jti, c.Sub+"|"+c.Fp, ttl).Err()
+        }
+    }
     return c.Sub, c.Jti, nil
 }
 
 func (v *Verifier) Revoke(ctx context.Context, jti, reason string) error {
     if v.pg == nil { return errors.New("auth_db_disabled") }
-    return v.pg.RevokeToken(ctx, jti, reason)
+    if err := v.pg.RevokeToken(ctx, jti, reason); err != nil { return err }
+    if v.rd != nil && v.rd.C() != nil {
+        _ = v.rd.C().Set(ctx, "revoked:jti:"+jti, 1, 30*24*time.Hour).Err()
+        _ = v.rd.C().Del(ctx, "auth:jti:"+jti).Err()
+    }
+    return nil
 }
 

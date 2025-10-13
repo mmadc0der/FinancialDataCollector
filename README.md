@@ -25,9 +25,10 @@ See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 
 ### Authentication (optional)
 - Configure `auth` in `config/kernel.yaml` (issuer, audience, Ed25519 keys). When enabled, producers must include a `token` field on XADD.
-- Admin endpoints:
-  - Issue token: `POST /admin/issue` with header `X-Admin-Token` and body `{"producer_id":"<uuid>","ttl_seconds":86400}`
-  - Revoke token: `POST /admin/revoke` with header `X-Admin-Token` and body `{"jti":"<token_id>","reason":"..."}`
+ - Admin endpoints:
+   - List pending registrations: `GET /admin/pending`
+   - Approve fingerprint and issue token: `POST /admin/approve` with body `{"fingerprint":"...","name":"...","schema_id":"...","ttl_seconds":86400}`
+   - Revoke token: `POST /admin/revoke` with body `{"jti":"<token_id>","reason":"..."}`
   - Production hardening: send OpenSSH cert in `X-SSH-Cert` with principal in `X-SSH-Principal` signed by configured CA.
 
 ### Infrastructure setup

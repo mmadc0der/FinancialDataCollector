@@ -24,8 +24,8 @@
   - `sig`: base64 signature over `SHA256(payload||"."||nonce)` using the corresponding `pubkey`'s private key
 
 ### Verification Steps
-1. Parse and canonicalize `payload` (raw string ok); concatenate `payload + "." + nonce`.
-2. Compute SHA256 digest; verify signature with the provided `pubkey`.
+1. Canonicalize `payload` JSON to a deterministic string; concatenate `payload + "." + nonce`.
+2. Verify signature with the provided `pubkey` over that exact byte sequence.
 3. Derive fingerprint (SHA256 over public key bytes, base64) and upsert into `producer_keys` if new (pending).
 4. Create `producer_registrations` row with status `pending`.
 5. If `producer_keys.status=approved` and `producer_id` set, auto-issue a token (short TTL) and mark registration `auto_issued`.
@@ -34,7 +34,7 @@
 ### Admin Workflow
 - Admin reviews pending registrations, approves key and assigns/binds `producer_id`.
 - Admin can issue long-lived tokens via `/admin/issue` and revoke via `/admin/revoke`.
-- Admin requests must be authenticated with OpenSSH certificates signed by a configured CA (PoC: stubbed; fallback header `X-Admin-Token`).
+- Admin requests must be authenticated with OpenSSH certificates signed by a configured CA.
 
 ### Security Audit & Risks
 - Replay of registration messages: mitigated by nonce and storing recent nonces per fingerprint (future improvement: add `producer_registrations(nonce UNIQUE)` or TTL cache). Implemented best-effort Redis `SETNX reg:nonce:<fp>:<nonce>` with 1h TTL.
