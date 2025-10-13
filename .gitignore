@@ -1,3 +1,22 @@
+# Binaries
+bin/
+dist/
+
+# OS/editor
+.vscode/
+
+# Go build cache
+*.test
+coverage.out
+
+# Local configs: ignore all *config.yaml except *example.yaml
+*config.yaml
+!*example.yaml
+
+# SSH identities (kernel and producers)
+ssh/
+modules.d/**/ssh/
+
 # Go
 bin/
 dist/
