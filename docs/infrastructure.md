@@ -22,13 +22,15 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO da
 SQL
 ```
 
-Initial migration (table `envelopes` to store normalized protocol envelopes): see `migrations/0001_init.sql`.
-
-Apply migration:
+Apply migrations (idempotent; safe to re-run in order):
 
 ```bash
 psql -h 127.0.0.1 -U data_kernel -d data_kernel_db -W -f migrations/0001_init.sql | cat
+psql -h 127.0.0.1 -U data_kernel -d data_kernel_db -W -f migrations/0002_db_features.sql | cat
+psql -h 127.0.0.1 -U data_kernel -d data_kernel_db -W -f migrations/0003_dev_views.sql | cat
 ```
+
+See `docs/database.md` for the schema, ingest function, partitioning helper, stats tables, and dev views.
 
 Kernel configuration (example):
 

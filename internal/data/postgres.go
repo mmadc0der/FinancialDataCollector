@@ -76,6 +76,11 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
     return nil
 }
 
+// ApplyMigrations runs the SQL migration files in order. Safe to call multiple times.
+func (p *Postgres) ApplyMigrations(ctx context.Context) error {
+    return p.applyMigrations(ctx)
+}
+
 // IngestEventsJSON calls the database ingest function with a JSON array payload.
 func (p *Postgres) IngestEventsJSON(ctx context.Context, batch any) error {
     if p.pool == nil { return nil }
