@@ -7,12 +7,14 @@ import (
     "encoding/json"
     "errors"
     "fmt"
+    "os"
     "strings"
     "time"
 
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
     ulid "github.com/oklog/ulid/v2"
+    ssh "golang.org/x/crypto/ssh"
 )
 
 type Verifier struct {
@@ -27,18 +29,39 @@ type Verifier struct {
 
 func NewVerifier(cfg kernelcfg.AuthConfig, pg *data.Postgres, rd *data.Redis) (*Verifier, error) {
     v := &Verifier{cfg: cfg, pg: pg, rd: rd, cacheTTL: time.Duration(cfg.CacheTTLSeconds) * time.Second, skew: time.Duration(cfg.SkewSeconds) * time.Second}
-    v.pub = make(map[string]ed25519.PublicKey, len(cfg.PublicKeys))
+    v.pub = make(map[string]ed25519.PublicKey, len(cfg.PublicKeys)+len(cfg.PublicKeysSSH))
     for kid, b64 := range cfg.PublicKeys {
         pk, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(b64))
         if err != nil { return nil, fmt.Errorf("invalid public key for %s: %w", kid, err) }
         if len(pk) != ed25519.PublicKeySize { return nil, fmt.Errorf("public key %s wrong size", kid) }
         v.pub[kid] = ed25519.PublicKey(pk)
     }
+    for kid, line := range cfg.PublicKeysSSH {
+        pub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(strings.TrimSpace(line)))
+        if err != nil { return nil, fmt.Errorf("invalid ssh public key for %s: %w", kid, err) }
+        if cp, ok := pub.(ssh.CryptoPublicKey); ok {
+            if ed, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(ed) == ed25519.PublicKeySize {
+                v.pub[kid] = ed
+            } else { return nil, fmt.Errorf("ssh public key for %s not ed25519", kid) }
+        } else { return nil, fmt.Errorf("ssh public key for %s not crypto", kid) }
+    }
     if cfg.PrivateKey != "" {
         sk, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(cfg.PrivateKey))
         if err != nil { return nil, fmt.Errorf("invalid private key: %w", err) }
         if len(sk) != ed25519.PrivateKeySize { return nil, errors.New("private key wrong size") }
         v.priv = ed25519.PrivateKey(sk)
+    } else if cfg.PrivateKeyFile != "" {
+        pem, err := os.ReadFile(cfg.PrivateKeyFile)
+        if err != nil { return nil, fmt.Errorf("read private_key_file: %w", err) }
+        // Try parsing OpenSSH or PEM with golang.org/x/crypto/ssh
+        if s, err := ssh.ParseRawPrivateKey(pem); err == nil {
+            switch k := s.(type) {
+            case ed25519.PrivateKey:
+                if len(k) == ed25519.PrivateKeySize { v.priv = k } else { return nil, errors.New("ed25519 private key wrong size") }
+            default:
+                return nil, errors.New("unsupported private key type (need ed25519)")
+            }
+        } else { return nil, fmt.Errorf("parse private_key_file: %w", err) }
     }
     return v, nil
 }

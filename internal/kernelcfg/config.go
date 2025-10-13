@@ -85,7 +85,12 @@ type AuthConfig struct {
     // Base64 (raw) Ed25519 keys; private optional (only needed to issue tokens)
     PublicKeys map[string]string `yaml:"public_keys"`
     PrivateKey string `yaml:"private_key"`
+    // Alternative key sources
+    PrivateKeyFile string            `yaml:"private_key_file"`   // path to PEM/OpenSSH private key (ed25519)
+    PublicKeysSSH  map[string]string `yaml:"public_keys_ssh"`   // kid -> OpenSSH public key lines
     AdminSSHCA  string `yaml:"admin_ssh_ca"` // OpenSSH CA public key (text)
+    ProducerSSHCA string `yaml:"producer_ssh_ca"` // OpenSSH CA public key for producers (text)
+    ProducerCertRequired bool `yaml:"producer_cert_required"`
     // Cache and clock skew
     CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
     SkewSeconds int `yaml:"skew_seconds"`
@@ -136,6 +141,7 @@ func Load(path string) (*Config, error) {
         if cfg.Auth.CacheTTLSeconds <= 0 { cfg.Auth.CacheTTLSeconds = 300 }
         if cfg.Auth.SkewSeconds <= 0 { cfg.Auth.SkewSeconds = 60 }
         if !cfg.Auth.RequireToken { cfg.Auth.RequireToken = true }
+        if cfg.Auth.ProducerSSHCA != "" && !cfg.Auth.ProducerCertRequired { cfg.Auth.ProducerCertRequired = true }
     }
 	return &cfg, nil
 }

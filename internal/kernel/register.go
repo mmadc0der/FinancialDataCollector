@@ -4,6 +4,7 @@ import (
     "context"
     "crypto/ed25519"
     "crypto/sha256"
+    "bytes"
     "encoding/base64"
     "encoding/json"
     "errors"
@@ -50,10 +51,17 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                         continue
                     }
                 }
-                // Parse SSH public key and support Ed25519 verification
+                // Parse SSH public key and support Ed25519 verification; if producer_cert_required, enforce cert signed by ProducerSSHCA
                 parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
                 validSig := false
                 if err == nil {
+                    // If certificate required, unwrap cert and check CA
+                    if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
+                        caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+                        if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
+                            parsedPub = cert.Key
+                        } else { parsedPub = nil }
+                    }
                     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
                             // Canonicalize payload JSON deterministically
