@@ -3,7 +3,10 @@
 Version: 0.1.0 (DRAFT)
 
 ### Transport
-- Data-plane: Redis Streams. Modules publish to `events` with XADD (fields include `payload` as the envelope JSON). Kernel consumes with XREADGROUP and acknowledges after durable write (Postgres or spill).
+- Data-plane: Redis Streams. Modules publish to `events` with XADD. Fields:
+  - `payload`: the envelope JSON
+  - `token`: producer auth token (required when auth is enabled)
+  Kernel consumes with XREADGROUP and acknowledges after durable write (Postgres or spill).
 
 ### Envelope
 ```json
@@ -36,6 +39,7 @@ Version: 0.1.0 (DRAFT)
 ### Flow control
 - Redis provides buffering. Modules may set `MAXLEN ~` on XADD to cap stream length.
 - Kernel acknowledges only after durable persistence (Postgres commit) or successful spill write.
+ - Unauthenticated or invalid messages are written to DLQ with reason `unauthenticated`.
 
 ### Errors
 - Kernel may return type=error with `code` and `message`. Fatal errors lead to connection close.
@@ -47,4 +51,8 @@ Version: 0.1.0 (DRAFT)
 - Max message size: configurable (default 1 MiB).
 - Stream trimming: approximate via Redis `MAXLEN ~` when publishing.
 - No built-in rate limiting in the kernel; producers should self-throttle as needed.
+
+### Authentication (optional)
+- Minimal signed tokens (Ed25519) are supported. Tokens bind to a specific `producer_id` and carry `iss`, `aud`, `exp`, `nbf`, `jti` claims. The kernel validates signature and checks `jti` against the allowlist/blacklist in Postgres. A Redis cache accelerates validation.
+- Include the token via XADD field `token`. Without a valid token, the message is rejected.
 

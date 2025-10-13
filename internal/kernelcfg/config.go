@@ -15,6 +15,7 @@ type Config struct {
     Logging LoggingConfig `yaml:"logging"`
     Spill SpillConfig `yaml:"spill"`
     Ingest IngestConfig `yaml:"ingest"`
+    Auth   AuthConfig   `yaml:"auth"`
 }
 
 type ServerConfig struct {
@@ -79,6 +80,22 @@ type LoggingConfig struct {
     Output string `yaml:"output"`
 }
 
+type AuthConfig struct {
+    Enabled bool `yaml:"enabled"`
+    RequireToken bool `yaml:"require_token"`
+    Issuer string `yaml:"issuer"`
+    Audience string `yaml:"audience"`
+    KeyID string `yaml:"key_id"`
+    // Base64 (raw) Ed25519 keys; private optional (only needed to issue tokens)
+    PublicKeys map[string]string `yaml:"public_keys"`
+    PrivateKey string `yaml:"private_key"`
+    // Admin endpoint shared token for management actions
+    AdminToken string `yaml:"admin_token"`
+    // Cache and clock skew
+    CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
+    SkewSeconds int `yaml:"skew_seconds"`
+}
+
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -122,6 +139,12 @@ func Load(path string) (*Config, error) {
     // defaults for ingest
     // UseIngestFunction defaults to true for new model
     if !cfg.Ingest.UseIngestFunction { cfg.Ingest.UseIngestFunction = true }
+    // Defaults for auth
+    if cfg.Auth.Enabled {
+        if cfg.Auth.CacheTTLSeconds <= 0 { cfg.Auth.CacheTTLSeconds = 300 }
+        if cfg.Auth.SkewSeconds <= 0 { cfg.Auth.SkewSeconds = 60 }
+        if !cfg.Auth.RequireToken { cfg.Auth.RequireToken = true }
+    }
 	return &cfg, nil
 }
 

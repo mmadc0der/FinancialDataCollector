@@ -1,7 +1,7 @@
 ## Architecture
 
 ### Components
-- Kernel: core orchestrator. Responsibilities: Redis ingest (consumer group), routing to Postgres (primary), spill-to-disk fallback, optional Redis re-publish, backpressure, config, telemetry.
+- Kernel: core orchestrator. Responsibilities: Redis ingest (consumer group), routing to Postgres (primary), spill-to-disk fallback, optional Redis re-publish, backpressure, config, telemetry, optional auth for producers.
 - Collector Module: external processes publish to Redis Streams; they are not supervised by the kernel.
 - Sinks: Postgres (primary), spill files only on PG outages. Redis Streams is the ingress bus.
 
@@ -42,8 +42,10 @@ Incomplete (to be implemented):
 
 ### Configuration
 - `config/kernel.yaml`: server, postgres, redis, logging, spill settings.
+  - `auth`: optional auth configuration (issuer, audience, Ed25519 keys, admin token, cache TTL).
 
 ### Observability
 - Structured logging (JSON). Metrics via Prometheus on `/metrics`. Health endpoints at `/healthz` and `/readyz`.
 - Key metrics: `kernel_redis_read_total`, `kernel_redis_ack_total`, `kernel_redis_dlq_total`, `kernel_redis_batch_seconds`, `kernel_pg_batch_size`, `kernel_pg_batch_seconds`.
+  - Auth: `kernel_auth_denied_total` increments on rejected unauthenticated messages.
 

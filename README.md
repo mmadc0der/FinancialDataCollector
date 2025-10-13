@@ -23,6 +23,12 @@ See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 - Copy config: `cp config/kernel.example.yaml config/kernel.yaml` and edit values
 - Run: `./bin/kernel --config ./config/kernel.yaml`
 
+### Authentication (optional)
+- Configure `auth` in `config/kernel.yaml` (issuer, audience, Ed25519 keys). When enabled, producers must include a `token` field on XADD.
+- Admin endpoints:
+  - Issue token: `POST /admin/issue` with header `X-Admin-Token` and body `{"producer_id":"<uuid>","ttl_seconds":86400}`
+  - Revoke token: `POST /admin/revoke` with header `X-Admin-Token` and body `{"jti":"<token_id>","reason":"..."}`
+
 ### Infrastructure setup
 - See `docs/infrastructure.md` for Redis and Postgres setup and configuration.
 - Initial Postgres migration: `migrations/0001_init.sql`.

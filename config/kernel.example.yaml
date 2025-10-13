@@ -49,3 +49,18 @@ ingest:
   producer_id: "00000000-0000-0000-0000-000000000000"
   schema_id:   "00000000-0000-0000-0000-000000000000"
 
+auth:
+  enabled: true
+  require_token: true
+  issuer: "fdc-kernel"
+  audience: "fdc-events"
+  key_id: "kid-1"
+  # Public verification keys by key id (base64 raw Ed25519 public key)
+  public_keys:
+    kid-1: "<BASE64_PUBLIC_KEY>"
+  # Private key is optional, only needed for issuing tokens via admin API
+  private_key: "<BASE64_PRIVATE_KEY>"
+  admin_token: "CHANGE_ME_ADMIN"
+  cache_ttl_seconds: 300
+  skew_seconds: 60
+

@@ -11,6 +11,7 @@ import (
     "github.com/example/data-kernel/internal/metrics"
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/protocol"
+    "github.com/example/data-kernel/internal/auth"
     "encoding/json"
     "strings"
 )
@@ -19,6 +20,8 @@ type Kernel struct {
 	cfg *kernelcfg.Config
     rt  *router
     rd   *data.Redis
+    pg   *data.Postgres
+    au   *auth.Verifier
 }
 
 func NewKernel(configPath string) (*Kernel, error) {
@@ -50,7 +53,27 @@ func (k *Kernel) Start(ctx context.Context) error {
     mux.Handle("/metrics", metrics.Handler())
     mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ok")) })
     mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ready")) })
+    // Admin: minimal endpoints to issue/revoke tokens if enabled
+    if k.cfg.Auth.Enabled {
+        mux.HandleFunc("/admin/issue", k.handleIssueToken)
+        mux.HandleFunc("/admin/revoke", k.handleRevokeToken)
+    }
     server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux}
+
+    // Initialize Postgres (for auth + ingest)
+    if k.cfg.Postgres.Enabled {
+        if pg, err := data.NewPostgres(k.cfg.Postgres); err == nil {
+            k.pg = pg
+        } else {
+            logging.Warn("postgres_init_error", logging.Err(err))
+        }
+    }
+    // Auth verifier
+    if k.cfg.Auth.Enabled {
+        v, err := auth.NewVerifier(k.cfg.Auth, k.pg, k.rd)
+        if err != nil { return err }
+        k.au = v
+    }
 
     // Start Redis consumer if enabled
     if k.cfg.Redis.Enabled && k.cfg.Redis.ConsumerEnabled {
@@ -72,6 +95,7 @@ func (k *Kernel) Start(ctx context.Context) error {
         _ = server.Shutdown(shutdownCtx)
         if k.rt != nil { k.rt.close() }
         if k.rd != nil { _ = k.rd.Close() }
+        if k.pg != nil { k.pg.Close() }
     }()
 
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -111,13 +135,23 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
         for _, s := range streams {
             for _, m := range s.Messages {
                 metrics.RedisReadTotal.Add(1)
-                id, payload := data.DecodeEnvelope(m)
+                id, payload, token := data.DecodeEnvelope(m)
                 if len(payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, []byte("{}"), "empty_payload")
                     metrics.RedisDLQTotal.Add(1)
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
                     continue
+                }
+                // Authenticate producer if required
+                if k.au != nil && k.cfg.Auth.RequireToken {
+                    if _, _, err := k.au.Verify(ctx, token); err != nil {
+                        metrics.AuthDeniedTotal.Inc()
+                        _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
+                        _ = k.rd.Ack(ctx, m.ID)
+                        metrics.RedisAckTotal.Add(1)
+                        continue
+                    }
                 }
                 // validate envelope before routing
                 var env struct{ Version string `json:"version"`; Type string `json:"type"`; ID string `json:"id"`; TS int64 `json:"ts"`; Data json.RawMessage `json:"data"` }

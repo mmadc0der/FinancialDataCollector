@@ -83,3 +83,8 @@ redis:
 - Prometheus: scrape `/metrics` on the kernel (add job in Prometheus config).
 - Grafana: import the dashboard JSON in `docs/grafana/kernel.json`.
 
+### Authentication setup (optional)
+- Generate Ed25519 keypair; encode keys as base64 (raw).
+- Configure `auth` block in `config/kernel.yaml` with issuer/audience, `public_keys` map, and `admin_token`.
+- Use `POST /admin/issue` to mint tokens for registered `producers` and `POST /admin/revoke` to blacklist.
+
