@@ -1,14 +1,13 @@
 package kernel
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"net"
-	"net/http"
-	"time"
+    "bytes"
+    "context"
+    "encoding/json"
+    "net/http"
+    "time"
 
-	ssh "golang.org/x/crypto/ssh"
+    ssh "golang.org/x/crypto/ssh"
 )
 
 type approveRequest struct {
@@ -96,15 +95,10 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
 			if err == nil && caPub != nil {
 				certPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(certHeader))
 				if err == nil {
-					if cert, ok := certPub.(*ssh.Certificate); ok {
-						checker := ssh.CertChecker{ HostKeyFallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
-							if ssh.KeysEqual(key, caPub) { return nil }
-							return fmt.Errorf("unauthorized")
-						} }
-						if err := checker.CheckCert(principal, cert); err == nil {
-							return true
-						}
-					}
+                    if cert, ok := certPub.(*ssh.Certificate); ok {
+                        checker := ssh.CertChecker{ IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), caPub.Marshal()) } }
+                        if err := checker.CheckCert(principal, cert); err == nil { return true }
+                    }
 				}
 			}
 		}

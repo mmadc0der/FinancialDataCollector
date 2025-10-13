@@ -11,7 +11,6 @@ import (
     "time"
 
     "github.com/example/data-kernel/internal/logging"
-    "github.com/example/data-kernel/internal/data"
     "github.com/redis/go-redis/v9"
     ssh "golang.org/x/crypto/ssh"
 )
@@ -29,7 +28,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
     stream := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterStream)
     consumer := fmt.Sprintf("%s-reg-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {
-        res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second})
+        res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
         if err != nil && !errors.Is(err, redis.Nil) {
             time.Sleep(200 * time.Millisecond)
             continue
