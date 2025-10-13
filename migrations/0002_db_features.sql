@@ -23,14 +23,14 @@ DO $$ BEGIN IF NOT EXISTS (
     FROM pg_matviews
     WHERE schemaname = 'public'
         AND matviewname = 'subject_months_mv'
-) THEN EXECUTE $$CREATE MATERIALIZED VIEW public.subject_months_mv AS
+) THEN EXECUTE $mv$CREATE MATERIALIZED VIEW public.subject_months_mv AS
 SELECT ei.subject_id,
     date_trunc('month', ei.ts)::date AS partition_month,
     COUNT(*) AS event_count
 FROM public.event_index ei
 WHERE ei.subject_id IS NOT NULL
 GROUP BY ei.subject_id,
-    date_trunc('month', ei.ts)::date $$;
+    date_trunc('month', ei.ts)::date $mv$;
 EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_subject_months_mv_pk ON public.subject_months_mv (subject_id, partition_month)';
 END IF;
 END $$;
@@ -39,13 +39,13 @@ DO $$ BEGIN IF NOT EXISTS (
     FROM pg_matviews
     WHERE schemaname = 'public'
         AND matviewname = 'tag_months_mv'
-) THEN EXECUTE $$CREATE MATERIALIZED VIEW public.tag_months_mv AS
+) THEN EXECUTE $mv$CREATE MATERIALIZED VIEW public.tag_months_mv AS
 SELECT et.tag_id,
     et.partition_month AS partition_month,
     COUNT(*) AS event_count
 FROM public.event_tags et
 GROUP BY et.tag_id,
-    et.partition_month $$;
+    et.partition_month $mv$;
 EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS idx_tag_months_mv_pk ON public.tag_months_mv (tag_id, partition_month)';
 END IF;
 END $$;
