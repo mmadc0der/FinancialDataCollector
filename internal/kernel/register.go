@@ -82,18 +82,12 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                 regReason := ""
                 if !validSig { regStatus = "invalid_sig"; regReason = "signature_verification_failed" }
                 _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, regStatus, regReason, "")
-                if validSig && exists && status == "approved" && producerID != nil && k.au != nil {
-                    // Auto-issue with simple rate limit (1 per hour per fingerprint)
-                    allow := true
-                    if k.rd != nil && k.rd.C() != nil {
-                        if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "reg:auto:"+fp), 1, time.Hour).Result(); !ok {
-                            allow = false
-                        }
-                    }
-                    if allow {
-                        if tok, _, _, err := k.au.Issue(ctx, *producerID, time.Hour, "auto-refresh", fp); err == nil {
+                if validSig && exists && status == "approved" && producerID != nil && k.au != nil && k.pg != nil {
+                    // Atomically gate via DB and record token metadata
+                    tok, jti, exp, err := k.au.Issue(ctx, *producerID, time.Hour, "auto-refresh", fp)
+                    if err == nil {
+                        if pid, perr := k.pg.TryAutoIssueAndRecord(ctx, fp, jti, exp, "auto-refresh"); perr == nil && pid != "" {
                             logging.Info("register_auto_issue", logging.F("fingerprint", fp))
-                            // respond on register response stream if configured
                             if k.cfg.Redis.RegisterRespStream != "" && k.rd != nil && k.rd.C() != nil {
                                 _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{
                                     Stream: prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterRespStream),

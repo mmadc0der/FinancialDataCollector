@@ -246,6 +246,18 @@ func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload,
     return err
 }
 
+// TryAutoIssueAndRecord performs atomic rate gating and records token metadata, returning producer_id or empty
+func (p *Postgres) TryAutoIssueAndRecord(ctx context.Context, fingerprint, jti string, expiresAt time.Time, notes string) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    var pid *string
+    err := p.pool.QueryRow(cctx, `SELECT public.try_auto_issue_and_record($1,$2,$3,$4)`, fingerprint, jti, expiresAt, notes).Scan(&pid)
+    if err != nil { return "", err }
+    if pid == nil { return "", nil }
+    return *pid, nil
+}
+
 // ApproveProducerKey approves a fingerprint, optionally creating a new producer, and returns the producer_id
 func (p *Postgres) ApproveProducerKey(ctx context.Context, fingerprint, name, schemaID, reviewer, notes string) (string, error) {
     if p.pool == nil { return "", nil }

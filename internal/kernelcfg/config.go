@@ -14,7 +14,6 @@ type Config struct {
     Redis RedisConfig `yaml:"redis"`
     Logging LoggingConfig `yaml:"logging"`
     Spill SpillConfig `yaml:"spill"`
-    Ingest IngestConfig `yaml:"ingest"`
     Auth   AuthConfig   `yaml:"auth"`
 }
 
@@ -68,12 +67,6 @@ type SpillConfig struct {
     Directory string `yaml:"directory"`
     RotateMB int `yaml:"rotate_mb"`
     Compression string `yaml:"compression"`
-}
-
-type IngestConfig struct {
-    UseIngestFunction bool   `yaml:"use_ingest_function"`
-    ProducerID        string `yaml:"producer_id"`       // UUID string
-    SchemaID          string `yaml:"schema_id"`         // UUID string
 }
 
 type LoggingConfig struct {
@@ -137,9 +130,6 @@ func Load(path string) (*Config, error) {
     // Defaults for Postgres batching
     if cfg.Postgres.BatchSize <= 0 { cfg.Postgres.BatchSize = 1000 }
     if cfg.Postgres.BatchMaxWaitMs <= 0 { cfg.Postgres.BatchMaxWaitMs = 200 }
-    // defaults for ingest
-    // UseIngestFunction defaults to true for new model
-    if !cfg.Ingest.UseIngestFunction { cfg.Ingest.UseIngestFunction = true }
     // Defaults for auth
     if cfg.Auth.Enabled {
         if cfg.Auth.CacheTTLSeconds <= 0 { cfg.Auth.CacheTTLSeconds = 300 }

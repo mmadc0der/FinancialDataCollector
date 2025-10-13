@@ -25,13 +25,13 @@ type router struct {
     // batching
     pgBatchSize int
     pgBatchWait time.Duration
-    // ingest config
+    // ingest config (removed static producer/schema ids; derive if needed from payload in DB)
     prodID string
     schID  string
 }
 
 func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) {
-    r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack, prodID: cfg.Ingest.ProducerID, schID: cfg.Ingest.SchemaID}
+    r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack}
     if cfg.Postgres.Enabled {
         if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
             r.pg = pg
