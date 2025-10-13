@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS event_index (
     event_id UUID PRIMARY KEY,
     ts TIMESTAMPTZ NOT NULL,
     subject_id UUID,
-    partition_month DATE GENERATED ALWAYS AS (date_trunc('month', ts)::date) STORED
+    partition_month DATE GENERATED ALWAYS AS (date_trunc('month', (ts AT TIME ZONE 'UTC'))::date) STORED
 );
 CREATE INDEX IF NOT EXISTS idx_event_index_brin_ts ON event_index USING BRIN (ts);
 CREATE INDEX IF NOT EXISTS idx_event_index_subject_month ON event_index (subject_id, partition_month);
