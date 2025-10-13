@@ -51,8 +51,8 @@
 - Replace shared admin token with mandatory OpenSSH certificate verification middleware.
 
 ### PoC Implementation Status
-- DB migrations added (`0005_registration.sql`).
+- DB migrations added (`0005_registration.sql`, `0006_extensions.sql`).
 - Config extended for `redis.register_stream` and `auth.admin_ssh_ca`.
-- Kernel spawns register consumer stub; logs init.
-- Admin endpoints exist; verification via CA not yet implemented (stubbed).
+- Kernel register consumer implemented (ingests messages, records pending, auto-issues for approved keys).
+- Admin endpoints exist; SSH CA verification stub via `isAdmin` with fallback header.
 - Protocol and architecture docs updated to reflect flows.

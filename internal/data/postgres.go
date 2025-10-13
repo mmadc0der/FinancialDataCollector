@@ -87,6 +87,13 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
         defer cancel()
         if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
     }
+    // 0006 (extensions)
+    if b, err := os.ReadFile("migrations/0006_extensions.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0006_extensions.sql"))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        defer cancel()
+        if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
+    }
     return nil
 }
 
@@ -207,6 +214,43 @@ func (p *Postgres) IsTokenRevoked(ctx context.Context, jti string) bool {
     var exists bool
     _ = p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.revoked_tokens WHERE jti=$1)`, jti).Scan(&exists)
     return exists
+}
+
+// Registration helpers
+func (p *Postgres) UpsertProducerKey(ctx context.Context, fingerprint, pubkey string) error {
+    if p.pool == nil { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    _, err := p.pool.Exec(cctx,
+        `INSERT INTO public.producer_keys(fingerprint, pubkey, status)
+         VALUES ($1, $2, 'pending')
+         ON CONFLICT (fingerprint) DO UPDATE SET pubkey = EXCLUDED.pubkey WHERE public.producer_keys.pubkey <> EXCLUDED.pubkey`,
+        fingerprint, pubkey,
+    )
+    return err
+}
+
+func (p *Postgres) GetProducerKey(ctx context.Context, fingerprint string) (exists bool, status string, producerID *string) {
+    if p.pool == nil { return false, "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    var pid *string
+    var st string
+    err := p.pool.QueryRow(cctx, `SELECT status, producer_id FROM public.producer_keys WHERE fingerprint=$1`, fingerprint).Scan(&st, &pid)
+    if err != nil { return false, "", nil }
+    return true, st, pid
+}
+
+func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload, sig, nonce, status, reason, reviewer string) error {
+    if p.pool == nil { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    _, err := p.pool.Exec(cctx,
+        `INSERT INTO public.producer_registrations(reg_id, fingerprint, payload, sig, nonce, status, reason, reviewed_at, reviewer)
+         VALUES (gen_random_uuid(), $1, $2::jsonb, $3, $4, $5, NULLIF($6,''), CASE WHEN $7<>'' THEN now() ELSE NULL END, NULLIF($7,''))`,
+        fingerprint, payload, sig, nonce, status, reason, reviewer,
+    )
+    return err
 }
 
 

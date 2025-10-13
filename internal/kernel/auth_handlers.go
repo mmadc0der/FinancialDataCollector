@@ -13,7 +13,7 @@ type issueRequest struct {
 }
 
 func (k *Kernel) handleIssueToken(w http.ResponseWriter, r *http.Request) {
-    if k.au == nil || r.Method != http.MethodPost || r.Header.Get("X-Admin-Token") != k.cfg.Auth.AdminToken {
+    if k.au == nil || r.Method != http.MethodPost || !k.isAdmin(r) {
         w.WriteHeader(http.StatusUnauthorized)
         return
     }
@@ -31,7 +31,7 @@ func (k *Kernel) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
-    if k.au == nil || r.Method != http.MethodPost || r.Header.Get("X-Admin-Token") != k.cfg.Auth.AdminToken {
+    if k.au == nil || r.Method != http.MethodPost || !k.isAdmin(r) {
         w.WriteHeader(http.StatusUnauthorized)
         return
     }
@@ -45,4 +45,13 @@ func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
         return
     }
     w.WriteHeader(http.StatusNoContent)
+}
+
+// isAdmin verifies admin via OpenSSH CA cert headers (PoC: falls back to X-Admin-Token)
+func (k *Kernel) isAdmin(r *http.Request) bool {
+    // TODO: parse and verify SSH certificate from headers against k.cfg.Auth.AdminSSHCA
+    if k.cfg.Auth.AdminToken != "" && r.Header.Get("X-Admin-Token") == k.cfg.Auth.AdminToken {
+        return true
+    }
+    return false
 }
