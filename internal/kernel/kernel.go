@@ -166,6 +166,13 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     metrics.RedisAckTotal.Add(1)
                     continue
                 }
+                // handle control plane ops (e.g., ensure_schema_subject)
+                if env.Type == "control" {
+                    _ = k.rd.Ack(ctx, m.ID)
+                    metrics.RedisAckTotal.Add(1)
+                    _ = k.handleControl(ctx, m.ID, protocolEnvelopeLite{Version: env.Version, Type: env.Type, ID: env.ID, TS: env.TS, Data: env.Data}, payload)
+                    continue
+                }
                 // route for durable handling; ack will be done after persistence via router callback
                 k.rt.handleRedis(m.ID, protocolEnvelope(env))
             }

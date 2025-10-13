@@ -24,6 +24,7 @@ redis:
   stream: "events"
   register_stream: "register"
   register_resp_stream: "register:resp"
+  control_resp_stream: "control:resp"
   maxlen_approx: 1000000
   queue_size: 2048
   publish_enabled: false   # publish to Redis from router (feature flag)

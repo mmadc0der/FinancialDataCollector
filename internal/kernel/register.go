@@ -11,6 +11,7 @@ import (
     "time"
 
     "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/data"
     "github.com/redis/go-redis/v9"
     ssh "golang.org/x/crypto/ssh"
 )
@@ -93,7 +94,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                                     Stream: prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterRespStream),
                                     MaxLen: k.cfg.Redis.MaxLenApprox,
                                     Approx: true,
-                                    Values: map[string]any{"fingerprint": fp, "token": tok},
+                                    Values: map[string]any{"fingerprint": fp, "token": tok, "producer_id": pid},
                                 }).Err()
                             }
                         }

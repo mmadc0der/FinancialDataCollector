@@ -64,6 +64,11 @@ func main() {
     _, err = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": opensshPub, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result()
     if err != nil { log.Fatal(err) }
 
+    // request schema+subject provisioning via control message
+    ctrl := map[string]any{"version":"0.1.0","type":"control","id":"CTRL1","ts": time.Now().UnixNano(), "data": map[string]any{"op":"ensure_schema_subject","name":"demo_schema","version":1,"body": map[string]any{"fields":["a","b"]}, "subject_key":"DEMO-1","attrs": map[string]any{"region":"eu"}}}
+    ctrlB, _ := json.Marshal(ctrl)
+    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id":"CTRL1","payload": string(ctrlB)}}).Result()
+
     // periodically send demo events (without token for simplicity)
     interval := time.Duration(cfg.Producer.SendIntervalMs) * time.Millisecond
     if interval <= 0 { interval = time.Second }

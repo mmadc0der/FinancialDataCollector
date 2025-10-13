@@ -49,6 +49,7 @@ type RedisConfig struct {
     Stream string `yaml:"stream"`
     RegisterStream string `yaml:"register_stream"`
     RegisterRespStream string `yaml:"register_resp_stream"`
+    ControlRespStream string `yaml:"control_resp_stream"`
     MaxLenApprox int64 `yaml:"maxlen_approx"`
     QueueSize int `yaml:"queue_size"`
     // Ingest (consumer) settings
