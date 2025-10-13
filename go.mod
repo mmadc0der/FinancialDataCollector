@@ -9,6 +9,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/prometheus/client_golang v1.19.0
 	github.com/redis/go-redis/v9 v9.5.1
+	golang.org/x/crypto v0.17.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -24,7 +25,6 @@ require (
 	github.com/prometheus/common v0.48.0 // indirect
 	github.com/prometheus/procfs v0.12.0 // indirect
 	github.com/rogpeppe/go-internal v1.14.1 // indirect
-	golang.org/x/crypto v0.17.0 // indirect
 	golang.org/x/sync v0.3.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
