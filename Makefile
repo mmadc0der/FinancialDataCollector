@@ -1,4 +1,4 @@
-.PHONY: all build run test lint fmt clean
+.PHONY: all build run test lint fmt clean producer
 
 APP:=kernel
 BIN:=bin/$(APP)
@@ -11,6 +11,9 @@ build:
 
 run: build
 	./$(BIN) --config ./config/kernel.yaml | cat
+
+producer:
+	go run ./modules.d/producer-example
 
 test:
 	go test -race -cover ./...

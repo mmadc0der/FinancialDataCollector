@@ -1,0 +1,14 @@
+redis:
+  addr: "127.0.0.1:6379"
+  username: "data_kernel"
+  password: "CHANGE_ME_STRONG"
+  db: 0
+  key_prefix: "fdc:"
+  register_stream: "register"
+  events_stream: "events"
+
+producer:
+  name: "demo-producer"
+  contact: "demo@example.com"
+  send_interval_ms: 1000
+

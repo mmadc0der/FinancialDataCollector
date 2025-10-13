@@ -22,6 +22,7 @@ See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 - Build: `make build` or `go build -o bin/kernel ./cmd/kernel`
 - Copy config: `cp config/kernel.example.yaml config/kernel.yaml` and edit values
 - Run: `./bin/kernel --config ./config/kernel.yaml`
+ - Example producer: `go run ./cmd/producer-example --redis 127.0.0.1:6379 --prefix fdc:`
 
 ### Authentication (optional)
 - Configure `auth` in `config/kernel.yaml` (issuer, audience, Ed25519 keys). When enabled, producers must include a `token` field on XADD.
