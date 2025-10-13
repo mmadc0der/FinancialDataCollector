@@ -48,6 +48,8 @@ func (k *Kernel) Start(ctx context.Context) error {
         return err
     }
     k.rt = r
+    // Share Postgres instance from router to avoid duplicate initialization/migrations
+    if r != nil { k.pg = r.pg }
 
     mux := http.NewServeMux()
     mux.Handle("/metrics", metrics.Handler())
@@ -62,14 +64,6 @@ func (k *Kernel) Start(ctx context.Context) error {
     }
     server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux}
 
-    // Initialize Postgres (for auth + ingest)
-    if k.cfg.Postgres.Enabled {
-        if pg, err := data.NewPostgres(k.cfg.Postgres); err == nil {
-            k.pg = pg
-        } else {
-            logging.Warn("postgres_init_error", logging.Err(err))
-        }
-    }
     // Auth verifier
     if k.cfg.Auth.Enabled {
         v, err := auth.NewVerifier(k.cfg.Auth, k.pg, k.rd)
