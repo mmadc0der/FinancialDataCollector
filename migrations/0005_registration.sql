@@ -49,7 +49,6 @@ END IF; END $$;
 CREATE OR REPLACE FUNCTION public.approve_producer_key(
     _fingerprint TEXT,
     _name TEXT,
-    _schema_id UUID,
     _reviewer TEXT,
     _notes TEXT
 ) RETURNS UUID LANGUAGE plpgsql AS $$
@@ -68,15 +67,12 @@ BEGIN
     -- Use existing producer if already bound
     SELECT producer_id INTO v_producer_id FROM public.producer_keys WHERE fingerprint = _fingerprint;
     IF v_producer_id IS NULL THEN
-        IF _schema_id IS NULL THEN
-            RAISE EXCEPTION 'schema_id required to create producer';
-        END IF;
         IF _name IS NULL OR length(_name) = 0 THEN
             RAISE EXCEPTION 'producer name required to create producer';
         END IF;
         v_producer_id := gen_random_uuid();
-        INSERT INTO public.producers(producer_id, name, description, schema_id)
-        VALUES (v_producer_id, _name, COALESCE(_notes, ''), _schema_id);
+        INSERT INTO public.producers(producer_id, name, description)
+        VALUES (v_producer_id, _name, COALESCE(_notes, ''));
     END IF;
     UPDATE public.producer_keys
     SET producer_id = v_producer_id,
