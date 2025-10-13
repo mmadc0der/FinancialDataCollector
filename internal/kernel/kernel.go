@@ -56,6 +56,7 @@ func (k *Kernel) Start(ctx context.Context) error {
     // Admin: pending/approve/revoke endpoints if enabled
     if k.cfg.Auth.Enabled {
         mux.HandleFunc("/admin/pending", k.handleListPending)
+        mux.HandleFunc("/auth", k.handleAuthOverview)
         mux.HandleFunc("/admin/approve", k.handleApprove)
         mux.HandleFunc("/admin/revoke", k.handleRevokeToken)
     }

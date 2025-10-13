@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS producers (
     producer_id UUID PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     description TEXT,
-    schema_id UUID NOT NULL REFERENCES schemas(schema_id),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     disabled_at TIMESTAMPTZ
 );
@@ -27,6 +26,19 @@ CREATE TABLE IF NOT EXISTS subjects (
     attrs JSONB NOT NULL DEFAULT '{}'::jsonb,
     first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- M:N relationships
+CREATE TABLE IF NOT EXISTS producer_subjects (
+    producer_id UUID NOT NULL REFERENCES producers(producer_id),
+    subject_id UUID NOT NULL REFERENCES subjects(subject_id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (producer_id, subject_id)
+);
+CREATE TABLE IF NOT EXISTS subject_schemas (
+    subject_id UUID NOT NULL REFERENCES subjects(subject_id),
+    schema_id UUID NOT NULL REFERENCES schemas(schema_id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (subject_id, schema_id)
 );
 CREATE TABLE IF NOT EXISTS tags (
     tag_id BIGSERIAL PRIMARY KEY,
@@ -105,6 +117,56 @@ DO $$ BEGIN IF NOT EXISTS (
 ) THEN EXECUTE 'ALTER TABLE public.events ADD CONSTRAINT fk_events_event_index FOREIGN KEY (event_id) REFERENCES public.event_index(event_id) NOT DEFERRABLE';
 END IF;
 END $$;
+
+-- Helper to atomically ensure schema (by name/version) and subject (by subject_key)
+CREATE OR REPLACE FUNCTION public.ensure_schema_subject(
+    _name TEXT,
+    _version INT,
+    _body JSONB,
+    _subject_key TEXT,
+    _attrs JSONB
+) RETURNS TABLE(schema_id UUID, subject_id UUID) LANGUAGE plpgsql AS $$
+DECLARE v_schema_id UUID;
+DECLARE v_subject_id UUID;
+BEGIN
+    IF _name IS NULL OR _version IS NULL THEN RAISE EXCEPTION 'schema name/version required'; END IF;
+    IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required'; END IF;
+    -- upsert schema by (name,version)
+    INSERT INTO public.schemas(schema_id, name, version, body)
+    VALUES (gen_random_uuid(), _name, _version, COALESCE(_body, '{}'::jsonb))
+    ON CONFLICT (name, version) DO UPDATE SET body = EXCLUDED.body
+    RETURNING schema_id INTO v_schema_id;
+    -- upsert subject by subject_key
+    INSERT INTO public.subjects(subject_id, subject_key, attrs)
+    VALUES (gen_random_uuid(), _subject_key, COALESCE(_attrs, '{}'::jsonb))
+    ON CONFLICT (subject_key) DO UPDATE SET attrs = COALESCE(EXCLUDED.attrs, subjects.attrs), last_seen_at = now()
+    RETURNING subject_id INTO v_subject_id;
+    schema_id := v_schema_id;
+    subject_id := v_subject_id;
+    RETURN;
+END;
+$$;
+
+-- Helper to bind producer to subject (M:N) by subject_key
+CREATE OR REPLACE FUNCTION public.ensure_producer_subject(
+    _producer_id UUID,
+    _subject_key TEXT
+) RETURNS UUID LANGUAGE plpgsql AS $$
+DECLARE v_subject_id UUID;
+BEGIN
+    IF _producer_id IS NULL THEN RAISE EXCEPTION 'producer_id required'; END IF;
+    IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required'; END IF;
+    SELECT subject_id INTO v_subject_id FROM public.subjects WHERE subject_key=_subject_key;
+    IF v_subject_id IS NULL THEN
+        v_subject_id := gen_random_uuid();
+        INSERT INTO public.subjects(subject_id, subject_key, attrs) VALUES (v_subject_id, _subject_key, '{}'::jsonb)
+        ON CONFLICT (subject_key) DO UPDATE SET last_seen_at=now() RETURNING subject_id INTO v_subject_id;
+    END IF;
+    INSERT INTO public.producer_subjects(producer_id, subject_id) VALUES (_producer_id, v_subject_id)
+    ON CONFLICT (producer_id, subject_id) DO NOTHING;
+    RETURN v_subject_id;
+END;
+$$;
 DO $$ BEGIN IF NOT EXISTS (
     SELECT 1
     FROM pg_constraint c

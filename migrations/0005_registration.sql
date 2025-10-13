@@ -10,6 +10,20 @@ CREATE TABLE IF NOT EXISTS public.producer_keys (
     notes TEXT
 );
 
+-- View to list known producers and key statuses
+CREATE OR REPLACE VIEW public.producer_overview AS
+SELECT pk.fingerprint,
+       pk.status,
+       pk.created_at,
+       pk.approved_at,
+       pk.revoked_at,
+       p.producer_id,
+       p.name,
+       p.description,
+       p.created_at AS producer_created_at
+FROM public.producer_keys pk
+LEFT JOIN public.producers p ON p.producer_id = pk.producer_id;
+
 CREATE TABLE IF NOT EXISTS public.producer_registrations (
     reg_id UUID PRIMARY KEY,
     fingerprint TEXT NOT NULL REFERENCES public.producer_keys(fingerprint),

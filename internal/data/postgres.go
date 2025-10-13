@@ -169,6 +169,17 @@ func (p *Postgres) RefreshRoutingMaterializedViews(ctx context.Context, concurre
     return RefreshRoutingMaterializedViews(ctx, p.pool, concurrently)
 }
 
+// EnsureSchemaSubject calls SQL helper to create or fetch schema and subject
+func (p *Postgres) EnsureSchemaSubject(ctx context.Context, name string, version int, body []byte, subjectKey string, attrs []byte) (string, string, error) {
+    if p.pool == nil { return "", "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    var schemaID, subjectID string
+    err := p.pool.QueryRow(cctx, `SELECT schema_id, subject_id FROM public.ensure_schema_subject($1,$2,$3::jsonb,$4,$5::jsonb)`, name, version, string(body), subjectKey, string(attrs)).Scan(&schemaID, &subjectID)
+    if err != nil { return "", "", err }
+    return schemaID, subjectID, nil
+}
+
 // Auth helpers
 func (p *Postgres) InsertProducerToken(ctx context.Context, producerID, jti string, exp time.Time, notes string) error {
     if p.pool == nil { return nil }

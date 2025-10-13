@@ -5,8 +5,10 @@ Normalized event storage with monthly partitioning and a canonical index for rou
 
 ### Core Tables
 - `public.schemas(schema_id uuid primary key, name text, version int, body jsonb, status text, created_at timestamptz)`
-- `public.producers(producer_id uuid primary key, name text unique, description text, schema_id uuid fk, created_at timestamptz, disabled_at timestamptz)`
+- `public.producers(producer_id uuid primary key, name text unique, description text, created_at timestamptz, disabled_at timestamptz)`
 - `public.subjects(subject_id uuid primary key, subject_key text unique, attrs jsonb, first_seen_at timestamptz, last_seen_at timestamptz)`
+- `public.producer_subjects(producer_id uuid, subject_id uuid, primary key(producer_id, subject_id))`
+- `public.subject_schemas(subject_id uuid, schema_id uuid, primary key(subject_id, schema_id))`
 - `public.tags(tag_id bigserial primary key, key citext, value citext, unique(key, value))`
 - `public.event_index(event_id uuid primary key, ts timestamptz not null, subject_id uuid null, partition_month date generated always as (date_trunc('month', ts)::date) stored)`
 - `public.events(event_id uuid, partition_month date, producer_id uuid, schema_id uuid, payload jsonb, received_at timestamptz default now(), primary key(event_id, partition_month)) partition by LIST(partition_month)`
