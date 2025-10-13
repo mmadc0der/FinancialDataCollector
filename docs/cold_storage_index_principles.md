@@ -7,11 +7,11 @@ Core tenets:
 - `event_index` remains queryable even when old `events` partitions are dropped.
 - Older payloads can be archived externally; `event_index` rows can be marked as cold.
 
-MVP state (current):
+Current state:
 - Single `event_index` table with indexes on `(subject_id, partition_month)`, `(subject_id, ts)`, and `(event_id)`.
 - `events` is time-partitioned monthly and can be dropped by partition for retention.
 
-Evolution paths (choose based on observed scale/queries):
+Potential evolution paths:
 1. Time range partitions for `event_index` (keep old index partitions when dropping `events`).
 2. Hash partitions for `event_index` by `subject_id` (64–256 shards), optionally with time subpartitioning.
 3. Two-tier: keep recent `event_index` per-event rows; replace very old per-event rows with a `event_index_cold_manifest` holding per-subject-per-month chunk pointers to external storage (e.g., S3).

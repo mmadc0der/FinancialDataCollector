@@ -23,10 +23,11 @@ var (
     RedisPendingGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_redis_pending", Help: "Approx pending messages in consumer group"})
     RedisStreamLenGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_redis_stream_len", Help: "Approx length of the ingest stream"})
     SpillFilesGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_spill_files", Help: "Number of spill files on disk"})
+    AuthDeniedTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_auth_denied_total", Help: "Messages rejected due to failed authentication"})
 )
 
 func init() {
-    prom.MustRegister(IngestDropped, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge)
+    prom.MustRegister(IngestDropped, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge, AuthDeniedTotal)
 }
 
 func Handler() http.Handler { return promhttp.Handler() }

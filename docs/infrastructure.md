@@ -32,6 +32,8 @@ psql -h 127.0.0.1 -U data_kernel -d data_kernel_db -W -f migrations/0003_dev_vie
 
 See `docs/database.md` for the schema, ingest function, partitioning helper, stats tables, and dev views.
 
+Start from `config/kernel.example.yaml`: copy it to `config/kernel.yaml` and update values.
+
 Kernel configuration (example):
 
 ```yaml
@@ -80,4 +82,9 @@ redis:
 - Redis: monitor memory and stream trimming.
 - Prometheus: scrape `/metrics` on the kernel (add job in Prometheus config).
 - Grafana: import the dashboard JSON in `docs/grafana/kernel.json`.
+
+### Authentication setup (optional)
+- Generate Ed25519 keypair; encode keys as base64 (raw).
+- Configure `auth` block in `config/kernel.yaml` with issuer/audience, `public_keys` map, and `admin_token`.
+- Use `POST /admin/issue` to mint tokens for registered `producers` and `POST /admin/revoke` to blacklist.
 
