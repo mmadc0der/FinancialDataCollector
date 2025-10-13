@@ -22,6 +22,7 @@ redis:
   db: 0
   key_prefix: "fdc:"
   stream: "events"
+  register_stream: "register"
   maxlen_approx: 1000000
   queue_size: 2048
   publish_enabled: false   # publish to Redis from router (feature flag)
@@ -48,4 +49,20 @@ ingest:
   # Set to your registered producer/schema UUIDs
   producer_id: "00000000-0000-0000-0000-000000000000"
   schema_id:   "00000000-0000-0000-0000-000000000000"
+
+auth:
+  enabled: true
+  require_token: true
+  issuer: "fdc-kernel"
+  audience: "fdc-events"
+  key_id: "kid-1"
+  # Public verification keys by key id (base64 raw Ed25519 public key)
+  public_keys:
+    kid-1: "<BASE64_PUBLIC_KEY>"
+  # Private key is optional, only needed for issuing tokens via admin API
+  private_key: "<BASE64_PRIVATE_KEY>"
+  admin_token: "CHANGE_ME_ADMIN"
+  admin_ssh_ca: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLE_CA_PUBKEY comment"
+  cache_ttl_seconds: 300
+  skew_seconds: 60
 

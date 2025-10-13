@@ -7,6 +7,7 @@
    - `kernel_redis_read_total`, `kernel_redis_ack_total` increase
    - `kernel_pg_batch_size`, `kernel_pg_batch_seconds` present
 3. Check DLQ behavior by pushing malformed payload and verifying `events:dlq`.
+4. Check unauthenticated behavior (if auth enabled): publish without `token`, expect DLQ with reason `unauthenticated`.
 4. Observe performance metrics:
    - `kernel_pg_batch_size`, `kernel_pg_batch_seconds`, `kernel_pg_commit_total`, `kernel_pg_errors_total`
    - `kernel_redis_batch_seconds`, `kernel_redis_pending`, `kernel_redis_stream_len`
@@ -31,6 +32,7 @@
 - JSON Schema validation via `github.com/santhosh-tekuri/jsonschema/v5`.
 - Python module tests with `pytest` (for example module).
 - Benchmarks with `go test -bench` and synthetic generators.
+ - Token tests with ed25519: sign/verify, expiry, blacklist.
 
 ### CI stages
 1. Build: `go build ./...` and `python -m pyflakes` for example.
@@ -44,5 +46,5 @@
 
 ### Performance Gates
 - Minimum throughput: 10k msgs/min sustained in local env.
-- Max p99 ingest latency: < 50ms with file sink enabled.
+- Max p99 ingest latency: < 50ms with spill feature enabled.
 

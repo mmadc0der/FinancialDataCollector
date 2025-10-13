@@ -1,6 +1,7 @@
 -- Fresh core schema (idempotent).
 -- 1) Extensions
 CREATE EXTENSION IF NOT EXISTS citext;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- 2) Schemas and producers
 CREATE TABLE IF NOT EXISTS schemas (
     schema_id UUID PRIMARY KEY,
