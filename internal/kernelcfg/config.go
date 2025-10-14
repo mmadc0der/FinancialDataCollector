@@ -87,6 +87,7 @@ type AuthConfig struct {
     PrivateKey string `yaml:"private_key"`
     // Alternative key sources
     PrivateKeyFile string            `yaml:"private_key_file"`   // path to PEM/OpenSSH private key (ed25519)
+    PrivateKeyPassphraseFile string  `yaml:"private_key_passphrase_file"`
     PublicKeysSSH  map[string]string `yaml:"public_keys_ssh"`   // kid -> OpenSSH public key lines
     AdminSSHCA  string `yaml:"admin_ssh_ca"` // OpenSSH CA public key (text)
     ProducerSSHCA string `yaml:"producer_ssh_ca"` // OpenSSH CA public key for producers (text)

@@ -3,6 +3,7 @@ package auth
 import (
     "context"
     "crypto/ed25519"
+    "crypto/rand"
     "encoding/base64"
     "encoding/json"
     "errors"
@@ -21,6 +22,7 @@ type Verifier struct {
     cfg      kernelcfg.AuthConfig
     pub      map[string]ed25519.PublicKey
     priv     ed25519.PrivateKey
+    signer   ssh.Signer
     pg       *data.Postgres
     rd       *data.Redis
     cacheTTL time.Duration
@@ -53,15 +55,17 @@ func NewVerifier(cfg kernelcfg.AuthConfig, pg *data.Postgres, rd *data.Redis) (*
     } else if cfg.PrivateKeyFile != "" {
         pem, err := os.ReadFile(cfg.PrivateKeyFile)
         if err != nil { return nil, fmt.Errorf("read private_key_file: %w", err) }
-        // Try parsing OpenSSH or PEM with golang.org/x/crypto/ssh
-        if s, err := ssh.ParseRawPrivateKey(pem); err == nil {
-            switch k := s.(type) {
-            case ed25519.PrivateKey:
-                if len(k) == ed25519.PrivateKeySize { v.priv = k } else { return nil, errors.New("ed25519 private key wrong size") }
-            default:
-                return nil, errors.New("unsupported private key type (need ed25519)")
-            }
-        } else { return nil, fmt.Errorf("parse private_key_file: %w", err) }
+        var signer ssh.Signer
+        if cfg.PrivateKeyPassphraseFile != "" {
+            pass, e := os.ReadFile(cfg.PrivateKeyPassphraseFile)
+            if e != nil { return nil, fmt.Errorf("read private_key_passphrase_file: %w", e) }
+            signer, err = ssh.ParsePrivateKeyWithPassphrase(pem, bytes.TrimSpace(pass))
+        } else {
+            signer, err = ssh.ParsePrivateKey(pem)
+        }
+        if err != nil { return nil, fmt.Errorf("parse private_key_file: %w", err) }
+        if signer.PublicKey().Type() != ssh.KeyAlgoED25519 { return nil, errors.New("unsupported private key type (need ed25519)") }
+        v.signer = signer
     }
     return v, nil
 }
@@ -89,7 +93,7 @@ func parseB64(s string) ([]byte, error) { return base64.RawStdEncoding.DecodeStr
 // Issue signs a token for a producer (if private key configured) and records JTI.
 // Optionally binds the token to a producer key fingerprint (fp).
 func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Duration, notes string, fp string) (string, string, time.Time, error) {
-    if len(v.priv) == 0 {
+    if len(v.priv) == 0 && v.signer == nil {
         return "", "", time.Time{}, errors.New("issuer private key not configured")
     }
     now := time.Now().UTC()
@@ -100,8 +104,15 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
     hb, _ := json.Marshal(hdr)
     cb, _ := json.Marshal(cl)
     signing := b64url(hb) + "." + b64url(cb)
-    sig := ed25519.Sign(v.priv, []byte(signing))
-    tok := signing + "." + b64url(sig)
+    var sigRaw []byte
+    if len(v.priv) > 0 {
+        sigRaw = ed25519.Sign(v.priv, []byte(signing))
+    } else {
+        sshSig, err := v.signer.Sign(rand.Reader, []byte(signing))
+        if err != nil { return "", "", time.Time{}, err }
+        sigRaw = sshSig.Blob
+    }
+    tok := signing + "." + b64url(sigRaw)
     if v.pg != nil {
         _ = v.pg.InsertProducerToken(ctx, producerID, jti, exp, notes)
     }
