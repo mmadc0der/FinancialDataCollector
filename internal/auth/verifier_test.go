@@ -1,6 +1,7 @@
 package auth
 
 import (
+    "context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -28,18 +29,18 @@ type fakeDB struct{
     pid string
     revoked bool
 }
-func (f *fakeDB) InsertProducerToken(ctx any, producerID, jti string, exp time.Time, notes string) error { return nil }
-func (f *fakeDB) TokenExists(ctx any, jti string) (bool, string) { return f.exists, f.pid }
-func (f *fakeDB) IsTokenRevoked(ctx any, jti string) bool { return f.revoked }
-func (f *fakeDB) RevokeToken(ctx any, jti, reason string) error { f.revoked = true; return nil }
+func (f *fakeDB) InsertProducerToken(ctx context.Context, producerID, jti string, exp time.Time, notes string) error { return nil }
+func (f *fakeDB) TokenExists(ctx context.Context, jti string) (bool, string) { return f.exists, f.pid }
+func (f *fakeDB) IsTokenRevoked(ctx context.Context, jti string) bool { return f.revoked }
+func (f *fakeDB) RevokeToken(ctx context.Context, jti, reason string) error { f.revoked = true; return nil }
 
 type fakeRedis struct{
     kv map[string]string
 }
-func (r *fakeRedis) Exists(ctx any, keys ...string) (int64, error) { if _, ok := r.kv[keys[0]]; ok { return 1, nil }; return 0, nil }
-func (r *fakeRedis) Get(ctx any, key string) (string, error) { return r.kv[key], nil }
-func (r *fakeRedis) Set(ctx any, key string, value any, expiration time.Duration) error { if r.kv==nil { r.kv = map[string]string{} }; r.kv[key] = value.(string); return nil }
-func (r *fakeRedis) Del(ctx any, keys ...string) error { delete(r.kv, keys[0]); return nil }
+func (r *fakeRedis) Exists(ctx context.Context, keys ...string) (int64, error) { if _, ok := r.kv[keys[0]]; ok { return 1, nil }; return 0, nil }
+func (r *fakeRedis) Get(ctx context.Context, key string) (string, error) { return r.kv[key], nil }
+func (r *fakeRedis) Set(ctx context.Context, key string, value any, expiration time.Duration) error { if r.kv==nil { r.kv = map[string]string{} }; r.kv[key] = value.(string); return nil }
+func (r *fakeRedis) Del(ctx context.Context, keys ...string) error { delete(r.kv, keys[0]); return nil }
 
 func TestVerify_Success_WithFakes(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -62,6 +63,65 @@ func TestVerify_Success_WithFakes(t *testing.T) {
     pid, got, err := v.Verify(nil, tok)
     if err != nil { t.Fatalf("verify: %v", err) }
     if pid != "p1" || got != jti { t.Fatalf("mismatch pid/jti: %s/%s", pid, got) }
+}
+
+func TestVerify_BadSignature_WithFakes(t *testing.T) {
+    pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    v, _ := NewVerifier(cfg, nil, nil)
+    db := &fakeDB{exists: true, pid: "p1"}
+    v.dbTokenExists = db.TokenExists
+    v.dbIsTokenRevoked = db.IsTokenRevoked
+    tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
+    bt := []byte(tok)
+    bt[len(bt)-1] ^= 0x01
+    if _, _, err := v.Verify(nil, string(bt)); err == nil { t.Fatalf("expected bad_signature/b64 error") }
+}
+
+func TestVerify_Expired_WithFakes(t *testing.T) {
+    pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 0}
+    v, _ := NewVerifier(cfg, nil, nil)
+    db := &fakeDB{exists: true, pid: "p1"}
+    v.dbTokenExists = db.TokenExists
+    v.dbIsTokenRevoked = db.IsTokenRevoked
+    tok, _, _, _ := v.Issue(nil, "p1", -1*time.Second, "", "")
+    if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_expired") }
+}
+
+func TestVerify_IssuerAudienceMismatch_WithFakes(t *testing.T) {
+    pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    v, _ := NewVerifier(cfg, nil, nil)
+    db := &fakeDB{exists: true, pid: "p1"}
+    v.dbTokenExists = db.TokenExists
+    v.dbIsTokenRevoked = db.IsTokenRevoked
+    tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
+    v.cfg.Issuer = "other"
+    if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected issuer/audience error") }
+}
+
+func TestVerify_RevokedViaRedis_WithFakes(t *testing.T) {
+    pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    v, _ := NewVerifier(cfg, nil, nil)
+    db := &fakeDB{exists: true, pid: "p1"}
+    v.dbTokenExists = db.TokenExists
+    v.dbIsTokenRevoked = db.IsTokenRevoked
+    tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
+    v.redisExists = func(ctx context.Context, key string) (int64, error) { if strings.Contains(key, "revoked:jti:") { return 1, nil }; return 0, nil }
+    if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_revoked via redis") }
+}
+
+func TestVerify_UnknownKid(t *testing.T) {
+    pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    v, _ := NewVerifier(cfg, nil, nil)
+    tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
+    // New verifier with no public keys -> unknown kid
+    cfg2 := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud"}
+    v2, _ := NewVerifier(cfg2, nil, nil)
+    if _, _, err := v2.Verify(nil, tok); err == nil { t.Fatalf("expected unknown_kid") }
 }
 
 
