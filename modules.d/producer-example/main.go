@@ -6,8 +6,11 @@ import (
     "crypto/rand"
     "encoding/base64"
     "encoding/json"
+    "flag"
     "log"
     "os"
+    "os/signal"
+    "syscall"
     "time"
 
     "github.com/redis/go-redis/v9"
@@ -45,9 +48,20 @@ func canonicalJSON(v any) string {
 }
 
 func main() {
-    cfg := loadConfig("modules.d/producer-example/config.yaml")
-    ctx := context.Background()
+    cfgPath := flag.String("config", "modules.d/producer-example/config.yaml", "path to config file")
+    overrideInt := flag.Int("interval_ms", 0, "override send interval in ms")
+    flag.Parse()
+
+    cfg := loadConfig(*cfgPath)
+    if *overrideInt > 0 { cfg.Producer.SendIntervalMs = *overrideInt }
+
+    ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+    defer cancel()
+
     rdb := redis.NewClient(&redis.Options{Addr: cfg.Redis.Addr, Username: cfg.Redis.Username, Password: cfg.Redis.Password, DB: cfg.Redis.DB})
+    if err := rdb.Ping(ctx).Err(); err != nil { log.Fatalf("redis_ping_error: %v", err) }
+    log.Printf("producer_start addr=%s reg_stream=%s ev_stream=%s prefix=%s interval_ms=%d",
+        cfg.Redis.Addr, cfg.Redis.RegStream, cfg.Redis.EvStream, cfg.Redis.KeyPrefix, cfg.Producer.SendIntervalMs)
 
     // generate ephemeral keypair for demo
     pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -61,8 +75,9 @@ func main() {
     msg := []byte(payloadStr + "." + nonce)
     sig := ed25519.Sign(priv, msg)
     sigB64 := base64.StdEncoding.EncodeToString(sig)
-    _, err = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": opensshPub, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result()
-    if err != nil { log.Fatal(err) }
+    regID, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": opensshPub, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result()
+    if err != nil { log.Fatalf("register_xadd_error: %v", err) }
+    log.Printf("register_sent id=%s", regID)
 
     // request schema+subject provisioning via control message
     ctrl := map[string]any{"version":"0.1.0","type":"control","id":"CTRL1","ts": time.Now().UnixNano(), "data": map[string]any{"op":"ensure_schema_subject","name":"demo_schema","version":1,"body": map[string]any{"fields": []string{"a", "b"}}, "subject_key":"DEMO-1","attrs": map[string]any{"region":"eu"}}}
@@ -74,10 +89,17 @@ func main() {
     if interval <= 0 { interval = time.Second }
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
-    for t := range ticker.C {
-        env := map[string]any{"version":"0.1.0","type":"data","id": t.Format("20060102150405.000000000"), "ts": time.Now().UnixNano(), "data": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
-        envB, _ := json.Marshal(env)
-        _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id": env["id"], "payload": string(envB)}}).Result()
+    for {
+        select {
+        case t := <-ticker.C:
+            env := map[string]any{"version":"0.1.0","type":"data","id": t.Format("20060102150405.000000000"), "ts": time.Now().UnixNano(), "data": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
+            envB, _ := json.Marshal(env)
+            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id": env["id"], "payload": string(envB)}}).Result()
+            if err != nil { log.Printf("event_xadd_error: %v", err) } else { log.Printf("event_sent id=%s", id) }
+        case <-ctx.Done():
+            log.Printf("producer_stop")
+            return
+        }
     }
 }
 
