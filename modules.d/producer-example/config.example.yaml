@@ -11,4 +11,9 @@ producer:
   name: "demo-producer"
   contact: "demo@example.com"
   send_interval_ms: 1000
+  # Registration signing keys (producer identity)
+  ssh_private_key_file: "./modules.d/producer-example/ssh/id_ed25519"
+  ssh_public_key_file: "./modules.d/producer-example/ssh/id_ed25519.pub"
+  # If you use producer SSH certificates, set the certificate file too (signed by producer CA)
+  ssh_cert_file: "./modules.d/producer-example/ssh/id_ed25519-cert.pub"
 

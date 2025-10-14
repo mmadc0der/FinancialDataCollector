@@ -55,11 +55,19 @@ auth:
   # Public verification keys by key id (base64 raw Ed25519 public key)
   public_keys:
     kid-1: "<BASE64_PUBLIC_KEY>"
+  # Alternatively, provide SSH public keys (kid -> OpenSSH public key)
+  public_keys_ssh:
+    kid-1: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... kernel-sign-pub"
   # Kernel signing private key (base64 raw Ed25519). Required if kernel issues tokens.
   private_key: "<BASE64_PRIVATE_KEY>"
+  # Or point to an OpenSSH/PEM private key file (ed25519)
+  private_key_file: "./ssh/kernel_sign"
   # SSH CA public key used to verify admin certificates (OpenSSH authorized_keys format).
   # This is the cluster CA public key that signs admin user certificates.
   admin_ssh_ca: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLE_CA_PUBKEY cluster-admin-ca"
+  # Producer CA (OpenSSH public key). If set, producers must present SSH certificates signed by this CA at registration.
+  producer_ssh_ca: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPRODUCER_CA_PUBKEY producer-ca"
+  producer_cert_required: true
   cache_ttl_seconds: 300
   skew_seconds: 60
 
