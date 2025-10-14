@@ -36,6 +36,7 @@ func (k *Kernel) Start(ctx context.Context) error {
     stopLog := logging.Init(k.cfg.Logging)
     defer stopLog()
     logging.Info("kernel_start", logging.F("listen", k.cfg.Server.Listen))
+    logging.Info("config_redis", logging.F("enabled", k.cfg.Redis.Enabled), logging.F("addr", k.cfg.Redis.Addr), logging.F("prefix", k.cfg.Redis.KeyPrefix), logging.F("stream", k.cfg.Redis.Stream), logging.F("register_stream", k.cfg.Redis.RegisterStream), logging.F("group", k.cfg.Redis.ConsumerGroup))
 
     // Router handles durable persistence (Postgres-first, spill fallback) and optional publish
     r, err := newRouter(k.cfg, func(ids ...string) {
@@ -77,6 +78,7 @@ func (k *Kernel) Start(ctx context.Context) error {
             k.rd = rd
             // best-effort create group
             _ = k.rd.EnsureGroup(ctx)
+            logging.Info("redis_consumer_start", logging.F("stream", prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)), logging.F("group", k.cfg.Redis.ConsumerGroup))
             go k.consumeRedis(ctx)
             // registration stream consumer (separate goroutine)
             go k.consumeRegister(ctx)

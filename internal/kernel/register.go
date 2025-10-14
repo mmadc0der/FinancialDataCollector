@@ -26,7 +26,16 @@ type regPayload struct {
 
 func (k *Kernel) consumeRegister(ctx context.Context) {
     if k.rd == nil || k.cfg.Redis.RegisterStream == "" { return }
+    if k.pg == nil {
+        logging.Warn("register_consumer_disabled_no_pg")
+        return
+    }
     stream := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterStream)
+    // Ensure consumer group exists for the registration stream (ignore BUSYGROUP errors)
+    if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+    }
+    logging.Info("register_consumer_start", logging.F("stream", stream), logging.F("group", k.cfg.Redis.ConsumerGroup))
     consumer := fmt.Sprintf("%s-reg-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {
         res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()

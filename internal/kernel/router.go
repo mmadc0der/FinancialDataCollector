@@ -88,6 +88,9 @@ func (r *router) handleRedis(redisID string, env protocol.Envelope) {
         default:
             // queue full; drop by policy (caller should DLQ), but here do nothing
         }
+    } else {
+        // If Postgres sink is disabled, ack immediately to avoid pending backlog
+        if r.ack != nil { r.ack(redisID) }
     }
 }
 
