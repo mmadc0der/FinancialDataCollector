@@ -58,7 +58,10 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                 logging.Info("register_received", logging.F("id", m.ID), logging.F("fingerprint", fp))
                 // Nonce replay guard (best-effort via Redis)
                 if k.rd != nil && k.rd.C() != nil {
-                    if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "reg:nonce:"+fp+":"+nonce), 1, time.Hour).Result(); !ok {
+                    ok, nxErr := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "reg:nonce:"+fp+":"+nonce), 1, time.Hour).Result()
+                    if nxErr != nil {
+                        logging.Warn("register_nonce_guard_error", logging.Err(nxErr), logging.F("fingerprint", fp))
+                    } else if !ok {
                         logging.Warn("register_nonce_replay", logging.F("fingerprint", fp), logging.F("nonce", nonce))
                         _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "replay", "duplicate_nonce", "")
                         _ = k.rd.Ack(ctx, m.ID)

@@ -275,7 +275,8 @@ func (p *Postgres) ApproveProducerKey(ctx context.Context, fingerprint, name, sc
     cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
     defer cancel()
     var pid string
-    err := p.pool.QueryRow(cctx, `SELECT public.approve_producer_key($1,$2,$3::uuid,$4,$5)`, fingerprint, name, schemaID, reviewer, notes).Scan(&pid)
+    // New signature: (_fingerprint TEXT, _name TEXT, _reviewer TEXT, _schema_id UUID DEFAULT NULL, _notes TEXT DEFAULT NULL)
+    err := p.pool.QueryRow(cctx, `SELECT public.approve_producer_key($1,$2,$3,$4::uuid,$5)`, fingerprint, name, reviewer, schemaID, notes).Scan(&pid)
     if err != nil { return "", err }
     return pid, nil
 }
