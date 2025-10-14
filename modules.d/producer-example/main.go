@@ -70,26 +70,24 @@ func readTrim(path string) (string, error) {
     return strings.TrimSpace(string(b)), nil
 }
 
-func loadEd25519FromKeyFile(path string) (ed25519.PrivateKey, error) {
-    b, err := os.ReadFile(path)
+func loadSignerFromKeyFile(path string) (ssh.Signer, error) {
+    pem, err := os.ReadFile(path)
     if err != nil { return nil, err }
-    v, err := ssh.ParseRawPrivateKey(b)
-    if err != nil {
-        // Support passphrase-protected OpenSSH keys via env var
-        if passFile := os.Getenv("PRODUCER_SSH_PASSPHRASE_FILE"); passFile != "" {
-            if pass, e := os.ReadFile(passFile); e == nil {
-                if vv, ee := ssh.ParseRawPrivateKeyWithPassphrase(b, bytes.TrimSpace(pass)); ee == nil {
-                    v = vv
-                    err = nil
-                }
-            }
+    var s ssh.Signer
+    if passFile := os.Getenv("PRODUCER_SSH_PASSPHRASE_FILE"); passFile != "" {
+        if pass, e := os.ReadFile(passFile); e == nil {
+            s, err = ssh.ParsePrivateKeyWithPassphrase(pem, bytes.TrimSpace(pass))
+        } else {
+            err = e
         }
-        if err != nil { return nil, err }
+    } else {
+        s, err = ssh.ParsePrivateKey(pem)
     }
-    if sk, ok := v.(ed25519.PrivateKey); ok {
-        return sk, nil
+    if err != nil { return nil, err }
+    if s.PublicKey().Type() != ssh.KeyAlgoED25519 {
+        return nil, fmt.Errorf("unsupported private key type (need ed25519)")
     }
-    return nil, fmt.Errorf("unsupported private key type (need ed25519)")
+    return s, nil
 }
 
 func main() {
@@ -108,31 +106,20 @@ func main() {
     log.Printf("producer_start addr=%s reg_stream=%s ev_stream=%s prefix=%s interval_ms=%d",
         cfg.Redis.Addr, cfg.Redis.RegStream, cfg.Redis.EvStream, cfg.Redis.KeyPrefix, cfg.Producer.SendIntervalMs)
 
-    // Load keys (prefer files), else generate ephemeral for demo
-    var priv ed25519.PrivateKey
+    // Load keys and cert (required)
+    if cfg.Producer.SSHPublicKeyFile == "" || cfg.Producer.SSHPrivateKeyFile == "" || cfg.Producer.SSHCertFile == "" {
+        log.Fatalf("missing required key/cert files: ssh_private_key_file, ssh_public_key_file, ssh_cert_file must be set")
+    }
     var signer ssh.Signer
     var opensshPub string
-    if cfg.Producer.SSHPublicKeyFile != "" {
-        if line, err := readTrim(cfg.Producer.SSHPublicKeyFile); err == nil { opensshPub = line } else { log.Fatalf("read_public_key: %v", err) }
-    }
-    if cfg.Producer.SSHPrivateKeyFile != "" {
-        // Load raw ed25519 key for signing (kernel expects ed25519 signature)
-        sk, err := loadEd25519FromKeyFile(cfg.Producer.SSHPrivateKeyFile)
-        if err != nil { log.Fatalf("read_private_key_ed25519: %v", err) }
-        priv = sk
-    }
-    if len(priv) == 0 || opensshPub == "" {
-        // fallback: generate ephemeral
-        pub, sk, err := ed25519.GenerateKey(rand.Reader)
-        if err != nil { log.Fatal(err) }
-        priv = sk
-        opensshPub = "ssh-ed25519 " + base64.StdEncoding.EncodeToString(pub)
-    }
-    // If certificate provided, send cert line as pubkey in registration (server unwraps)
-    pubForRegistration := opensshPub
-    if cfg.Producer.SSHCertFile != "" {
-        if certLine, err := readTrim(cfg.Producer.SSHCertFile); err == nil { pubForRegistration = certLine } else { log.Fatalf("read_cert_file: %v", err) }
-    }
+    if line, err := readTrim(cfg.Producer.SSHPublicKeyFile); err == nil { opensshPub = line } else { log.Fatalf("read_public_key: %v", err) }
+    if s, err := loadSignerFromKeyFile(cfg.Producer.SSHPrivateKeyFile); err == nil { signer = s } else { log.Fatalf("read_private_key_signer: %v", err) }
+    // Send cert line as pubkey in registration (server unwraps cert and enforces CA)
+    pubForRegistration := func() string {
+        if certLine, err := readTrim(cfg.Producer.SSHCertFile); err == nil { return certLine }
+        log.Fatalf("read_cert_file: %v", err)
+        return ""
+    }()
     fp := computeFingerprint(pubForRegistration)
 
     // send registration (repeat later until token received)
@@ -140,9 +127,11 @@ func main() {
     payloadStr := canonicalJSON(payload)
     nonce := time.Now().Format(time.RFC3339Nano)
     msg := []byte(payloadStr + "." + nonce)
-    // Always sign with ed25519 raw signature
-    if len(priv) == 0 { log.Fatalf("missing ed25519 private key for signing") }
-    sigRaw := ed25519.Sign(priv, msg)
+    // Sign message over canonical payload + nonce
+    sshSig, err := signer.Sign(rand.Reader, msg)
+    if err != nil { log.Fatalf("sign_error: %v", err) }
+    if signer.PublicKey().Type() != ssh.KeyAlgoED25519 || len(sshSig.Blob) != ed25519.SignatureSize { log.Fatalf("sign_error: unsupported signer or signature size") }
+    sigRaw := sshSig.Blob
     sigB64 := base64.StdEncoding.EncodeToString(sigRaw)
     regID, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result()
     if err != nil { log.Fatalf("register_xadd_error: %v", err) }
