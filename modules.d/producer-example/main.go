@@ -9,7 +9,6 @@ import (
     "encoding/json"
     "flag"
     "fmt"
-    "bytes"
     "log"
     "os"
     "os/signal"
@@ -75,7 +74,18 @@ func loadEd25519FromKeyFile(path string) (ed25519.PrivateKey, error) {
     b, err := os.ReadFile(path)
     if err != nil { return nil, err }
     v, err := ssh.ParseRawPrivateKey(b)
-    if err != nil { return nil, err }
+    if err != nil {
+        // Support passphrase-protected OpenSSH keys via env var
+        if passFile := os.Getenv("PRODUCER_SSH_PASSPHRASE_FILE"); passFile != "" {
+            if pass, e := os.ReadFile(passFile); e == nil {
+                if vv, ee := ssh.ParseRawPrivateKeyWithPassphrase(b, bytes.TrimSpace(pass)); ee == nil {
+                    v = vv
+                    err = nil
+                }
+            }
+        }
+        if err != nil { return nil, err }
+    }
     if sk, ok := v.(ed25519.PrivateKey); ok {
         return sk, nil
     }
