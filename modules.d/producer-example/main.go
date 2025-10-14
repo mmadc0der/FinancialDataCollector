@@ -9,6 +9,7 @@ import (
     "encoding/json"
     "flag"
     "fmt"
+    "bytes"
     "log"
     "os"
     "os/signal"
@@ -99,12 +100,25 @@ func main() {
 
     // Load keys (prefer files), else generate ephemeral for demo
     var priv ed25519.PrivateKey
+    var signer ssh.Signer
     var opensshPub string
     if cfg.Producer.SSHPublicKeyFile != "" {
         if line, err := readTrim(cfg.Producer.SSHPublicKeyFile); err == nil { opensshPub = line } else { log.Fatalf("read_public_key: %v", err) }
     }
     if cfg.Producer.SSHPrivateKeyFile != "" {
-        if sk, err := loadEd25519FromKeyFile(cfg.Producer.SSHPrivateKeyFile); err == nil { priv = sk } else { log.Fatalf("read_private_key: %v", err) }
+        pem, err := os.ReadFile(cfg.Producer.SSHPrivateKeyFile)
+        if err != nil { log.Fatalf("read_private_key: %v", err) }
+        s, perr := ssh.ParsePrivateKey(pem)
+        if perr != nil {
+            if passFile := os.Getenv("PRODUCER_SSH_PASSPHRASE_FILE"); passFile != "" {
+                if pass, e := os.ReadFile(passFile); e == nil {
+                    s, perr = ssh.ParsePrivateKeyWithPassphrase(pem, bytes.TrimSpace(pass))
+                }
+            }
+        }
+        if perr != nil { log.Fatalf("read_private_key: %v", perr) }
+        if s.PublicKey().Type() != ssh.KeyAlgoED25519 { log.Fatalf("read_private_key: unsupported private key type (need ed25519)") }
+        signer = s
     }
     if len(priv) == 0 || opensshPub == "" {
         // fallback: generate ephemeral
@@ -125,8 +139,15 @@ func main() {
     payloadStr := canonicalJSON(payload)
     nonce := time.Now().Format(time.RFC3339Nano)
     msg := []byte(payloadStr + "." + nonce)
-    sig := ed25519.Sign(priv, msg)
-    sigB64 := base64.StdEncoding.EncodeToString(sig)
+    var sigRaw []byte
+    if signer != nil {
+        sshSig, err := signer.Sign(rand.Reader, msg)
+        if err != nil { log.Fatalf("sign_error: %v", err) }
+        sigRaw = sshSig.Blob
+    } else {
+        sigRaw = ed25519.Sign(priv, msg)
+    }
+    sigB64 := base64.StdEncoding.EncodeToString(sigRaw)
     regID, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result()
     if err != nil { log.Fatalf("register_xadd_error: %v", err) }
     log.Printf("register_sent id=%s", regID)
@@ -165,8 +186,12 @@ TokenWait:
             // re-send registration to trigger token publish if approved while waiting
             nonce = time.Now().Format(time.RFC3339Nano)
             msg = []byte(payloadStr + "." + nonce)
-            sig = ed25519.Sign(priv, msg)
-            sigB64 = base64.StdEncoding.EncodeToString(sig)
+            if signer != nil {
+                if sshSig, e := signer.Sign(rand.Reader, msg); e == nil { sigRaw = sshSig.Blob } else { continue }
+            } else {
+                sigRaw = ed25519.Sign(priv, msg)
+            }
+            sigB64 = base64.StdEncoding.EncodeToString(sigRaw)
             if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
                 log.Printf("register_retry id=%s", id)
             }
