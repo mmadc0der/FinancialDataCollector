@@ -1,39 +1,28 @@
 ## Producer ↔ Kernel Protocol (v0.1.0)
 
-- **Transport**: Redis Streams. Modules XADD to `fdc:events` (configurable). Fields:
-  - `id`: producer message id (ULID recommended)
-  - `payload`: JSON envelope bytes (see Envelope)
-  - `token` (optional/required by config): producer auth token
-- **Acking**: Kernel ACKs after durable persistence (Postgres commit) or successful spill write.
-- **DLQ**: Invalid/unauthed payloads go to `fdc:events:dlq` with `error` field.
+- **Scope for modules**: Producers do NOT send data-plane envelopes. They only publish control-plane requests to registration-related streams.
 
-### Envelope
-```json
-{
-  "version": "0.1.0",
-  "type": "data|heartbeat|control|ack|error",
-  "id": "ULID",
-  "ts": 1730000000000000000,
-  "data": { /* kind-specific */ }
-}
-```
-- Kernel validates shape via `internal/protocol.ValidateEnvelope`.
-
-### Registration & Refresh
-- Stream: `fdc:register` (configurable). Fields:
+### Registration/Control Streams
+- `fdc:register` (configurable): request producer registration or token refresh
   - `pubkey`: OpenSSH public key (text). If `producer_cert_required`, must be an SSH cert signed by configured CA.
   - `payload`: canonical JSON (stable key order)
   - `nonce`: random string
   - `sig`: base64 signature over `payload + "." + nonce` using Ed25519 private key corresponding to `pubkey`
-- Kernel steps: fingerprint pubkey (SHA256, base64), verify signature, upsert key, record registration, auto-issue token if key approved and bound.
-- Response (optional): on auto-issue, kernel publishes `{fingerprint, token, producer_id}` to `register_resp_stream`.
+- `fdc:subject:register` (optional, configurable): request subject registration/binding if enabled by kernel/admin policy
 
-### Authentication
-- Tokens: EdDSA over header+claims, with `iss`, `aud`, `sub` (producer_id), `jti`, `exp`, `nbf`, optional `fp` (fingerprint).
-- Kernel verifies signature and that JTI exists and is not revoked (Redis cache + Postgres).
-- Include token as XADD `token` field.
+Kernel behavior:
+- Fingerprint pubkey (SHA256, base64), verify signature against canonicalized `payload+"."+nonce`.
+- Upsert key and record registration as `pending`.
+- If key is `approved` and bound to a `producer_id`, auto-issue a short-lived token and publish to `register_resp_stream`:
+  - `{ fingerprint, token, producer_id }`
 
-### Limits & Flow Control
-- Max message size: `server.max_message_bytes`.
-- Kernel reads in batches and acks after persistence; publishers should trim streams (`MAXLEN ~`).
-- Backpressure: kernel drops enqueue when internal queues are full (message goes pending until retry or DLQ on parse/auth fail).
+### IDs
+- When kernel emits control envelopes (ack/error), it uses UUIDv7 for `id`.
+
+### Authentication Tokens
+- EdDSA tokens with claims: `iss`, `aud`, `sub` (producer_id), `jti`, `exp`, `nbf`, optional `fp` (fingerprint).
+- Verified against configured public keys; JTI allowlist backed by Postgres with Redis cache.
+
+### Limits
+- Max registration message size: `server.max_message_bytes`.
+- Nonce replay is prevented via Redis `SETNX` and DB unique `(fingerprint, nonce)`.

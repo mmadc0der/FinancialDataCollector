@@ -5,22 +5,24 @@ import (
     "testing"
     "time"
 
-    ulid "github.com/oklog/ulid/v2"
+    "github.com/google/uuid"
 )
 
 func TestValidateEnvelope_Success(t *testing.T) {
-    e := Envelope{Version: Version, Type: "data", ID: ulid.Make().String(), TS: time.Now().UnixNano(), Data: json.RawMessage(`{"k":1}`)}
+    u, _ := uuid.NewV7()
+    e := Envelope{Version: Version, Type: "data", ID: u.String(), TS: time.Now().UnixNano(), Data: json.RawMessage(`{"k":1}`)}
     if err := ValidateEnvelope(e); err != nil {
         t.Fatalf("expected valid envelope, got error: %v", err)
     }
 }
 
 func TestValidateEnvelope_Errors(t *testing.T) {
+    v1, _ := uuid.NewV7(); v2, _ := uuid.NewV7(); v3, _ := uuid.NewV7()
     cases := []Envelope{
-        {Version: "", Type: "data", ID: ulid.Make().String(), TS: time.Now().UnixNano()},
-        {Version: Version, Type: "unknown", ID: ulid.Make().String(), TS: time.Now().UnixNano()},
+        {Version: "", Type: "data", ID: v1.String(), TS: time.Now().UnixNano()},
+        {Version: Version, Type: "unknown", ID: v2.String(), TS: time.Now().UnixNano()},
         {Version: Version, Type: "data", ID: "", TS: time.Now().UnixNano()},
-        {Version: Version, Type: "data", ID: ulid.Make().String(), TS: 0},
+        {Version: Version, Type: "data", ID: v3.String(), TS: 0},
     }
     for i, e := range cases {
         if err := ValidateEnvelope(e); err == nil {
