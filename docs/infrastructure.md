@@ -76,6 +76,10 @@ redis:
 ### Security notes
 - Store passwords as environment variables or secret files; avoid committing secrets.
 - Prefer local loopback or VPN; add TLS in front of Redis/Postgres when exposed.
+ - SSH identities:
+   - Kernel signing key: store under `ssh/kernel_sign` and reference via `auth.private_key_file`.
+   - Producer CA: generate once and store under `modules.d/ssh/producer_ca` (private) and `producer_ca.pub` (public). Put the public key into `auth.producer_ssh_ca`.
+   - Use `scripts/producer_ca.sh init-ca` to create the producer CA and `scripts/producer_ca.sh sign -k <producer>.pub -I <id> -n producer` to issue producer certs.
 
 ### Observability
 - Postgres: enable `log_min_duration_statement` for slow queries.
