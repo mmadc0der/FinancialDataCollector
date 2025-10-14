@@ -15,6 +15,7 @@ import (
 
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
+    "github.com/example/data-kernel/internal/logging"
     ulid "github.com/oklog/ulid/v2"
     ssh "golang.org/x/crypto/ssh"
 )
