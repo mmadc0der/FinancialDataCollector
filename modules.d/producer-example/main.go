@@ -4,7 +4,6 @@ import (
     "context"
     "crypto/ed25519"
     "crypto/rand"
-    "crypto/sha256"
     "encoding/base64"
     "encoding/json"
     "flag"
@@ -18,6 +17,7 @@ import (
     "time"
 
     ssh "golang.org/x/crypto/ssh"
+    "golang.org/x/crypto/sha3"
     "github.com/redis/go-redis/v9"
     "gopkg.in/yaml.v3"
 )
@@ -61,7 +61,7 @@ func canonicalJSON(v any) string {
 }
 
 func computeFingerprint(pubLine string) string {
-    sum := sha256.Sum256([]byte(pubLine))
+    sum := sha3.Sum512([]byte(pubLine))
     return base64.StdEncoding.EncodeToString(sum[:])
 }
 
@@ -128,8 +128,9 @@ func main() {
     payloadStr := canonicalJSON(payload)
     nonce := time.Now().Format(time.RFC3339Nano)
     msg := []byte(payloadStr + "." + nonce)
-    // Sign message over canonical payload + nonce
-    sshSig, err := signer.Sign(rand.Reader, msg)
+    // Sign SHA3-512 hash of canonical payload + nonce
+    sum := sha3.Sum512(msg)
+    sshSig, err := signer.Sign(rand.Reader, sum[:])
     if err != nil { log.Fatalf("sign_error: %v", err) }
     if signer.PublicKey().Type() != ssh.KeyAlgoED25519 || len(sshSig.Blob) != ed25519.SignatureSize { log.Fatalf("sign_error: unsupported signer or signature size") }
     sigRaw := sshSig.Blob
@@ -172,7 +173,8 @@ TokenWait:
             // re-send registration to trigger token publish if approved while waiting
             nonce = time.Now().Format(time.RFC3339Nano)
             msg = []byte(payloadStr + "." + nonce)
-            if sshSig, e := signer.Sign(rand.Reader, msg); e == nil { sigRaw = sshSig.Blob } else { continue }
+            sum = sha3.Sum512(msg)
+            if sshSig, e := signer.Sign(rand.Reader, sum[:]); e == nil { sigRaw = sshSig.Blob } else { continue }
             sigB64 = base64.StdEncoding.EncodeToString(sigRaw)
             if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
                 log.Printf("register_retry id=%s", id)

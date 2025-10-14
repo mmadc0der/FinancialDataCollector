@@ -3,7 +3,6 @@ package kernel
 import (
     "context"
     "crypto/ed25519"
-    "crypto/sha256"
     "bytes"
     "encoding/base64"
     "encoding/json"
@@ -14,6 +13,7 @@ import (
     "github.com/example/data-kernel/internal/logging"
     "github.com/redis/go-redis/v9"
     ssh "golang.org/x/crypto/ssh"
+    "golang.org/x/crypto/sha3"
 )
 
 // Registration message schema (in XADD values):
@@ -91,13 +91,14 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                                     payloadStr = string(cb)
                                 }
                             }
-                            // Verify over exact canonical bytes
+                            // Verify over prehashed canonical bytes (SHA3-512)
                             msg := []byte(payloadStr + "." + nonce)
+                            sum := sha3.Sum512(msg)
                             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                             if decErr != nil {
                                 sigBytes, _ = base64.StdEncoding.DecodeString(sigB64)
                             }
-                            if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) {
+                            if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) {
                                 validSig = true
                                 logging.Info("register_sig_valid", logging.F("fingerprint", fp))
                             } else {
@@ -141,7 +142,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
 }
 
 func sshFingerprint(pubKeyData []byte) string {
-    sum := sha256.Sum256(pubKeyData)
+    sum := sha3.Sum512(pubKeyData)
     return base64.StdEncoding.EncodeToString(sum[:])
 }
 

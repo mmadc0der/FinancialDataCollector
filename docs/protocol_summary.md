@@ -11,7 +11,7 @@
 - `fdc:subject:register` (optional, configurable): request subject registration/binding if enabled by kernel/admin policy
 
 Kernel behavior:
-- Fingerprint pubkey (SHA256, base64), verify signature against canonicalized `payload+"."+nonce`.
+- Fingerprint pubkey (SHA3-512, base64), verify signature over `SHA3-512(payload+"."+nonce)`.
 - Upsert key and record registration as `pending`.
 - If key is `approved` and bound to a `producer_id`, auto-issue a short-lived token and publish to `register_resp_stream`:
   - `{ fingerprint, token, producer_id }`

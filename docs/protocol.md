@@ -61,7 +61,7 @@ Version: 0.1.0 (DRAFT)
   - `pubkey`: OpenSSH public key (text)
   - `payload`: canonical JSON string (RFC8785 or sorted-keys compact form)
   - `nonce`: random string
-  - `sig`: base64 signature over `payload + "." + nonce` using the provided `pubkey` (payload must be canonicalized)
+  - `sig`: base64 signature over `SHA3-512(payload + "." + nonce)` using the provided `pubkey` (payload must be canonicalized)
  - If the `pubkey` fingerprint is already approved and bound to a known `producer_id`, the kernel can auto-issue a token.
 - Otherwise, the request is stored as pending for administrator review.
  - Admin flow: `GET /admin/pending` for list, `POST /admin/approve` binds key, creates a `producer` if needed (UUIDv4 generated SQL-side), and issues a token.

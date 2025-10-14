@@ -21,12 +21,12 @@
   - `pubkey`: OpenSSH public key (text)
   - `payload`: JSON string, e.g. `{ "producer_hint": "binance", "contact": "ops@example.com", "meta": {"region":"eu"} }`
   - `nonce`: random string (>=16 bytes)
-  - `sig`: base64 signature over `SHA256(payload||"."||nonce)` using the corresponding `pubkey`'s private key
+  - `sig`: base64 signature over `SHA3-512(payload||"."||nonce)` using the corresponding `pubkey`'s private key
 
 ### Verification Steps
 1. Canonicalize `payload` JSON to a deterministic string; concatenate `payload + "." + nonce`.
 2. Verify signature with the provided `pubkey` over that exact byte sequence.
-3. Derive fingerprint (SHA256 over public key bytes, base64) and upsert into `producer_keys` if new (pending).
+3. Derive fingerprint (SHA3-512 over public key bytes, base64) and upsert into `producer_keys` if new (pending).
 4. Create `producer_registrations` row with status `pending`.
 5. If `producer_keys.status=approved` and `producer_id` set, auto-issue a token (short TTL) and mark registration `auto_issued`.
 6. Ack after durable writes.

@@ -14,7 +14,7 @@ import (
 
     "crypto/ed25519"
     "crypto/rand"
-    "crypto/sha256"
+    "golang.org/x/crypto/sha3"
 
     "github.com/redis/go-redis/v9"
 
@@ -40,11 +40,11 @@ func TestRegistrationAutoIssue(t *testing.T) {
     // generate ed25519 key and encode OpenSSH public key line
     pub, priv, err := ed25519.GenerateKey(rand.Reader)
     if err != nil { t.Fatalf("keygen: %v", err) }
-    // Encode pub as OpenSSH format: use minimal ssh lib? To keep deps simple here we embed a precomputed pub template is non-trivial; skip actual kernel verification and test DB path by inserting fingerprint that matches the input string hashing used by kernel (sha256 over pubkey data base64)
+    // Encode pub as OpenSSH format: use minimal ssh lib? To keep deps simple here we embed a precomputed pub template is non-trivial; skip actual kernel verification and test DB path by inserting fingerprint that matches the input string hashing used by kernel (sha3-512 over pubkey data base64)
     pubLine := "ssh-ed25519 " + base64.StdEncoding.EncodeToString(pub) + " test@it"
-    // Compute fp same as kernel: sha256 over bytes then base64
+    // Compute fp same as kernel: sha3-512 over bytes then base64
     // We reimplement small helper inline to avoid importing kernel
-    fp := func(in []byte) string { h := sha256.Sum256(in); return base64.StdEncoding.EncodeToString(h[:]) }([]byte(pubLine))
+    fp := func(in []byte) string { h := sha3.Sum512(in); return base64.StdEncoding.EncodeToString(h[:]) }([]byte(pubLine))
 
     // Upsert key row and approve + bind to a producer
     var producerID string
@@ -85,11 +85,12 @@ func TestRegistrationAutoIssue(t *testing.T) {
     rcli := redis.NewClient(&redis.Options{Addr: addr})
     payload := []byte(`{"producer_hint":"auto","meta":{"env":"it"}}`)
     nonce := "abcdef0123456789"
-    // sign payload + "." + nonce with priv
+    // sign SHA3-512(payload + "." + nonce) with priv
     msg := append([]byte{}, payload...)
     msg = append(msg, '.')
     msg = append(msg, []byte(nonce)...)
-    sig := ed25519.Sign(priv, msg)
+    sum := sha3.Sum512(msg)
+    sig := ed25519.Sign(priv, sum[:])
     sigB64 := base64.RawStdEncoding.EncodeToString(sig)
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:register", Values: map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}}).Err(); err != nil {
         t.Fatalf("xadd reg: %v", err)
