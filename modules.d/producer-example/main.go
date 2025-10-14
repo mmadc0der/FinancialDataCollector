@@ -9,6 +9,7 @@ import (
     "encoding/json"
     "flag"
     "fmt"
+    "bytes"
     "log"
     "os"
     "os/signal"
@@ -111,13 +112,13 @@ func main() {
         log.Fatalf("missing required key/cert files: ssh_private_key_file, ssh_public_key_file, ssh_cert_file must be set")
     }
     var signer ssh.Signer
-    var opensshPub string
-    if line, err := readTrim(cfg.Producer.SSHPublicKeyFile); err == nil { opensshPub = line } else { log.Fatalf("read_public_key: %v", err) }
+    if _, err := readTrim(cfg.Producer.SSHPublicKeyFile); err != nil { log.Fatalf("read_public_key: %v", err) }
     if s, err := loadSignerFromKeyFile(cfg.Producer.SSHPrivateKeyFile); err == nil { signer = s } else { log.Fatalf("read_private_key_signer: %v", err) }
     // Send cert line as pubkey in registration (server unwraps cert and enforces CA)
     pubForRegistration := func() string {
-        if certLine, err := readTrim(cfg.Producer.SSHCertFile); err == nil { return certLine }
-        log.Fatalf("read_cert_file: %v", err)
+        certLine, e := readTrim(cfg.Producer.SSHCertFile)
+        if e == nil { return certLine }
+        log.Fatalf("read_cert_file: %v", e)
         return ""
     }()
     fp := computeFingerprint(pubForRegistration)
@@ -171,11 +172,7 @@ TokenWait:
             // re-send registration to trigger token publish if approved while waiting
             nonce = time.Now().Format(time.RFC3339Nano)
             msg = []byte(payloadStr + "." + nonce)
-            if signer != nil {
-                if sshSig, e := signer.Sign(rand.Reader, msg); e == nil { sigRaw = sshSig.Blob } else { continue }
-            } else {
-                sigRaw = ed25519.Sign(priv, msg)
-            }
+            if sshSig, e := signer.Sign(rand.Reader, msg); e == nil { sigRaw = sshSig.Blob } else { continue }
             sigB64 = base64.StdEncoding.EncodeToString(sigRaw)
             if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
                 log.Printf("register_retry id=%s", id)
