@@ -1,12 +1,12 @@
 package kernel
 
 import (
-	"encoding/json"
-	"testing"
-	"time"
+    "encoding/json"
+    "testing"
+    "time"
 
-	"github.com/example/data-kernel/internal/protocol"
-	"github.com/example/data-kernel/internal/data"
+    "github.com/example/data-kernel/internal/protocol"
+    "github.com/example/data-kernel/internal/data"
 )
 
 func TestHandleRedis_AckWhenNoPostgres(t *testing.T) {
@@ -46,8 +46,12 @@ func TestHandleRedis_PublishEnqueue(t *testing.T) {
 }
 
 func TestPgWorkerBatch_FlushOnSize_Acks(t *testing.T) {
-	acked := []string{}
-	r := &router{ack: func(ids ...string) { acked = append(acked, ids...) }}
+    ackCh := make(chan []string, 2)
+    r := &router{ack: func(ids ...string) { // send a copy to avoid sharing backing array
+        cp := make([]string, len(ids))
+        copy(cp, ids)
+        ackCh <- cp
+    }}
 	r.pgBatchSize = 2
 	r.pgBatchWait = 200 * time.Millisecond
 	r.pgCh = make(chan pgMsg, 2)
@@ -60,12 +64,16 @@ func TestPgWorkerBatch_FlushOnSize_Acks(t *testing.T) {
 	r.pgCh <- pgMsg{RedisID: "r2", Env: env2}
 	// Close to let worker flush and exit
 	close(r.pgCh)
-	// Wait a moment for flush and ack callback
-	time.Sleep(200 * time.Millisecond)
-	if len(acked) != 2 { t.Fatalf("expected 2 acks, got %d: %v", len(acked), acked) }
-	if (acked[0] != "r1" && acked[1] != "r2") && (acked[0] != "r2" && acked[1] != "r1") {
-		t.Fatalf("unexpected ack ids: %v", acked)
-	}
+    // Wait for one ack event and assert it contains both ids
+    select {
+    case got := <-ackCh:
+        if len(got) != 2 { t.Fatalf("expected 2 ids in ack, got %v", got) }
+        if !( (got[0]=="r1" && got[1]=="r2") || (got[0]=="r2" && got[1]=="r1") ) {
+            t.Fatalf("unexpected ack ids: %v", got)
+        }
+    case <-time.After(500 * time.Millisecond):
+        t.Fatalf("timed out waiting for ack")
+    }
 }
 
 

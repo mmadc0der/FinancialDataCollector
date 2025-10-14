@@ -9,7 +9,7 @@ PKG?=
 
 # Package lists (Linux/macOS shells). On Windows without a Unix shell, run the commands directly.
 PKGS_ALL:=$(shell go list ./...)
-PKGS_UNIT:=$(shell echo "$(PKGS_ALL)" | tr ' ' '\n' | grep -v "/tests/integration$$")
+PKGS_UNIT:=$(shell echo "$(PKGS_ALL)" | tr ' ' '\n' | grep -v "/tests/integration$$" | grep -v "/modules.d/producer-example$$")
 
 all: build
 
