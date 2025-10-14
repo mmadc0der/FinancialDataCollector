@@ -29,15 +29,6 @@ type Verifier struct {
     rd       *data.Redis
     cacheTTL time.Duration
     skew     time.Duration
-    // test seams (optional overrides)
-    dbInsertToken    func(ctx context.Context, producerID, jti string, exp time.Time, notes string) error
-    dbTokenExists    func(ctx context.Context, jti string) (bool, string)
-    dbIsTokenRevoked func(ctx context.Context, jti string) bool
-    dbRevokeToken    func(ctx context.Context, jti, reason string) error
-    redisExists      func(ctx context.Context, key string) (int64, error)
-    redisGet         func(ctx context.Context, key string) (string, error)
-    redisSet         func(ctx context.Context, key, value string, ttl time.Duration) error
-    redisDel         func(ctx context.Context, key string) error
 }
 
 func NewVerifier(cfg kernelcfg.AuthConfig, pg *data.Postgres, rd *data.Redis) (*Verifier, error) {
@@ -77,19 +68,6 @@ func NewVerifier(cfg kernelcfg.AuthConfig, pg *data.Postgres, rd *data.Redis) (*
         if err != nil { return nil, fmt.Errorf("parse private_key_file: %w", err) }
         if signer.PublicKey().Type() != ssh.KeyAlgoED25519 { return nil, errors.New("unsupported private key type (need ed25519)") }
         v.signer = signer
-    }
-    // initialize default seams when dependencies present
-    if pg != nil {
-        v.dbInsertToken = pg.InsertProducerToken
-        v.dbTokenExists = pg.TokenExists
-        v.dbIsTokenRevoked = pg.IsTokenRevoked
-        v.dbRevokeToken = pg.RevokeToken
-    }
-    if rd != nil && rd.C() != nil {
-        v.redisExists = func(ctx context.Context, key string) (int64, error) { return rd.C().Exists(ctx, key).Result() }
-        v.redisGet = func(ctx context.Context, key string) (string, error) { return rd.C().Get(ctx, key).Result() }
-        v.redisSet = func(ctx context.Context, key, value string, ttl time.Duration) error { return rd.C().Set(ctx, key, value, ttl).Err() }
-        v.redisDel = func(ctx context.Context, key string) error { return rd.C().Del(ctx, key).Err() }
     }
     return v, nil
 }
@@ -137,14 +115,9 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
         sigRaw = sshSig.Blob
     }
     tok := signing + "." + b64url(sigRaw)
-    if v.dbInsertToken != nil {
-        _ = v.dbInsertToken(ctx, producerID, jti, exp, notes)
-    }
+    _ = authDbInsertToken(v.pg, ctx, producerID, jti, exp, notes)
     // cache JTI in Redis for fast validation
-    if v.redisSet != nil {
-        ttl := time.Until(exp)
-        if ttl > 0 { _ = v.redisSet(ctx, "auth:jti:"+jti, producerID+"|"+fp, ttl) }
-    }
+    if ttl := time.Until(exp); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+jti, producerID+"|"+fp, ttl) }
     logging.Info("auth_token_issued", logging.F("producer_id", producerID), logging.F("jti", jti), logging.F("fp", fp))
     return tok, jti, exp, nil
 }
@@ -176,37 +149,66 @@ func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, erro
     if c.Nbf > now+int64(v.cfg.SkewSeconds) { return "", "", errors.New("token_not_yet_valid") }
     if c.Exp < now-int64(v.cfg.SkewSeconds) { return "", "", errors.New("token_expired") }
     // Redis cache: fast revoke check
-    if v.redisExists != nil {
-        if ok, _ := v.redisExists(ctx, "revoked:jti:"+c.Jti); ok > 0 {
-            return "", "", errors.New("token_revoked")
-        }
-        if s, _ := v.redisGet(ctx, "auth:jti:"+c.Jti); s != "" {
-            // Optionally validate producer_id match
-            if idx := strings.IndexByte(s, '|'); idx > 0 {
-                pid := s[:idx]
-                if pid == c.Sub { return c.Sub, c.Jti, nil }
-            } else if s == c.Sub {
-                return c.Sub, c.Jti, nil
-            }
+    if ok, _ := authRedisExists(v.rd, ctx, "revoked:jti:"+c.Jti); ok > 0 {
+        return "", "", errors.New("token_revoked")
+    }
+    if s, _ := authRedisGet(v.rd, ctx, "auth:jti:"+c.Jti); s != "" {
+        // Optionally validate producer_id match
+        if idx := strings.IndexByte(s, '|'); idx > 0 {
+            pid := s[:idx]
+            if pid == c.Sub { return c.Sub, c.Jti, nil }
+        } else if s == c.Sub {
+            return c.Sub, c.Jti, nil
         }
     }
-    if v.dbTokenExists == nil || v.dbIsTokenRevoked == nil { return "", "", errors.New("auth_db_disabled") }
-    ok, prod := v.dbTokenExists(ctx, c.Jti)
+    ok, prod := authDbTokenExists(v.pg, ctx, c.Jti)
     if !ok || prod != c.Sub { return "", "", errors.New("unknown_or_mismatched_token") }
-    if v.dbIsTokenRevoked(ctx, c.Jti) { return "", "", errors.New("token_revoked") }
+    if authDbIsTokenRevoked(v.pg, ctx, c.Jti) { return "", "", errors.New("token_revoked") }
     // Cache allow in Redis for remaining TTL
-    if v.redisSet != nil {
-        ttl := time.Until(time.Unix(c.Exp, 0))
-        if ttl > 0 { _ = v.redisSet(ctx, "auth:jti:"+c.Jti, c.Sub+"|"+c.Fp, ttl) }
-    }
+    if ttl := time.Until(time.Unix(c.Exp, 0)); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+c.Jti, c.Sub+"|"+c.Fp, ttl) }
     return c.Sub, c.Jti, nil
 }
 
 func (v *Verifier) Revoke(ctx context.Context, jti, reason string) error {
-    if v.dbRevokeToken == nil { return errors.New("auth_db_disabled") }
-    if err := v.dbRevokeToken(ctx, jti, reason); err != nil { return err }
-    if v.redisSet != nil { _ = v.redisSet(ctx, "revoked:jti:"+jti, "1", 30*24*time.Hour) }
-    if v.redisDel != nil { _ = v.redisDel(ctx, "auth:jti:"+jti) }
+    if err := authDbRevokeToken(v.pg, ctx, jti, reason); err != nil { return err }
+    _ = authRedisSet(v.rd, ctx, "revoked:jti:"+jti, "1", 30*24*time.Hour)
+    _ = authRedisDel(v.rd, ctx, "auth:jti:"+jti)
     return nil
 }
+
+// wrapper functions to allow substitution in tests without changing production behavior
+var (
+    authDbInsertToken = func(pg *data.Postgres, ctx context.Context, producerID, jti string, exp time.Time, notes string) error {
+        if pg != nil { return pg.InsertProducerToken(ctx, producerID, jti, exp, notes) }
+        return nil
+    }
+    authDbTokenExists = func(pg *data.Postgres, ctx context.Context, jti string) (bool, string) {
+        if pg == nil { return false, "" }
+        return pg.TokenExists(ctx, jti)
+    }
+    authDbIsTokenRevoked = func(pg *data.Postgres, ctx context.Context, jti string) bool {
+        if pg == nil { return true }
+        return pg.IsTokenRevoked(ctx, jti)
+    }
+    authDbRevokeToken = func(pg *data.Postgres, ctx context.Context, jti, reason string) error {
+        if pg == nil { return errors.New("auth_db_disabled") }
+        return pg.RevokeToken(ctx, jti, reason)
+    }
+    authRedisExists = func(rd *data.Redis, ctx context.Context, key string) (int64, error) {
+        if rd != nil && rd.C() != nil { return rd.C().Exists(ctx, key).Result() }
+        return 0, nil
+    }
+    authRedisGet = func(rd *data.Redis, ctx context.Context, key string) (string, error) {
+        if rd != nil && rd.C() != nil { return rd.C().Get(ctx, key).Result() }
+        return "", nil
+    }
+    authRedisSet = func(rd *data.Redis, ctx context.Context, key, value string, ttl time.Duration) error {
+        if rd != nil && rd.C() != nil { return rd.C().Set(ctx, key, value, ttl).Err() }
+        return nil
+    }
+    authRedisDel = func(rd *data.Redis, ctx context.Context, key string) error {
+        if rd != nil && rd.C() != nil { return rd.C().Del(ctx, key).Err() }
+        return nil
+    }
+)
 

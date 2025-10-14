@@ -47,17 +47,17 @@ func TestVerify_Success_WithFakes(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
     cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
-    // inject seams
+    // inject seams via package-level vars
     db := &fakeDB{exists: true, pid: "p1"}
     rd := &fakeRedis{kv: map[string]string{}}
-    v.dbInsertToken = db.InsertProducerToken
-    v.dbTokenExists = db.TokenExists
-    v.dbIsTokenRevoked = db.IsTokenRevoked
-    v.dbRevokeToken = db.RevokeToken
-    v.redisExists = func(ctx context.Context, key string) (int64, error) { if _,ok:=rd.kv[key]; ok { return 1,nil }; return 0,nil }
-    v.redisGet = func(ctx context.Context, key string) (string, error) { return rd.kv[key], nil }
-    v.redisSet = func(ctx context.Context, key, value string, ttl time.Duration) error { rd.kv[key] = value; return nil }
-    v.redisDel = func(ctx context.Context, key string) error { delete(rd.kv, key); return nil }
+    authDbInsertToken = func(_ *data.Postgres, ctx context.Context, producerID, jti string, exp time.Time, notes string) error { return db.InsertProducerToken(ctx, producerID, jti, exp, notes) }
+    authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
+    authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
+    authDbRevokeToken = func(_ *data.Postgres, ctx context.Context, jti, reason string) error { return db.RevokeToken(ctx, jti, reason) }
+    authRedisExists = func(_ *data.Redis, ctx context.Context, key string) (int64, error) { if _,ok:=rd.kv[key]; ok { return 1,nil }; return 0,nil }
+    authRedisGet = func(_ *data.Redis, ctx context.Context, key string) (string, error) { return rd.kv[key], nil }
+    authRedisSet = func(_ *data.Redis, ctx context.Context, key, value string, ttl time.Duration) error { rd.kv[key] = value; return nil }
+    authRedisDel = func(_ *data.Redis, ctx context.Context, key string) error { delete(rd.kv, key); return nil }
 
     tok, jti, _, err := v.Issue(nil, "p1", time.Minute, "", "fp")
     if err != nil { t.Fatalf("issue: %v", err) }
@@ -71,8 +71,8 @@ func TestVerify_BadSignature_WithFakes(t *testing.T) {
     cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
-    v.dbTokenExists = db.TokenExists
-    v.dbIsTokenRevoked = db.IsTokenRevoked
+    authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
+    authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
     tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
     bt := []byte(tok)
     bt[len(bt)-1] ^= 0x01
@@ -84,8 +84,8 @@ func TestVerify_Expired_WithFakes(t *testing.T) {
     cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 0}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
-    v.dbTokenExists = db.TokenExists
-    v.dbIsTokenRevoked = db.IsTokenRevoked
+    authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
+    authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
     tok, _, _, _ := v.Issue(nil, "p1", -1*time.Second, "", "")
     if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_expired") }
 }
@@ -95,8 +95,8 @@ func TestVerify_IssuerAudienceMismatch_WithFakes(t *testing.T) {
     cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
-    v.dbTokenExists = db.TokenExists
-    v.dbIsTokenRevoked = db.IsTokenRevoked
+    authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
+    authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
     tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
     v.cfg.Issuer = "other"
     if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected issuer/audience error") }

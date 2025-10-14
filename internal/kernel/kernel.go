@@ -22,6 +22,8 @@ type Kernel struct {
     rd   *data.Redis
     pg   *data.Postgres
     au   *auth.Verifier
+    // test seams for admin handlers
+    approveProducerKey func(ctx context.Context, fingerprint, name, schemaID, reviewer, notes string) (string, error)
 }
 
 func NewKernel(configPath string) (*Kernel, error) {

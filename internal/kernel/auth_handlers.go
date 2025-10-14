@@ -60,17 +60,19 @@ func (k *Kernel) handleAuthOverview(w http.ResponseWriter, r *http.Request) {
 }
 // POST /admin/approve approves a fingerprint (and optionally creates a producer) and issues a token
 func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil || k.au == nil { w.WriteHeader(http.StatusUnauthorized); return }
-	var req approveRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Fingerprint == "" || req.TTLSeconds <= 0 {
-		w.WriteHeader(http.StatusBadRequest); return
-	}
-	pid, err := k.pg.ApproveProducerKey(r.Context(), req.Fingerprint, req.Name, req.SchemaID, r.Header.Get("X-SSH-Principal"), req.Notes)
+    if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil || k.au == nil { w.WriteHeader(http.StatusUnauthorized); return }
+    var req approveRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Fingerprint == "" || req.TTLSeconds <= 0 {
+        w.WriteHeader(http.StatusBadRequest); return
+    }
+    approve := k.approveProducerKey
+    if approve == nil { approve = k.pg.ApproveProducerKey }
+    pid, err := approve(r.Context(), req.Fingerprint, req.Name, req.SchemaID, r.Header.Get("X-SSH-Principal"), req.Notes)
     if err != nil || pid == "" { w.WriteHeader(http.StatusBadRequest); return }
-	tok, jti, exp, err := k.au.Issue(r.Context(), pid, time.Duration(req.TTLSeconds)*time.Second, "approved", req.Fingerprint)
+    tok, jti, exp, err := k.au.Issue(r.Context(), pid, time.Duration(req.TTLSeconds)*time.Second, "approved", req.Fingerprint)
     if err != nil { w.WriteHeader(http.StatusInternalServerError); return }
     logging.Info("admin_approve", logging.F("fingerprint", req.Fingerprint), logging.F("producer_id", pid), logging.F("jti", jti))
-	_ = json.NewEncoder(w).Encode(map[string]any{"producer_id": pid, "token": tok, "jti": jti, "expires_at": exp})
+    _ = json.NewEncoder(w).Encode(map[string]any{"producer_id": pid, "token": tok, "jti": jti, "expires_at": exp})
 }
 
 func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
