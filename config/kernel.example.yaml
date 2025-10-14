@@ -49,6 +49,24 @@ spill:
 auth:
   enabled: true
   require_token: true
+  # Token verification/issuance
+  issuer: "fdc"
+  audience: "fdc-cluster"
+  key_id: "cluster-key"
+  # Public keys for verification (base64 raw ed25519) or SSH lines
+  public_keys: {}
+  public_keys_ssh: {}
+  # Private key for issuing (optional if not issuing)
+  private_key: ""
+  private_key_file: ""
+  private_key_passphrase_file: ""
+  # Admin access via OpenSSH CA (for /admin/* and /auth endpoints)
+  admin_ssh_ca: |
+    # ssh-ed25519 AAAA... cluster-admin-ca@fdc
+  # Producer identity enforcement: require producer certificates signed by Producer CA
+  producer_ssh_ca: |
+    # ssh-ed25519 AAAA... producer-ca@fdc
+  producer_cert_required: true
   issuer: "fdc-kernel"
   audience: "fdc-events"
   key_id: "kid-1"

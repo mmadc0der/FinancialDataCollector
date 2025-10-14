@@ -124,6 +124,7 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
             _ = v.rd.C().Set(ctx, "auth:jti:"+jti, producerID+"|"+fp, time.Duration(ttlSeconds)*time.Second).Err()
         }
     }
+    logging.Info("auth_token_issued", logging.F("producer_id", producerID), logging.F("jti", jti), logging.F("fp", fp))
     return tok, jti, exp, nil
 }
 

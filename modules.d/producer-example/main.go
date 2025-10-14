@@ -106,19 +106,10 @@ func main() {
         if line, err := readTrim(cfg.Producer.SSHPublicKeyFile); err == nil { opensshPub = line } else { log.Fatalf("read_public_key: %v", err) }
     }
     if cfg.Producer.SSHPrivateKeyFile != "" {
-        pem, err := os.ReadFile(cfg.Producer.SSHPrivateKeyFile)
-        if err != nil { log.Fatalf("read_private_key: %v", err) }
-        s, perr := ssh.ParsePrivateKey(pem)
-        if perr != nil {
-            if passFile := os.Getenv("PRODUCER_SSH_PASSPHRASE_FILE"); passFile != "" {
-                if pass, e := os.ReadFile(passFile); e == nil {
-                    s, perr = ssh.ParsePrivateKeyWithPassphrase(pem, bytes.TrimSpace(pass))
-                }
-            }
-        }
-        if perr != nil { log.Fatalf("read_private_key: %v", perr) }
-        if s.PublicKey().Type() != ssh.KeyAlgoED25519 { log.Fatalf("read_private_key: unsupported private key type (need ed25519)") }
-        signer = s
+        // Load raw ed25519 key for signing (kernel expects ed25519 signature)
+        sk, err := loadEd25519FromKeyFile(cfg.Producer.SSHPrivateKeyFile)
+        if err != nil { log.Fatalf("read_private_key_ed25519: %v", err) }
+        priv = sk
     }
     if len(priv) == 0 || opensshPub == "" {
         // fallback: generate ephemeral
@@ -139,14 +130,9 @@ func main() {
     payloadStr := canonicalJSON(payload)
     nonce := time.Now().Format(time.RFC3339Nano)
     msg := []byte(payloadStr + "." + nonce)
-    var sigRaw []byte
-    if signer != nil {
-        sshSig, err := signer.Sign(rand.Reader, msg)
-        if err != nil { log.Fatalf("sign_error: %v", err) }
-        sigRaw = sshSig.Blob
-    } else {
-        sigRaw = ed25519.Sign(priv, msg)
-    }
+    // Always sign with ed25519 raw signature
+    if len(priv) == 0 { log.Fatalf("missing ed25519 private key for signing") }
+    sigRaw := ed25519.Sign(priv, msg)
     sigB64 := base64.StdEncoding.EncodeToString(sigRaw)
     regID, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result()
     if err != nil { log.Fatalf("register_xadd_error: %v", err) }
