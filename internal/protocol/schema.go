@@ -4,7 +4,7 @@ import (
     "encoding/json"
     "time"
 
-    ulid "github.com/oklog/ulid/v2"
+    "github.com/google/uuid"
 )
 
 const Version = "0.1.0"
@@ -29,7 +29,7 @@ func NewAck(lastID string) Ack {
 	return Ack{
 		Version: Version,
 		Type:    "ack",
-		ID:      ulid.Make().String(),
+        ID:      func() string { u, _ := uuid.NewV7(); return u.String() }(),
 		TS:      time.Now().UnixNano(),
 		LastID:  lastID,
 	}
@@ -39,7 +39,7 @@ func ErrorEnvelope(code, message string) []byte {
 	e := map[string]any{
 		"version": Version,
 		"type":    "error",
-		"id":      ulid.Make().String(),
+        "id":      func() string { u, _ := uuid.NewV7(); return u.String() }(),
 		"ts":      time.Now().UnixNano(),
 		"data": map[string]string{
 			"code":    code,
@@ -68,6 +68,18 @@ func ValidateEnvelope(e Envelope) error {
     }
     // data may be empty for some control/ack messages
     return nil
+}
+
+// CanonicalizeJSON returns a canonical JSON encoding with stable key ordering.
+// It unmarshals and re-marshals the input to enforce a deterministic encoding.
+func CanonicalizeJSON(in []byte) []byte {
+    var tmp any
+    if json.Unmarshal(in, &tmp) != nil {
+        return in
+    }
+    b, err := json.Marshal(tmp)
+    if err != nil { return in }
+    return b
 }
 
 type Err struct {

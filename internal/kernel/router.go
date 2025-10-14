@@ -32,6 +32,9 @@ type router struct {
 
 func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) {
     r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack}
+    // pick defaults from config, may be empty which signals NULL in DB
+    r.prodID = cfg.Postgres.DefaultProducerID
+    r.schID = cfg.Postgres.DefaultSchemaID
     if cfg.Postgres.Enabled {
         if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
             r.pg = pg
