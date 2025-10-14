@@ -7,6 +7,7 @@ import (
     "net/http"
     "time"
 
+    "github.com/example/data-kernel/internal/logging"
     ssh "golang.org/x/crypto/ssh"
 )
 
