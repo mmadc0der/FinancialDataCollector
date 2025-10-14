@@ -3,6 +3,10 @@ package kernel
 import (
     "context"
     "encoding/json"
+    "errors"
+    "io"
+    "net"
+    "strings"
     "time"
 
     "github.com/example/data-kernel/internal/data"
@@ -144,6 +148,7 @@ func (r *router) pgWorkerBatch() {
         // Retry a few times with exponential backoff
         const maxRetries = 3
         backoff := 200 * time.Millisecond
+        lastErr := err
         for i := 1; i <= maxRetries; i++ {
             time.Sleep(backoff)
             t1 := time.Now()
@@ -154,10 +159,31 @@ func (r *router) pgWorkerBatch() {
                 return
             } else {
                 logging.Warn("pg_batch_error_retry", logging.F("attempt", i), logging.F("err", e.Error()))
+                lastErr = e
             }
             if backoff < 5*time.Second { backoff *= 2 }
         }
-        // Batch failed after retries; try per-row fallback and track failures (still via ingest)
+        // If this looks like a connectivity error, optionally spill to filesystem (as last resort)
+        if isConnectivityError(lastErr) {
+            if r.sp != nil {
+                envs := make([]protocol.Envelope, 0, len(buf))
+                ids := make([]string, 0, len(buf))
+                for _, m := range buf { envs = append(envs, m.Env); ids = append(ids, m.RedisID) }
+                if err := r.sp.WriteEnvelopes(envs); err == nil {
+                    logging.Error("spill_write_connectivity_fallback", logging.F("count", len(ids)), logging.F("err", lastErr.Error()))
+                    if r.ack != nil { r.ack(ids...) }
+                    buf = buf[:0]
+                    return
+                } else {
+                    logging.Error("spill_write_error", logging.F("err", err.Error()), logging.F("count", len(ids)))
+                }
+            }
+            // keep buffer to retry on next cycle
+            logging.Error("pg_connectivity_error_deferred", logging.F("buffer_len", len(buf)), logging.F("err", lastErr.Error()))
+            return
+        }
+
+        // Batch failed after retries (non-connectivity); try per-row fallback and track failures (still via ingest)
         failed := make([]pgMsg, 0, len(buf))
         succeededIDs := make([]string, 0, len(buf))
         for i, m := range buf {
@@ -184,22 +210,8 @@ func (r *router) pgWorkerBatch() {
         if len(succeededIDs) > 0 && r.ack != nil { r.ack(succeededIDs...) }
         if len(failed) > 0 { logging.Warn("pg_fallback_failed_count", logging.F("count", len(failed))) }
         if len(failed) == 0 { buf = buf[:0]; return }
-        // Spill failed ones if spill enabled
-        if r.sp != nil {
-            envs := make([]protocol.Envelope, 0, len(failed))
-            ids := make([]string, 0, len(failed))
-            for _, m := range failed { envs = append(envs, m.Env); ids = append(ids, m.RedisID) }
-            if err := r.sp.WriteEnvelopes(envs); err == nil {
-                logging.Info("spill_write", logging.F("count", len(ids)))
-                if r.ack != nil { r.ack(ids...) }
-                buf = buf[:0]
-                return
-            } else {
-                logging.Error("spill_write_error", logging.F("err", err.Error()), logging.F("count", len(ids)))
-            }
-        }
-        // Could not persist; keep buffer (will retry next cycle)
-        logging.Warn("pg_persist_deferred", logging.F("buffer_len", len(buf)))
+        // Could not persist; rely on DB-level spill (ingest_spill) and retry next cycle; log as error
+        logging.Error("pg_persist_failed_non_connectivity", logging.F("buffer_len", len(buf)))
     }
     for {
         select {
@@ -233,5 +245,27 @@ func (r *router) producerID() any {
 func (r *router) schemaID() any {
     if r.schID == "" { return nil }
     return r.schID
+}
+
+// isConnectivityError attempts to detect network/connection-level failures where the database is unreachable,
+// to decide whether to fallback to filesystem spill as a last resort.
+func isConnectivityError(err error) bool {
+    if err == nil { return false }
+    if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) { return true }
+    if errors.Is(err, io.EOF) { return true }
+    var ne net.Error
+    if errors.As(err, &ne) { return true }
+    // best-effort string checks (driver error strings)
+    s := strings.ToLower(err.Error())
+    switch {
+    case strings.Contains(s, "connection refused"),
+        strings.Contains(s, "broken pipe"),
+        strings.Contains(s, "connection reset"),
+        strings.Contains(s, "no such host"),
+        strings.Contains(s, "server closed the connection"),
+        strings.Contains(s, "i/o timeout"):
+        return true
+    }
+    return false
 }
 

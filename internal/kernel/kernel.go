@@ -70,6 +70,7 @@ func (k *Kernel) Start(ctx context.Context) error {
         v, err := auth.NewVerifier(k.cfg.Auth, k.pg, k.rd)
         if err != nil { return err }
         k.au = v
+        logging.Info("auth_verifier_initialized", logging.F("issuer", k.cfg.Auth.Issuer), logging.F("audience", k.cfg.Auth.Audience), logging.F("require_token", k.cfg.Auth.RequireToken))
     }
 
     // Start Redis consumer if enabled
@@ -118,6 +119,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
         streams, err := k.rd.ReadBatch(ctx, consumer, count, block)
         if err != nil {
             // backoff on errors
+            logging.Warn("redis_read_error", logging.Err(err))
             time.Sleep(500 * time.Millisecond)
             continue
         }
@@ -138,6 +140,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 id, payload, token := data.DecodeEnvelope(m)
                 if len(payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, []byte("{}"), "empty_payload")
+                    logging.Warn("redis_dlq_empty_payload", logging.F("id", id))
                     metrics.RedisDLQTotal.Add(1)
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
@@ -148,6 +151,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     if _, _, err := k.au.Verify(ctx, token); err != nil {
                         metrics.AuthDeniedTotal.Inc()
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
+                        logging.Warn("redis_auth_denied", logging.F("id", id), logging.Err(err))
                         _ = k.rd.Ack(ctx, m.ID)
                         metrics.RedisAckTotal.Add(1)
                         continue
@@ -157,6 +161,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 var env struct{ Version string `json:"version"`; Type string `json:"type"`; ID string `json:"id"`; TS int64 `json:"ts"`; Data json.RawMessage `json:"data"` }
                 if err := json.Unmarshal(payload, &env); err != nil || env.ID == "" || env.Version == "" || env.TS == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_envelope")
+                    logging.Warn("redis_dlq_bad_envelope", logging.F("id", id))
                     metrics.RedisDLQTotal.Add(1)
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
@@ -167,10 +172,12 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
                     _ = k.handleControl(ctx, m.ID, protocolEnvelopeLite{Version: env.Version, Type: env.Type, ID: env.ID, TS: env.TS, Data: env.Data}, payload)
+                    logging.Info("redis_control_handled", logging.F("id", id))
                     continue
                 }
                 // route for durable handling; ack will be done after persistence via router callback
                 k.rt.handleRedis(m.ID, protocolEnvelope(env))
+                logging.Debug("redis_event_enqueued", logging.F("id", id))
             }
         }
     }

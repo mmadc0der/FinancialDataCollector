@@ -40,6 +40,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
     for ctx.Err() == nil {
         res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
         if err != nil && !errors.Is(err, redis.Nil) {
+            logging.Warn("register_read_error", logging.Err(err))
             time.Sleep(200 * time.Millisecond)
             continue
         }
@@ -50,11 +51,15 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                 payloadStr, _ := m.Values["payload"].(string)
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
-                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
+                    logging.Warn("register_missing_fields", logging.F("id", m.ID))
+                    _ = k.rd.Ack(ctx, m.ID); continue }
                 fp := sshFingerprint([]byte(pubkey))
+                logging.Info("register_received", logging.F("id", m.ID), logging.F("fingerprint", fp))
                 // Nonce replay guard (best-effort via Redis)
                 if k.rd != nil && k.rd.C() != nil {
                     if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "reg:nonce:"+fp+":"+nonce), 1, time.Hour).Result(); !ok {
+                        logging.Warn("register_nonce_replay", logging.F("fingerprint", fp), logging.F("nonce", nonce))
                         _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "replay", "duplicate_nonce", "")
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
@@ -68,8 +73,11 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                     if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
                         caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
                         if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
+                            logging.Info("register_cert_verified", logging.F("fingerprint", fp), logging.F("cert_key_id", cert.KeyId))
                             parsedPub = cert.Key
-                        } else { parsedPub = nil }
+                        } else {
+                            logging.Warn("register_cert_invalid", logging.F("fingerprint", fp))
+                            parsedPub = nil }
                     }
                     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
@@ -88,10 +96,13 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                             }
                             if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) {
                                 validSig = true
+                                logging.Info("register_sig_valid", logging.F("fingerprint", fp))
+                            } else {
+                                logging.Warn("register_sig_invalid", logging.F("fingerprint", fp))
                             }
                         }
                     }
-                }
+                } else { logging.Warn("register_pubkey_parse_error", logging.F("fingerprint", fp), logging.Err(err)) }
                 // Upsert key and create registration record
                 _ = k.pg.UpsertProducerKey(ctx, fp, pubkey)
                 exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
@@ -104,7 +115,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                     tok, jti, exp, err := k.au.Issue(ctx, *producerID, time.Hour, "auto-refresh", fp)
                     if err == nil {
                         if pid, perr := k.pg.TryAutoIssueAndRecord(ctx, fp, jti, exp, "auto-refresh"); perr == nil && pid != "" {
-                            logging.Info("register_auto_issue", logging.F("fingerprint", fp))
+                            logging.Info("register_auto_issue", logging.F("fingerprint", fp), logging.F("producer_id", pid), logging.F("jti", jti))
                             if k.cfg.Redis.RegisterRespStream != "" && k.rd != nil && k.rd.C() != nil {
                                 _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{
                                     Stream: prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterRespStream),
@@ -112,11 +123,15 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                                     Approx: true,
                                     Values: map[string]any{"fingerprint": fp, "token": tok, "producer_id": pid},
                                 }).Err()
+                                logging.Info("register_resp_published", logging.F("fingerprint", fp))
                             }
                         }
+                    } else {
+                        logging.Error("register_issue_error", logging.F("fingerprint", fp), logging.Err(err))
                     }
                 }
                 _ = k.rd.Ack(ctx, m.ID)
+                logging.Debug("register_ack", logging.F("id", m.ID))
             }
         }
     }
