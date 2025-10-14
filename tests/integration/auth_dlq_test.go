@@ -1,3 +1,5 @@
+//go:build integration
+
 package it
 
 import (
@@ -61,3 +63,5 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
         return l, l >= 1
     })
 }
+
+

@@ -1,3 +1,5 @@
+//go:build integration
+
 package it
 
 import (
@@ -99,3 +101,5 @@ func TestRegistrationAutoIssue(t *testing.T) {
         return l, l >= 1
     })
 }
+
+

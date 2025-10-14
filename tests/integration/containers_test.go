@@ -1,3 +1,5 @@
+//go:build integration
+
 package it
 
 import (
@@ -50,3 +52,5 @@ func waitFor[T any](t *testing.T, deadline time.Duration, fn func() (T, bool)) T
     }
     return zero
 }
+
+

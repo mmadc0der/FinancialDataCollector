@@ -1,3 +1,5 @@
+//go:build integration
+
 package it
 
 import (
@@ -82,3 +84,5 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
         return cnt, cnt >= 1
     })
 }
+
+
