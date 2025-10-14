@@ -9,6 +9,9 @@ require (
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/prometheus/client_golang v1.19.0
 	github.com/redis/go-redis/v9 v9.5.1
+	github.com/testcontainers/testcontainers-go v0.31.0
+	github.com/testcontainers/testcontainers-go/modules/redis v0.31.0
+	github.com/testcontainers/testcontainers-go/modules/postgres v0.31.0
 	golang.org/x/crypto v0.17.0
 	gopkg.in/yaml.v3 v3.0.1
 )

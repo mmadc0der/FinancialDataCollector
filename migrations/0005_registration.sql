@@ -49,6 +49,7 @@ END IF; END $$;
 CREATE OR REPLACE FUNCTION public.approve_producer_key(
     _fingerprint TEXT,
     _name TEXT,
+    _schema_id UUID DEFAULT NULL,
     _reviewer TEXT,
     _notes TEXT
 ) RETURNS UUID LANGUAGE plpgsql AS $$

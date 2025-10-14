@@ -37,6 +37,9 @@ type PostgresConfig struct {
     QueueSize int `yaml:"queue_size"`
     BatchSize int `yaml:"batch_size"`
     BatchMaxWaitMs int `yaml:"batch_max_wait_ms"`
+    // Defaults used by router when deriving ids at ingest is not configured
+    DefaultProducerID string `yaml:"default_producer_id"`
+    DefaultSchemaID   string `yaml:"default_schema_id"`
 }
 
 type RedisConfig struct {
