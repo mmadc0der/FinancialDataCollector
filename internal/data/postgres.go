@@ -4,6 +4,7 @@ import (
     "context"
     "errors"
     "encoding/json"
+    "database/sql"
     "os"
     "time"
 
@@ -83,6 +84,13 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
     // 0005 (registration)
     if b, err := os.ReadFile("migrations/0005_registration.sql"); err == nil {
         logging.Info("pg_apply_migration", logging.F("file", "0005_registration.sql"))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        defer cancel()
+        if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
+    }
+    // 0006 (subjects.current_schema_id)
+    if b, err := os.ReadFile("migrations/0006_subject_current_schema.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0006_subject_current_schema.sql"))
         cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
         defer cancel()
         if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
@@ -178,6 +186,71 @@ func (p *Postgres) EnsureSchemaSubject(ctx context.Context, name string, version
     err := p.pool.QueryRow(cctx, `SELECT schema_id, subject_id FROM public.ensure_schema_subject($1,$2,$3::jsonb,$4,$5::jsonb)`, name, version, string(body), subjectKey, string(attrs)).Scan(&schemaID, &subjectID)
     if err != nil { return "", "", err }
     return schemaID, subjectID, nil
+}
+
+// GetCurrentSchemaID returns subjects.current_schema_id for a given subject_id, or empty if null/missing.
+func (p *Postgres) GetCurrentSchemaID(ctx context.Context, subjectID string) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    var sid *string
+    if err := p.pool.QueryRow(cctx, `SELECT current_schema_id::text FROM public.subjects WHERE subject_id=$1`, subjectID).Scan(&sid); err != nil {
+        return "", err
+    }
+    if sid == nil { return "", nil }
+    return *sid, nil
+}
+
+// SetCurrentSubjectSchema sets subjects.current_schema_id and appends to subject_schemas history (via SQL helper).
+func (p *Postgres) SetCurrentSubjectSchema(ctx context.Context, subjectID, schemaID string) error {
+    if p.pool == nil { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    var sid string
+    return p.pool.QueryRow(cctx, `SELECT public.set_current_subject_schema($1::uuid,$2::uuid)`, subjectID, schemaID).Scan(&sid)
+}
+
+// CheckProducerSubject verifies producer-subject binding exists.
+func (p *Postgres) CheckProducerSubject(ctx context.Context, producerID, subjectID string) (bool, error) {
+    if p.pool == nil { return false, nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    var ok bool
+    err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.producer_subjects WHERE producer_id=$1 AND subject_id=$2)`, producerID, subjectID).Scan(&ok)
+    if err != nil { return false, err }
+    return ok, nil
+}
+
+// EnsureSubjectByKey creates or updates a subject by key and returns subject_id
+func (p *Postgres) EnsureSubjectByKey(ctx context.Context, subjectKey string, attrs []byte) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    var sid string
+    // attrs may be empty; coalesce to '{}'::jsonb
+    var a sql.NullString
+    if len(attrs) > 0 { a = sql.NullString{String: string(attrs), Valid: true} }
+    err := p.pool.QueryRow(cctx,
+        `WITH up AS (
+            INSERT INTO public.subjects(subject_id, subject_key, attrs)
+            VALUES (gen_random_uuid(), $1, COALESCE($2::jsonb, '{}'::jsonb))
+            ON CONFLICT (subject_key)
+            DO UPDATE SET attrs = COALESCE($2::jsonb, public.subjects.attrs), last_seen_at = now()
+            RETURNING subject_id
+        ) SELECT subject_id FROM up
+        UNION ALL
+        SELECT subject_id FROM public.subjects WHERE subject_key=$1 LIMIT 1`, subjectKey, a).Scan(&sid)
+    if err != nil { return "", err }
+    return sid, nil
+}
+
+// BindProducerSubject inserts producer_subjects link (idempotent)
+func (p *Postgres) BindProducerSubject(ctx context.Context, producerID, subjectID string) error {
+    if p.pool == nil { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    _, err := p.pool.Exec(cctx, `INSERT INTO public.producer_subjects(producer_id, subject_id) VALUES ($1,$2) ON CONFLICT (producer_id, subject_id) DO NOTHING`, producerID, subjectID)
+    return err
 }
 
 // Auth helpers

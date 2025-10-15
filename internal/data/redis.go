@@ -117,3 +117,24 @@ func DecodeEnvelope(msg redis.XMessage) (string, []byte, string) {
 }
 
 
+// Schema cache helpers: fdc:schemas:<subject_id> -> schema_id with sliding TTL
+func (r *Redis) SchemaCacheGet(ctx context.Context, subjectID string) (string, bool) {
+    if r.c == nil || subjectID == "" { return "", false }
+    key := r.cfg.KeyPrefix + "schemas:" + subjectID
+    val, err := r.c.Get(ctx, key).Result()
+    if err == nil && val != "" {
+        // sliding TTL refresh (1h)
+        _ = r.c.Expire(ctx, key, time.Hour).Err()
+        return val, true
+    }
+    return "", false
+}
+
+func (r *Redis) SchemaCacheSet(ctx context.Context, subjectID, schemaID string, ttl time.Duration) error {
+    if r.c == nil || subjectID == "" || schemaID == "" { return nil }
+    key := r.cfg.KeyPrefix + "schemas:" + subjectID
+    if ttl <= 0 { ttl = time.Hour }
+    return r.c.Set(ctx, key, schemaID, ttl).Err()
+}
+
+

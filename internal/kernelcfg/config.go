@@ -53,6 +53,8 @@ type RedisConfig struct {
     RegisterStream string `yaml:"register_stream"`
     RegisterRespStream string `yaml:"register_resp_stream"`
     ControlRespStream string `yaml:"control_resp_stream"`
+    SubjectRegisterStream string `yaml:"subject_register_stream"`
+    SubjectRespStream string `yaml:"subject_resp_stream"`
     MaxLenApprox int64 `yaml:"maxlen_approx"`
     QueueSize int `yaml:"queue_size"`
     // Ingest (consumer) settings
@@ -95,6 +97,7 @@ type AuthConfig struct {
     AdminSSHCA  string `yaml:"admin_ssh_ca"` // OpenSSH CA public key (text)
     ProducerSSHCA string `yaml:"producer_ssh_ca"` // OpenSSH CA public key for producers (text)
     ProducerCertRequired bool `yaml:"producer_cert_required"`
+    TrustOnFirstUse bool `yaml:"trust_on_first_use"`
     // Cache and clock skew
     CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
     SkewSeconds int `yaml:"skew_seconds"`

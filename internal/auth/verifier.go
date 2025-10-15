@@ -82,6 +82,7 @@ type claims struct {
     Iss string `json:"iss"`
     Aud string `json:"aud"`
     Sub string `json:"sub"`
+    Sid string `json:"sid,omitempty"`
     Iat int64  `json:"iat"`
     Nbf int64  `json:"nbf"`
     Exp int64  `json:"exp"`
@@ -122,51 +123,79 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
     return tok, jti, exp, nil
 }
 
+// IssueSubject issues a subject-scoped token by embedding sid.
+func (v *Verifier) IssueSubject(ctx context.Context, producerID, subjectID string, ttl time.Duration, notes string, fp string) (string, string, time.Time, error) {
+    if len(v.priv) == 0 && v.signer == nil {
+        return "", "", time.Time{}, errors.New("issuer private key not configured")
+    }
+    now := time.Now().UTC()
+    exp := now.Add(ttl)
+    jti := ulid.Make().String()
+    hdr := header{Alg: "EdDSA", Kid: v.cfg.KeyID, Typ: "FDC"}
+    cl := claims{Iss: v.cfg.Issuer, Aud: v.cfg.Audience, Sub: producerID, Sid: subjectID, Iat: now.Unix(), Nbf: now.Unix() - int64(v.cfg.SkewSeconds), Exp: exp.Unix(), Jti: jti, Fp: fp}
+    hb, _ := json.Marshal(hdr)
+    cb, _ := json.Marshal(cl)
+    signing := b64url(hb) + "." + b64url(cb)
+    var sigRaw []byte
+    if len(v.priv) > 0 {
+        sigRaw = ed25519.Sign(v.priv, []byte(signing))
+    } else {
+        sshSig, err := v.signer.Sign(rand.Reader, []byte(signing))
+        if err != nil { return "", "", time.Time{}, err }
+        sigRaw = sshSig.Blob
+    }
+    tok := signing + "." + b64url(sigRaw)
+    _ = authDbInsertToken(v.pg, ctx, producerID, jti, exp, notes)
+    if ttl := time.Until(exp); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+jti, producerID+"|"+fp, ttl) }
+    logging.Info("auth_token_issued_subject", logging.F("producer_id", producerID), logging.F("subject_id", subjectID), logging.F("jti", jti))
+    return tok, jti, exp, nil
+}
+
 // Verify validates token signature and basic claims; DB must know the JTI and not be revoked.
-func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, error) {
+func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, string, error) {
     if !v.cfg.Enabled || !v.cfg.RequireToken || tok == "" {
-        return "", "", errors.New("auth_required")
+        return "", "", "", errors.New("auth_required")
     }
     parts := strings.Split(tok, ".")
-    if len(parts) != 3 { return "", "", errors.New("bad_token_format") }
+    if len(parts) != 3 { return "", "", "", errors.New("bad_token_format") }
     hb, err := parseB64(parts[0])
-    if err != nil { return "", "", errors.New("bad_header_b64") }
+    if err != nil { return "", "", "", errors.New("bad_header_b64") }
     cb, err := parseB64(parts[1])
-    if err != nil { return "", "", errors.New("bad_claims_b64") }
+    if err != nil { return "", "", "", errors.New("bad_claims_b64") }
     sig, err := parseB64(parts[2])
-    if err != nil { return "", "", errors.New("bad_sig_b64") }
+    if err != nil { return "", "", "", errors.New("bad_sig_b64") }
     var h header
-    if err := json.Unmarshal(hb, &h); err != nil { return "", "", errors.New("bad_header_json") }
-    if h.Alg != "EdDSA" { return "", "", errors.New("alg_not_supported") }
+    if err := json.Unmarshal(hb, &h); err != nil { return "", "", "", errors.New("bad_header_json") }
+    if h.Alg != "EdDSA" { return "", "", "", errors.New("alg_not_supported") }
     pub := v.pub[h.Kid]
-    if len(pub) == 0 { return "", "", errors.New("unknown_kid") }
+    if len(pub) == 0 { return "", "", "", errors.New("unknown_kid") }
     signing := parts[0] + "." + parts[1]
-    if !ed25519.Verify(pub, []byte(signing), sig) { return "", "", errors.New("bad_signature") }
+    if !ed25519.Verify(pub, []byte(signing), sig) { return "", "", "", errors.New("bad_signature") }
     var c claims
-    if err := json.Unmarshal(cb, &c); err != nil { return "", "", errors.New("bad_claims_json") }
+    if err := json.Unmarshal(cb, &c); err != nil { return "", "", "", errors.New("bad_claims_json") }
     now := time.Now().UTC().Unix()
-    if c.Iss != v.cfg.Issuer || c.Aud != v.cfg.Audience { return "", "", errors.New("bad_issuer_audience") }
-    if c.Nbf > now+int64(v.cfg.SkewSeconds) { return "", "", errors.New("token_not_yet_valid") }
-    if c.Exp < now-int64(v.cfg.SkewSeconds) { return "", "", errors.New("token_expired") }
+    if c.Iss != v.cfg.Issuer || c.Aud != v.cfg.Audience { return "", "", "", errors.New("bad_issuer_audience") }
+    if c.Nbf > now+int64(v.cfg.SkewSeconds) { return "", "", "", errors.New("token_not_yet_valid") }
+    if c.Exp < now-int64(v.cfg.SkewSeconds) { return "", "", "", errors.New("token_expired") }
     // Redis cache: fast revoke check
     if ok, _ := authRedisExists(v.rd, ctx, "revoked:jti:"+c.Jti); ok > 0 {
-        return "", "", errors.New("token_revoked")
+        return "", "", "", errors.New("token_revoked")
     }
     if s, _ := authRedisGet(v.rd, ctx, "auth:jti:"+c.Jti); s != "" {
         // Optionally validate producer_id match
         if idx := strings.IndexByte(s, '|'); idx > 0 {
             pid := s[:idx]
-            if pid == c.Sub { return c.Sub, c.Jti, nil }
+            if pid == c.Sub { return c.Sub, c.Sid, c.Jti, nil }
         } else if s == c.Sub {
-            return c.Sub, c.Jti, nil
+            return c.Sub, c.Sid, c.Jti, nil
         }
     }
     ok, prod := authDbTokenExists(v.pg, ctx, c.Jti)
-    if !ok || prod != c.Sub { return "", "", errors.New("unknown_or_mismatched_token") }
-    if authDbIsTokenRevoked(v.pg, ctx, c.Jti) { return "", "", errors.New("token_revoked") }
+    if !ok || prod != c.Sub { return "", "", "", errors.New("unknown_or_mismatched_token") }
+    if authDbIsTokenRevoked(v.pg, ctx, c.Jti) { return "", "", "", errors.New("token_revoked") }
     // Cache allow in Redis for remaining TTL
     if ttl := time.Until(time.Unix(c.Exp, 0)); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+c.Jti, c.Sub+"|"+c.Fp, ttl) }
-    return c.Sub, c.Jti, nil
+    return c.Sub, c.Sid, c.Jti, nil
 }
 
 func (v *Verifier) Revoke(ctx context.Context, jti, reason string) error {

@@ -24,6 +24,7 @@ type router struct {
     replayer *spill.Replayer
     ack  func(ids ...string)
     pgCh chan pgMsg
+    pgChLean chan pgMsgLean
     rdCh chan rdMsg
     publishEnabled bool
     // batching
@@ -46,6 +47,8 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
             if q <= 0 { q = 1024 }
             r.pgCh = make(chan pgMsg, q)
             go r.pgWorkerBatch()
+            r.pgChLean = make(chan pgMsgLean, q)
+            go r.pgWorkerBatchLean()
         } else {
             logging.Warn("postgres_init_error", logging.Err(err))
         }
@@ -104,6 +107,18 @@ func (r *router) handleRedis(redisID string, env protocol.Envelope) {
 // routeRaw is no longer used for WS; kept for compatibility if needed.
 
 type pgMsg struct { RedisID string; Env protocol.Envelope }
+
+// Lean event message (no envelope)
+type pgMsgLean struct {
+    RedisID   string
+    EventID   string
+    TS        string
+    SubjectID string
+    ProducerID string
+    SchemaID  string
+    Payload   []byte
+    Tags      []byte
+}
 
 func (r *router) pgWorkerBatch() {
     buf := make([]pgMsg, 0, r.pgBatchSize)
@@ -216,6 +231,90 @@ func (r *router) pgWorkerBatch() {
     for {
         select {
         case m, ok := <-r.pgCh:
+            if !ok { flush(); return }
+            buf = append(buf, m)
+            if len(buf) >= r.pgBatchSize { flush(); if !timer.Stop() { <-timer.C }; timer.Reset(r.pgBatchWait) }
+        case <-timer.C:
+            flush()
+            timer.Reset(r.pgBatchWait)
+        }
+    }
+}
+
+// handleLeanEvent enqueues a lean event (already validated and enriched) for DB ingest
+func (r *router) handleLeanEvent(redisID, eventID, ts, subjectID, producerID string, payloadJSON, tagsJSON []byte, schemaID string) {
+    if r.pgChLean != nil {
+        select {
+        case r.pgChLean <- pgMsgLean{RedisID: redisID, EventID: eventID, TS: ts, SubjectID: subjectID, ProducerID: producerID, SchemaID: schemaID, Payload: payloadJSON, Tags: tagsJSON}:
+        default:
+        }
+    } else {
+        if r.ack != nil { r.ack(redisID) }
+    }
+}
+
+func (r *router) pgWorkerBatchLean() {
+    buf := make([]pgMsgLean, 0, r.pgBatchSize)
+    timer := time.NewTimer(r.pgBatchWait)
+    defer timer.Stop()
+    flush := func() {
+        if len(buf) == 0 { return }
+        events := make([]map[string]any, 0, len(buf))
+        redisIDs := make([]string, 0, len(buf))
+        for _, m := range buf {
+            var payload map[string]any
+            _ = json.Unmarshal(m.Payload, &payload)
+            var tags []map[string]string
+            if len(m.Tags) > 0 { _ = json.Unmarshal(m.Tags, &tags) }
+            ev := map[string]any{
+                "event_id":   m.EventID,
+                "ts":         m.TS,
+                "subject_id": m.SubjectID,
+                "producer_id": m.ProducerID,
+                "schema_id":  m.SchemaID,
+                "payload":    payload,
+                "tags":       tags,
+            }
+            events = append(events, ev)
+            redisIDs = append(redisIDs, m.RedisID)
+        }
+        metrics.PGBatchSize.Observe(float64(len(events)))
+        t0 := time.Now()
+        err := r.pg.IngestEventsJSON(context.Background(), events)
+        metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
+        if err == nil {
+            logging.Info("pg_batch_commit", logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
+            if r.ack != nil { r.ack(redisIDs...) }
+            buf = buf[:0]
+            return
+        }
+        logging.Warn("pg_batch_error", logging.F("err", err.Error()), logging.F("batch_size", len(events)))
+        // per-row fallback
+        succeeded := make([]string, 0, len(buf))
+        for i, m := range buf {
+            var payload map[string]any
+            _ = json.Unmarshal(m.Payload, &payload)
+            var tags []map[string]string
+            if len(m.Tags) > 0 { _ = json.Unmarshal(m.Tags, &tags) }
+            ev := []map[string]any{{
+                "event_id":   m.EventID,
+                "ts":         m.TS,
+                "subject_id": m.SubjectID,
+                "producer_id": m.ProducerID,
+                "schema_id":  m.SchemaID,
+                "payload":    payload,
+                "tags":       tags,
+            }}
+            if e := r.pg.IngestEventsJSON(context.Background(), ev); e == nil {
+                succeeded = append(succeeded, redisIDs[i])
+            }
+        }
+        if len(succeeded) > 0 && r.ack != nil { r.ack(succeeded...) }
+        buf = buf[:0]
+    }
+    for {
+        select {
+        case m, ok := <-r.pgChLean:
             if !ok { flush(); return }
             buf = append(buf, m)
             if len(buf) >= r.pgBatchSize { flush(); if !timer.Stop() { <-timer.C }; timer.Reset(r.pgBatchWait) }
