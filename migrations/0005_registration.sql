@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS public.producer_registrations (
     sig TEXT NOT NULL,
     nonce TEXT NOT NULL,
     ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected|auto_issued
+    status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
     reason TEXT,
     reviewed_at TIMESTAMPTZ,
     reviewer TEXT
@@ -91,41 +91,5 @@ END;
 $$;
 
 -- Atomically gate auto-issue per hour and record token metadata
-CREATE OR REPLACE FUNCTION public.try_auto_issue_and_record(
-    _fingerprint TEXT,
-    _jti TEXT,
-    _expires_at TIMESTAMPTZ,
-    _notes TEXT
-) RETURNS UUID LANGUAGE plpgsql AS $$
-DECLARE v_producer_id UUID;
-DECLARE v_window TIMESTAMPTZ;
-BEGIN
-    -- lock key row to avoid races
-    SELECT producer_id INTO v_producer_id FROM public.producer_keys WHERE fingerprint = _fingerprint AND status='approved' AND producer_id IS NOT NULL FOR UPDATE;
-    IF v_producer_id IS NULL THEN
-        RETURN NULL;
-    END IF;
-    v_window := date_trunc('hour', now());
-    -- insert rate window row; if exists, deny
-    INSERT INTO public.producer_auto_issues(fingerprint, window_start) VALUES (_fingerprint, v_window) ON CONFLICT DO NOTHING;
-    IF NOT FOUND THEN
-        RETURN NULL;
-    END IF;
-    -- record token (idempotent on jti)
-    INSERT INTO public.producer_tokens(token_id, producer_id, jti, expires_at, notes)
-    VALUES (gen_random_uuid(), v_producer_id, _jti, _expires_at, COALESCE(_notes,''))
-    ON CONFLICT (jti) DO NOTHING;
-    -- mark latest pending regs as auto_issued
-    UPDATE public.producer_registrations SET status='auto_issued', reviewed_at=now()
-    WHERE fingerprint=_fingerprint AND status='pending';
-    RETURN v_producer_id;
-END;
-$$;
-
--- Auto-issue rate limiting (one per hour per fingerprint)
-CREATE TABLE IF NOT EXISTS public.producer_auto_issues (
-    fingerprint TEXT NOT NULL,
-    window_start TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (fingerprint, window_start)
-);
+-- removed auto-issue helper and table; token issuance is handled via token exchange flow
 

@@ -95,8 +95,8 @@ func (r *Redis) ToDLQ(ctx context.Context, dlqStream string, id string, payload 
     return r.c.XAdd(ctx, &redis.XAddArgs{Stream: dlqStream, MaxLen: r.maxLenApprox, Approx: true, Values: map[string]any{"id": id, "payload": payload, "error": errMsg}}).Err()
 }
 
-// DecodeEnvelope extracts json payload from XMessage values.
-func DecodeEnvelope(msg redis.XMessage) (string, []byte, string) {
+// DecodeMessage extracts json payload and token from XMessage values.
+func DecodeMessage(msg redis.XMessage) (string, []byte, string) {
     var id string
     if v, ok := msg.Values["id"].(string); ok { id = v }
     if id == "" { id = msg.ID }

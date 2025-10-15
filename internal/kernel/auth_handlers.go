@@ -57,7 +57,7 @@ func (k *Kernel) handleAuthOverview(w http.ResponseWriter, r *http.Request) {
 	if k.pg.Pool() != nil { if conn, err := k.pg.Pool().Acquire(cctx); err == nil { defer conn.Release(); if rs, err := conn.Query(cctx, q); err == nil { for rs.Next() { var f, s, ts string; var pid *string; var nm *string; _ = rs.Scan(&f,&s,&pid,&nm,&ts); out = append(out, row{Fingerprint:f, Status:s, ProducerID:pid, Name:nm, CreatedAt:ts}) } } } }
     _ = json.NewEncoder(w).Encode(out)
 }
-// POST /admin/approve approves a fingerprint (and optionally creates a producer) and issues a token
+// POST /admin/approve approves a fingerprint (and optionally creates a producer). No token issuance here.
 func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
     var req approveRequest

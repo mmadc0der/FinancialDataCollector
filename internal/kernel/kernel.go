@@ -82,10 +82,12 @@ func (k *Kernel) Start(ctx context.Context) error {
             _ = k.rd.EnsureGroup(ctx)
             logging.Info("redis_consumer_start", logging.F("stream", prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)), logging.F("group", k.cfg.Redis.ConsumerGroup))
             go k.consumeRedis(ctx)
-            // registration stream consumer (separate goroutine)
+            // registration stream consumer (fixed stream)
             go k.consumeRegister(ctx)
-            // subject registration consumer
+            // subject registration consumer (fixed stream)
             go k.consumeSubjectRegister(ctx)
+            // token exchange consumer (fixed stream)
+            go k.consumeTokenExchange(ctx)
         } else {
             logging.Warn("redis_consumer_init_error", logging.Err(err))
         }
@@ -140,7 +142,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
         for _, s := range streams {
             for _, m := range s.Messages {
                 metrics.RedisReadTotal.Add(1)
-                id, payload, token := data.DecodeEnvelope(m)
+                id, payload, token := data.DecodeMessage(m)
                 if len(payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, []byte("{}"), "empty_payload")
                     logging.Warn("redis_dlq_empty_payload", logging.F("id", id))
@@ -228,8 +230,8 @@ func prefixed(prefix, key string) string {
 
 // consumeSubjectRegister handles subject registration stream {token, payload:{subject_key, schema_id?, attrs?}}
 func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
-    if k.rd == nil || k.cfg.Redis.SubjectRegisterStream == "" || k.pg == nil { return }
-    stream := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.SubjectRegisterStream)
+    if k.rd == nil || k.pg == nil { return }
+    stream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:subject:register")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
         _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
     }
@@ -251,8 +253,70 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
                 if err == nil && req.SchemaID != "" { _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID); _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour) }
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
-                if k.cfg.Redis.SubjectRespStream != "" {
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.SubjectRespStream), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                // Always respond on fixed stream
+                _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:subject:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                _ = k.rd.Ack(ctx, m.ID)
+            }
+        }
+    }
+}
+
+// consumeTokenExchange handles token issuance/renewal via either approved pubkey signature or a valid existing token
+func (k *Kernel) consumeTokenExchange(ctx context.Context) {
+    if k.rd == nil || k.pg == nil || k.au == nil { return }
+    stream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:exchange")
+    if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+    }
+    consumer := fmt.Sprintf("%s-token-%d", "kernel", time.Now().UnixNano())
+    for ctx.Err() == nil {
+        res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
+        if err != nil && !errors.Is(err, redis.Nil) { time.Sleep(200 * time.Millisecond); continue }
+        if len(res) == 0 { continue }
+        for _, s := range res {
+            for _, m := range s.Messages {
+                // Path 1: renewal with existing token
+                if tok, ok := m.Values["token"].(string); ok && tok != "" {
+                    if pid, _, _, err := k.au.Verify(ctx, tok); err == nil {
+                        if t, _, exp, ierr := k.au.Issue(ctx, pid, time.Hour, "exchange", ""); ierr == nil {
+                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                        }
+                    }
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                // Path 2: new token via approved pubkey + signature
+                pubkey, _ := m.Values["pubkey"].(string)
+                payloadStr, _ := m.Values["payload"].(string)
+                nonce, _ := m.Values["nonce"].(string)
+                sigB64, _ := m.Values["sig"].(string)
+                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                fp := sshFingerprint([]byte(pubkey))
+                // verify signature as in registration
+                parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
+                if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
+                if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
+                    caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+                    if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
+                }
+                okSig := false
+                if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
+                    if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
+                        var tmp any
+                        if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
+                        msg := []byte(payloadStr + "." + nonce)
+                        sum := sha3.Sum512(msg)
+                        sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
+                        if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
+                        if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) { okSig = true }
+                    }
+                }
+                if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
+                exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
+                if exists && status == "approved" && producerID != nil {
+                    if t, _, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
+                        _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                    }
                 }
                 _ = k.rd.Ack(ctx, m.ID)
             }

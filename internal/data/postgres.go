@@ -115,48 +115,7 @@ func (p *Postgres) IngestEventsJSON(ctx context.Context, batch any) error {
     return nil
 }
 
-func (p *Postgres) InsertEnvelope(ctx context.Context, id, typ, version string, ts time.Time, source, symbol string, data []byte) error {
-    if p.pool == nil {
-        return nil
-    }
-    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-    defer cancel()
-    _, err := p.pool.Exec(cctx,
-        `INSERT INTO envelopes (msg_id, msg_type, msg_version, msg_ts, source, symbol, data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (msg_id) DO NOTHING`,
-        id, typ, version, ts, source, symbol, data,
-    )
-    return err
-}
-
-// InsertEnvelopesBatch inserts multiple rows efficiently using CopyFrom.
-func (p *Postgres) InsertEnvelopesBatch(ctx context.Context, rows []EnvelopeRow) error {
-    if p.pool == nil || len(rows) == 0 { return nil }
-    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-    defer cancel()
-    conn, err := p.pool.Acquire(cctx)
-    if err != nil { return err }
-    defer conn.Release()
-    input := make([][]any, 0, len(rows))
-    for _, r := range rows {
-        input = append(input, []any{r.ID, r.Type, r.Version, r.TS, r.Source, r.Symbol, r.Data})
-    }
-    _, err = conn.Conn().CopyFrom(cctx, pgx.Identifier{"envelopes"}, []string{"msg_id","msg_type","msg_version","msg_ts","source","symbol","data"}, pgx.CopyFromRows(input))
-    if err != nil { metrics.PGErrorsTotal.Inc(); return err }
-    metrics.PGPersistTotal.Add(float64(len(rows)))
-    return nil
-}
-
-type EnvelopeRow struct {
-    ID string
-    Type string
-    Version string
-    TS time.Time
-    Source string
-    Symbol string
-    Data []byte
-}
+// Envelope-based APIs removed (no envelope support)
 
 func (p *Postgres) Close() {
     if p.pool != nil {
@@ -330,17 +289,7 @@ func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload,
     return err
 }
 
-// TryAutoIssueAndRecord performs atomic rate gating and records token metadata, returning producer_id or empty
-func (p *Postgres) TryAutoIssueAndRecord(ctx context.Context, fingerprint, jti string, expiresAt time.Time, notes string) (string, error) {
-    if p.pool == nil { return "", nil }
-    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-    defer cancel()
-    var pid *string
-    err := p.pool.QueryRow(cctx, `SELECT public.try_auto_issue_and_record($1,$2,$3,$4)`, fingerprint, jti, expiresAt, notes).Scan(&pid)
-    if err != nil { return "", err }
-    if pid == nil { return "", nil }
-    return *pid, nil
-}
+// Removed: TryAutoIssueAndRecord (auto-issue is not used in registration flow)
 
 // ApproveProducerKey approves a fingerprint, optionally creating a new producer, and returns the producer_id
 func (p *Postgres) ApproveProducerKey(ctx context.Context, fingerprint, name, schemaID, reviewer, notes string) (string, error) {
@@ -378,6 +327,35 @@ func (p *Postgres) ApproveBindProducerKey(ctx context.Context, fingerprint, prod
         return "", err
     }
     return producerID, nil
+}
+
+// EnsureProducerForFingerprint creates or finds a producer and binds the fingerprint without changing approval status.
+// Returns the resolved producer_id.
+func (p *Postgres) EnsureProducerForFingerprint(ctx context.Context, fingerprint, preferredName string) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    // First, see if the fingerprint already has a producer bound
+    var existingPID *string
+    if err := p.pool.QueryRow(cctx, `SELECT producer_id FROM public.producer_keys WHERE fingerprint=$1`, fingerprint).Scan(&existingPID); err == nil && existingPID != nil && *existingPID != "" {
+        return *existingPID, nil
+    }
+    // Create or get producer by name
+    name := preferredName
+    if name == "" {
+        // fallback deterministic alias from fingerprint
+        if len(fingerprint) > 12 { name = "auto_" + fingerprint[:12] } else { name = "auto_" + fingerprint }
+    }
+    var pid string
+    if err := p.pool.QueryRow(cctx, `INSERT INTO public.producers(producer_id, name) VALUES (gen_random_uuid(), $1)
+                                      ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING producer_id`, name).Scan(&pid); err != nil {
+        return "", err
+    }
+    // Bind fingerprint to producer if not already bound; keep status as is (default pending on upsert)
+    if _, err := p.pool.Exec(cctx, `UPDATE public.producer_keys SET producer_id=$2 WHERE fingerprint=$1 AND producer_id IS NULL`, fingerprint, pid); err != nil {
+        return "", err
+    }
+    return pid, nil
 }
 
 

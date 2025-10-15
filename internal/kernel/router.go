@@ -11,7 +11,7 @@ import (
 
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
-    "github.com/example/data-kernel/internal/spill"
+    // spill removed for lean pipeline
     "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/metrics"
 )
@@ -19,8 +19,7 @@ import (
 type router struct {
     pg   *data.Postgres
     rd   *data.Redis
-    sp   *spill.Writer
-    replayer *spill.Replayer
+    // spill writer/replayer removed
     ack  func(ids ...string)
     pgCh chan pgMsg
     pgChLean chan pgMsgLean
@@ -63,20 +62,12 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
             logging.Warn("redis_init_error", logging.Err(err))
         }
     }
-    if cfg.Spill.Enabled {
-        if sw, err := spill.NewWriter(cfg.Spill); err == nil {
-            r.sp = sw
-            r.replayer = spill.NewReplayer(cfg.Spill)
-            go r.replayer.Start(context.Background(), r.pg)
-        } else {
-            logging.Warn("spill_init_error", logging.Err(err))
-        }
-    }
+    // spill disabled
     return r, nil
 }
 
 func (r *router) close() {
-    if r.sp != nil { _ = r.sp.Close() }
+    // spill close removed
     if r.pg != nil { r.pg.Close() }
     if r.rd != nil { _ = r.rd.Close() }
 }
@@ -146,18 +137,7 @@ func (r *router) pgWorkerBatch() {
         }
         // If this looks like a connectivity error, optionally spill to filesystem (as last resort)
         if isConnectivityError(lastErr) {
-            if r.sp != nil {
-                // spill disabled for lean events path (no envelope); keep ack/defer behavior
-                ids := make([]string, 0, len(buf))
-                for _, m := range buf { ids = append(ids, m.RedisID) }
-                if len(ids) > 0 {
-                    logging.Error("spill_write_connectivity_fallback", logging.F("count", len(ids)), logging.F("err", lastErr.Error()))
-                    if r.ack != nil { r.ack(ids...) }
-                    buf = buf[:0]
-                    return
-                }
-            }
-            // keep buffer to retry on next cycle
+            // keep buffer to retry on next cycle (spill disabled)
             logging.Error("pg_connectivity_error_deferred", logging.F("buffer_len", len(buf)), logging.F("err", lastErr.Error()))
             return
         }

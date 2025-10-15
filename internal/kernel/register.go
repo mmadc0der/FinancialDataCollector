@@ -25,12 +25,12 @@ type regPayload struct {
 }
 
 func (k *Kernel) consumeRegister(ctx context.Context) {
-    if k.rd == nil || k.cfg.Redis.RegisterStream == "" { return }
+    if k.rd == nil { return }
     if k.pg == nil {
         logging.Warn("register_consumer_disabled_no_pg")
         return
     }
-    stream := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterStream)
+    stream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:register")
     // Ensure consumer group exists for the registration stream (ignore BUSYGROUP errors)
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
         _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
@@ -107,32 +107,22 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                         }
                     }
                 } else { logging.Warn("register_pubkey_parse_error", logging.F("fingerprint", fp), logging.Err(err)) }
-                // Upsert key and create registration record
+                // Ensure producer exists/bind key if missing; create registration record and respond
                 _ = k.pg.UpsertProducerKey(ctx, fp, pubkey)
                 exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
+                if !exists || producerID == nil || *producerID == "" {
+                    // create a new producer row and bind key without changing approval status
+                    if pid, err := k.pg.EnsureProducerForFingerprint(ctx, fp, ""); err == nil && pid != "" {
+                        producerID = &pid
+                    }
+                }
                 regStatus := "pending"
                 regReason := ""
                 if !validSig { regStatus = "invalid_sig"; regReason = "signature_verification_failed" }
                 _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, regStatus, regReason, "")
-                if validSig && exists && status == "approved" && producerID != nil && k.au != nil && k.pg != nil {
-                    // Atomically gate via DB and record token metadata
-                    tok, jti, exp, err := k.au.Issue(ctx, *producerID, time.Hour, "auto-refresh", fp)
-                    if err == nil {
-                        if pid, perr := k.pg.TryAutoIssueAndRecord(ctx, fp, jti, exp, "auto-refresh"); perr == nil && pid != "" {
-                            logging.Info("register_auto_issue", logging.F("fingerprint", fp), logging.F("producer_id", pid), logging.F("jti", jti))
-                            if k.cfg.Redis.RegisterRespStream != "" && k.rd != nil && k.rd.C() != nil {
-                                _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{
-                                    Stream: prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.RegisterRespStream),
-                                    MaxLen: k.cfg.Redis.MaxLenApprox,
-                                    Approx: true,
-                                    Values: map[string]any{"fingerprint": fp, "token": tok, "producer_id": pid},
-                                }).Err()
-                                logging.Info("register_resp_published", logging.F("fingerprint", fp))
-                            }
-                        }
-                    } else {
-                        logging.Error("register_issue_error", logging.F("fingerprint", fp), logging.Err(err))
-                    }
+                // Always respond (no token here)
+                if producerID != nil && k.rd != nil && k.rd.C() != nil {
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:register:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "status": regStatus}}).Err()
                 }
                 _ = k.rd.Ack(ctx, m.ID)
                 logging.Debug("register_ack", logging.F("id", m.ID))
