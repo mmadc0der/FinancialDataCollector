@@ -18,8 +18,12 @@ func TestPrefixed(t *testing.T) {
 
 
 func TestHandleLeanEvent_BuildsExpectedRowAndAcks(t *testing.T) {
-    acked := []string{}
-    r := &router{ack: func(ids ...string) { acked = append(acked, ids...) }}
+    ackCh := make(chan []string, 1)
+    r := &router{ack: func(ids ...string) {
+        cp := make([]string, len(ids))
+        copy(cp, ids)
+        ackCh <- cp
+    }}
     r.pgBatchSize = 10
     r.pgBatchWait = 50 * time.Millisecond
     r.pgChLean = make(chan pgMsgLean, 1)
@@ -31,11 +35,13 @@ func TestHandleLeanEvent_BuildsExpectedRowAndAcks(t *testing.T) {
     payload := json.RawMessage(`{"price": 123.45, "qty": 10}`)
     tags := json.RawMessage(`[{"k":"symbol","v":"AAPL"}]`)
     r.handleLeanEvent("rid-1", "evt-1", ts, "sub-1", "prod-1", payload, tags, "schema-1")
-    // close to force flush
+    // close to force flush and wait for ack
     close(r.pgChLean)
-
-    if len(acked) != 1 || acked[0] != "rid-1" {
-        t.Fatalf("expected ack for rid-1, got %v", acked)
+    select {
+    case got := <-ackCh:
+        if len(got) != 1 || got[0] != "rid-1" { t.Fatalf("expected ack for rid-1, got %v", got) }
+    case <-time.After(500 * time.Millisecond):
+        t.Fatalf("timed out waiting for ack")
     }
 }
 
