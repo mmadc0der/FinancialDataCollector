@@ -235,7 +235,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
     }
     consumer := fmt.Sprintf("%s-subreg-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {
-        res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second})
+        res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
         if err != nil && !errors.Is(err, redis.Nil) { time.Sleep(200 * time.Millisecond); continue }
         if len(res) == 0 { continue }
         for _, s := range res {
