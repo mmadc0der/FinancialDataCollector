@@ -29,11 +29,6 @@ type Config struct {
         Password   string `yaml:"password"`
         DB         int    `yaml:"db"`
         KeyPrefix  string `yaml:"key_prefix"`
-        RegStream  string `yaml:"register_stream"`
-        EvStream   string `yaml:"events_stream"`
-        RegRespStream string `yaml:"register_resp_stream"`
-        SubjRegStream string `yaml:"subject_register_stream"`
-        SubjRespStream string `yaml:"subject_resp_stream"`
     } `yaml:"redis"`
     Producer struct {
         Name          string `yaml:"name"`
@@ -90,6 +85,35 @@ func loadSignerFromKeyFile(path string) (ssh.Signer, error) {
     return s, nil
 }
 
+func randNonce() (string, error) {
+    b := make([]byte, 16)
+    if _, err := rand.Read(b); err != nil { return "", err }
+    // URL-safe, no padding
+    return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+func signPayloadNonce(signer ssh.Signer, payloadStr, nonce string) (string, error) {
+    sum := sha3.Sum512([]byte(payloadStr + "." + nonce))
+    sshSig, err := signer.Sign(rand.Reader, sum[:])
+    if err != nil { return "", err }
+    if signer.PublicKey().Type() != ssh.KeyAlgoED25519 || len(sshSig.Blob) != ed25519.SignatureSize {
+        return "", fmt.Errorf("sign_error: unsupported signer or signature size")
+    }
+    return base64.StdEncoding.EncodeToString(sshSig.Blob), nil
+}
+
+func xreadOne(ctx context.Context, rdb *redis.Client, stream string, block time.Duration) (redis.XMessage, error) {
+    for ctx.Err() == nil {
+        res, err := rdb.XRead(ctx, &redis.XReadArgs{Streams: []string{stream, "0-0"}, Count: 1, Block: block}).Result()
+        if err == redis.Nil { continue }
+        if err != nil { return redis.XMessage{}, err }
+        for _, s := range res {
+            if len(s.Messages) > 0 { return s.Messages[0], nil }
+        }
+    }
+    return redis.XMessage{}, ctx.Err()
+}
+
 func main() {
     cfgPath := flag.String("config", "modules.d/producer-example/config.yaml", "path to config file")
     overrideInt := flag.Int("interval_ms", 0, "override send interval in ms")
@@ -103,8 +127,8 @@ func main() {
 
     rdb := redis.NewClient(&redis.Options{Addr: cfg.Redis.Addr, Username: cfg.Redis.Username, Password: cfg.Redis.Password, DB: cfg.Redis.DB})
     if err := rdb.Ping(ctx).Err(); err != nil { log.Fatalf("redis_ping_error: %v", err) }
-    log.Printf("producer_start addr=%s reg_stream=%s ev_stream=%s prefix=%s interval_ms=%d",
-        cfg.Redis.Addr, cfg.Redis.RegStream, cfg.Redis.EvStream, cfg.Redis.KeyPrefix, cfg.Producer.SendIntervalMs)
+    log.Printf("producer_start addr=%s prefix=%s interval_ms=%d",
+        cfg.Redis.Addr, cfg.Redis.KeyPrefix, cfg.Producer.SendIntervalMs)
 
     // Load keys and cert (required)
     if cfg.Producer.SSHPublicKeyFile == "" || cfg.Producer.SSHPrivateKeyFile == "" || cfg.Producer.SSHCertFile == "" {
@@ -122,94 +146,54 @@ func main() {
     }()
     fp := computeFingerprint(pubForRegistration)
 
-    // send registration (repeat later until token received)
+    // send registration (repeat until producer_id acquired)
     payload := map[string]any{"producer_hint": cfg.Producer.Name, "contact": cfg.Producer.Contact, "meta": map[string]string{"demo":"true"}}
     payloadStr := canonicalJSON(payload)
-    nonce := time.Now().Format(time.RFC3339Nano)
-    msg := []byte(payloadStr + "." + nonce)
-    // Sign SHA3-512 hash of canonical payload + nonce
-    sum := sha3.Sum512(msg)
-    sshSig, err := signer.Sign(rand.Reader, sum[:])
-    if err != nil { log.Fatalf("sign_error: %v", err) }
-    if signer.PublicKey().Type() != ssh.KeyAlgoED25519 || len(sshSig.Blob) != ed25519.SignatureSize { log.Fatalf("sign_error: unsupported signer or signature size") }
-    sigRaw := sshSig.Blob
-    sigB64 := base64.StdEncoding.EncodeToString(sigRaw)
-    regID, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result()
-    if err != nil { log.Fatalf("register_xadd_error: %v", err) }
-    log.Printf("register_sent id=%s", regID)
-
-    // Wait for token on register response stream (using a dedicated consumer group)
-    regResp := cfg.Redis.RegRespStream
-    if regResp == "" { regResp = "register:resp" }
-    regRespKey := cfg.Redis.KeyPrefix + regResp
-    regGroup := "prod-reg-" + fp[:8]
-    regConsumer := regGroup + "-1"
-    _ = rdb.XGroupCreateMkStream(ctx, regRespKey, regGroup, "$" ).Err()
-    var token string
+    regStream := cfg.Redis.KeyPrefix + "register"
     var producerID string
     reRegTicker := time.NewTicker(30 * time.Second)
     defer reRegTicker.Stop()
-TokenWait:
-    for token == "" {
-        // block read for new entries
-        res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{Group: regGroup, Consumer: regConsumer, Streams: []string{regRespKey, ">"}, Count: 10, Block: 5 * time.Second}).Result()
-        if err != nil && err != redis.Nil { time.Sleep(200 * time.Millisecond) }
-        for _, s := range res {
-            for _, m := range s.Messages {
-                if f, _ := m.Values["fingerprint"].(string); f != "" {
-                    if f == fp {
-                        if t, ok := m.Values["token"].(string); ok && t != "" { token = t }
-                        if pid, ok := m.Values["producer_id"].(string); ok { producerID = pid }
-                    }
-                }
-                // ack regardless to avoid backlog
-                _ = rdb.XAck(ctx, regRespKey, regGroup, m.ID).Err()
-                if token != "" { break TokenWait }
-            }
+RegWait:
+    for producerID == "" {
+        nonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
+        sigB64, e := signPayloadNonce(signer, payloadStr, nonce); if e != nil { log.Fatalf("sign_error: %v", e) }
+        if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: regStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
+            log.Printf("register_sent id=%s", id)
+        } else { time.Sleep(500 * time.Millisecond); continue }
+        // wait on per-nonce response stream
+        respStream := cfg.Redis.KeyPrefix + "register:resp:" + nonce
+        if msg, e := xreadOne(ctx, rdb, respStream, 10*time.Second); e == nil {
+            if pid, ok := msg.Values["producer_id"].(string); ok { producerID = pid }
         }
-        select {
-        case <-reRegTicker.C:
-            // re-send registration to trigger token publish if approved while waiting
-            nonce = time.Now().Format(time.RFC3339Nano)
-            msg = []byte(payloadStr + "." + nonce)
-            sum = sha3.Sum512(msg)
-            if sshSig, e := signer.Sign(rand.Reader, sum[:]); e == nil { sigRaw = sshSig.Blob } else { continue }
-            sigB64 = base64.StdEncoding.EncodeToString(sigRaw)
-            if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
-                log.Printf("register_retry id=%s", id)
-            }
-        default:
+        if producerID == "" {
+            select { case <-reRegTicker.C: default: }
         }
     }
-    log.Printf("token_acquired producer_id=%s", producerID)
+    log.Printf("registered producer_id=%s", producerID)
+
+    // token exchange: request short-lived token using pubkey path
+    exchPayload := canonicalJSON(map[string]any{"purpose":"exchange"})
+    nonceEx, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
+    sigEx, e := signPayloadNonce(signer, exchPayload, nonceEx); if e != nil { log.Fatalf("sign_error: %v", e) }
+    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"token:exchange", Values: map[string]any{"pubkey": pubForRegistration, "payload": exchPayload, "nonce": nonceEx, "sig": sigEx}}).Result()
+    // wait on per-producer token response
+    tokMsg, e := xreadOne(ctx, rdb, cfg.Redis.KeyPrefix+"token:resp:"+producerID, 15*time.Second)
+    if e != nil { log.Fatalf("token_exchange_timeout: %v", e) }
+    token, _ := tokMsg.Values["token"].(string)
+    if token == "" { log.Fatalf("token_exchange_empty") }
+    log.Printf("token_received for producer_id=%s", producerID)
 
     // subject registration: ensure subject and optionally set schema
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
     subjReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
     subjB, _ := json.Marshal(subjReq)
-    subjStream := cfg.Redis.SubjRegStream
-    if subjStream == "" { subjStream = "subject:register" }
-    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+subjStream, Values: map[string]any{"payload": string(subjB), "token": token}}).Result()
-    subjResp := cfg.Redis.SubjRespStream
-    if subjResp == "" { subjResp = "subject:resp" }
-    subjRespKey := cfg.Redis.KeyPrefix + subjResp
-    subjGroup := "prod-sub-" + fp[:8]
-    subjConsumer := subjGroup + "-1"
-    _ = rdb.XGroupCreateMkStream(ctx, subjRespKey, subjGroup, "$" ).Err()
+    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"subject:register", Values: map[string]any{"payload": string(subjB), "token": token}}).Result()
+    subjMsg, e := xreadOne(ctx, rdb, cfg.Redis.KeyPrefix+"subject:resp:"+producerID, 15*time.Second)
+    if e != nil { log.Fatalf("subject_resp_timeout: %v", e) }
     var subjectID string
-SubjWait:
-    for subjectID == "" {
-        res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{Group: subjGroup, Consumer: subjConsumer, Streams: []string{subjRespKey, ">"}, Count: 10, Block: 5 * time.Second}).Result()
-        if err != nil && err != redis.Nil { time.Sleep(200 * time.Millisecond) }
-        for _, s := range res {
-            for _, m := range s.Messages {
-                if v, ok := m.Values["subject_id"].(string); ok && v != "" { subjectID = v }
-                _ = rdb.XAck(ctx, subjRespKey, subjGroup, m.ID).Err()
-                if subjectID != "" { break SubjWait }
-            }
-        }
-    }
+    if v, ok := subjMsg.Values["subject_id"].(string); ok { subjectID = v }
+    if subjectID == "" { log.Fatalf("subject_id_empty") }
     log.Printf("subject_provisioned subject_id=%s", subjectID)
 
     // periodically send demo events with token
@@ -223,10 +207,18 @@ SubjWait:
             // lean event payload
             ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
             evB, _ := json.Marshal(ev)
-            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
+            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"events", Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
             if err != nil { log.Printf("event_xadd_error: %v", err) } else { log.Printf("event_sent id=%s", id) }
         case <-ctx.Done():
             log.Printf("producer_stop")
+            // send deregister on shutdown
+            if nonce, e := randNonce(); e == nil {
+                if sig, e2 := signPayloadNonce(signer, canonicalJSON(map[string]any{"action":"deregister"}), nonce); e2 == nil {
+                    _, _ = rdb.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"register", Values: map[string]any{"action":"deregister", "pubkey": pubForRegistration, "payload": canonicalJSON(map[string]any{"reason":"shutdown"}), "nonce": nonce, "sig": sig}}).Result()
+                    // optionally wait brief confirm
+                    _, _ = xreadOne(context.Background(), rdb, cfg.Redis.KeyPrefix+"register:resp:"+nonce, 3*time.Second)
+                }
+            }
             return
         }
     }

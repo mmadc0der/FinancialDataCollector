@@ -4,11 +4,6 @@ redis:
   password: "CHANGE_ME_STRONG"
   db: 0
   key_prefix: "fdc:"
-  register_stream: "register"
-  events_stream: "events"
-  register_resp_stream: "register:resp"
-  subject_register_stream: "subject:register"
-  subject_resp_stream: "subject:resp"
 
 producer:
   name: "demo-producer"
