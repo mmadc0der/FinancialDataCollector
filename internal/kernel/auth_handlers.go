@@ -65,9 +65,7 @@ func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Fingerprint == "" || req.TTLSeconds <= 0 {
         w.WriteHeader(http.StatusBadRequest); return
     }
-    approve := k.approveProducerKey
-    if approve == nil { approve = k.pg.ApproveProducerKey }
-    pid, err := approve(r.Context(), req.Fingerprint, req.Name, req.SchemaID, r.Header.Get("X-SSH-Principal"), req.Notes)
+    pid, err := k.pg.ApproveProducerKey(r.Context(), req.Fingerprint, req.Name, req.SchemaID, r.Header.Get("X-SSH-Principal"), req.Notes)
     if err != nil || pid == "" { w.WriteHeader(http.StatusBadRequest); return }
     tok, jti, exp, err := k.au.Issue(r.Context(), pid, time.Duration(req.TTLSeconds)*time.Second, "approved", req.Fingerprint)
     if err != nil { w.WriteHeader(http.StatusInternalServerError); return }

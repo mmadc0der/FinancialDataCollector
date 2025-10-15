@@ -110,22 +110,8 @@ func (r *router) pgWorkerBatch() {
         events := make([]map[string]any, 0, len(buf))
         redisIDs := make([]string, 0, len(buf))
         for _, m := range buf {
-            var payload map[string]any
-            _ = json.Unmarshal(m.Env.Data, &payload)
-            // derive minimal tags from payload
-            tags := make([]map[string]string, 0, 2)
-            if s, ok := payload["source"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.source","value":s}) }
-            if s, ok := payload["symbol"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.symbol","value":s}) }
-            // build event object
-            ev := map[string]any{
-                "event_id": m.Env.ID,
-                "ts": time.Unix(0, m.Env.TS).UTC().Format(time.RFC3339Nano),
-                "subject_id": nil,
-                "producer_id": r.producerID(),
-                "schema_id": r.schemaID(),
-                "payload": payload,
-                "tags": tags,
-            }
+            // legacy envelope path removed; ignore pgMsg.Env contents for lean protocol
+            ev := map[string]any{}
             events = append(events, ev)
             redisIDs = append(redisIDs, m.RedisID)
         }
@@ -180,21 +166,8 @@ func (r *router) pgWorkerBatch() {
         failed := make([]pgMsg, 0, len(buf))
         succeededIDs := make([]string, 0, len(buf))
         for i, m := range buf {
-            var payload map[string]any
-            _ = json.Unmarshal(m.Env.Data, &payload)
-            tags := make([]map[string]string, 0, 2)
-            if s, ok := payload["source"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.source","value":s}) }
-            if s, ok := payload["symbol"].(string); ok && s != "" { tags = append(tags, map[string]string{"key":"core.symbol","value":s}) }
-            ev := []map[string]any{{
-                "event_id": m.Env.ID,
-                "ts": time.Unix(0, m.Env.TS).UTC().Format(time.RFC3339Nano),
-                "subject_id": nil,
-                "producer_id": r.producerID(),
-                "schema_id": r.schemaID(),
-                "payload": payload,
-                "tags": tags,
-            }}
-            if e := r.pg.IngestEventsJSON(context.Background(), ev); e != nil {
+            // legacy per-row fallback not used for envelope path now
+            if e := r.pg.IngestEventsJSON(context.Background(), []map[string]any{}); e != nil {
                 failed = append(failed, m)
             } else {
                 succeededIDs = append(succeededIDs, redisIDs[i])
