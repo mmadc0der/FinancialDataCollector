@@ -23,7 +23,7 @@ import (
     "github.com/example/data-kernel/internal/kernelcfg"
 )
 
-func TestRegistrationAutoIssue(t *testing.T) {
+func TestRegistrationRespondsPerNonce(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
     // deps
     pgc, dsn := startPostgres(t)
@@ -60,7 +60,7 @@ func TestRegistrationAutoIssue(t *testing.T) {
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":7602"},
         Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 50},
-        Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", RegisterStream: "register", RegisterRespStream: "register:resp", ConsumerEnabled: true, Stream: "events"},
+        Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", ConsumerEnabled: true, Stream: "events"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: privB64, PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}},
     }
@@ -96,9 +96,9 @@ func TestRegistrationAutoIssue(t *testing.T) {
         t.Fatalf("xadd reg: %v", err)
     }
 
-    // wait for token in response stream
+    // wait for registration response on per-nonce stream
     waitFor[int64](t, 10*time.Second, func() (int64, bool) {
-        l, _ := rcli.XLen(context.Background(), "fdc:register:resp").Result()
+        l, _ := rcli.XLen(context.Background(), "fdc:register:resp:"+nonce).Result()
         return l, l >= 1
     })
 }
