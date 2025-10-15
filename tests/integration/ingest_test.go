@@ -27,17 +27,26 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     rc, addr := startRedis(t)
     defer rc.Terminate(context.Background())
 
-    // Prepare DB: apply migrations and create default schema/producer
+    // Prepare DB: apply migrations and create default entities
     pg, err := data.NewPostgres(kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     pool := pg.Pool()
-    var schemaID, producerID string
+    var schemaID, producerID, subjectID string
     if err := pool.QueryRow(context.Background(), `INSERT INTO public.schemas(schema_id,name,version,body) VALUES (gen_random_uuid(),'e2e',1,'{}'::jsonb) RETURNING schema_id`).Scan(&schemaID); err != nil {
         t.Fatalf("insert schema: %v", err)
     }
     if err := pool.QueryRow(context.Background(), `INSERT INTO public.producers(producer_id,name) VALUES (gen_random_uuid(),'e2e-producer') RETURNING producer_id`).Scan(&producerID); err != nil {
         t.Fatalf("insert producer: %v", err)
+    }
+    if err := pool.QueryRow(context.Background(), `INSERT INTO public.subjects(subject_id,subject_key,attrs) VALUES (gen_random_uuid(),'IT-1','{}'::jsonb) RETURNING subject_id`).Scan(&subjectID); err != nil {
+        t.Fatalf("insert subject: %v", err)
+    }
+    if _, err := pool.Exec(context.Background(), `INSERT INTO public.subject_schemas(subject_id,schema_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, subjectID, schemaID); err != nil {
+        t.Fatalf("bind subject_schema: %v", err)
+    }
+    if _, err := pool.Exec(context.Background(), `UPDATE public.subjects SET current_schema_id=$1 WHERE subject_id=$2`, schemaID, subjectID); err != nil {
+        t.Fatalf("set current schema: %v", err)
     }
 
     // write a temp config file
@@ -45,7 +54,7 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     cfgPath := filepath.Join(dir, "kernel.yaml")
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":7600"},
-        Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 100, DefaultProducerID: producerID, DefaultSchemaID: schemaID},
+        Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 100, DefaultProducerID: producerID},
         Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerEnabled: true, PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
     }
@@ -69,7 +78,7 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
 
     // publish a message into Redis
     rcli := redis.NewClient(&redis.Options{Addr: addr})
-    payload := []byte(`{"version":"0.1.0","type":"data","id":"01TEST","ts":1730000000000000000,"data":{"source":"test","symbol":"T"}}`)
+    payload := []byte(`{"event_id":"01TEST","ts":"2024-10-01T00:00:00Z","subject_id":"` + subjectID + `","payload":{"source":"test","symbol":"T"}}`)
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id":"01TEST","payload": payload}}).Err(); err != nil {
         t.Fatalf("xadd: %v", err)
     }

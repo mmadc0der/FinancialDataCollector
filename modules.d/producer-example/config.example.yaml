@@ -7,7 +7,8 @@ redis:
   register_stream: "register"
   events_stream: "events"
   register_resp_stream: "register:resp"
-  control_resp_stream: "control:resp"
+  subject_register_stream: "subject:register"
+  subject_resp_stream: "subject:resp"
 
 producer:
   name: "demo-producer"
@@ -19,7 +20,5 @@ producer:
   # If you use producer SSH certificates, set the certificate file too (signed by producer CA)
   ssh_cert_file: "./modules.d/producer-example/ssh/id_ed25519-cert.pub"
   # Schema provisioning
-  schema_name: "demo_schema"
-  schema_version: 1
   subject_key: "DEMO-1"
 

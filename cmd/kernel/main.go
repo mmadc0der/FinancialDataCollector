@@ -12,7 +12,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "./config/kernel.yaml", "path to kernel config")
+    configPath := flag.String("config", "./config/kernel.yaml", "path to kernel config")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -10,10 +10,11 @@ import (
     "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/metrics"
     "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/protocol"
     "github.com/example/data-kernel/internal/auth"
     "encoding/json"
     "strings"
+    "errors"
+    "github.com/redis/go-redis/v9"
 )
 
 type Kernel struct {
@@ -22,8 +23,6 @@ type Kernel struct {
     rd   *data.Redis
     pg   *data.Postgres
     au   *auth.Verifier
-    // test seams for admin handlers
-    approveProducerKey func(ctx context.Context, fingerprint, name, schemaID, reviewer, notes string) (string, error)
 }
 
 func NewKernel(configPath string) (*Kernel, error) {
@@ -85,6 +84,8 @@ func (k *Kernel) Start(ctx context.Context) error {
             go k.consumeRedis(ctx)
             // registration stream consumer (separate goroutine)
             go k.consumeRegister(ctx)
+            // subject registration consumer
+            go k.consumeSubjectRegister(ctx)
         } else {
             logging.Warn("redis_consumer_init_error", logging.Err(err))
         }
@@ -148,37 +149,70 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     metrics.RedisAckTotal.Add(1)
                     continue
                 }
-                // Authenticate producer if required
+                // Authenticate and capture producer/subject from token
+                var producerID, subjectIDFromToken, jti string
                 if k.au != nil && k.cfg.Auth.RequireToken {
-                    if _, _, err := k.au.Verify(ctx, token); err != nil {
+                    if pid, sid, j, err := k.au.Verify(ctx, token); err != nil {
                         metrics.AuthDeniedTotal.Inc()
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
                         logging.Warn("redis_auth_denied", logging.F("id", id), logging.Err(err))
                         _ = k.rd.Ack(ctx, m.ID)
                         metrics.RedisAckTotal.Add(1)
                         continue
-                    }
+                    } else { producerID, subjectIDFromToken, jti = pid, sid, j }
                 }
-                // validate envelope before routing
-                var env struct{ Version string `json:"version"`; Type string `json:"type"`; ID string `json:"id"`; TS int64 `json:"ts"`; Data json.RawMessage `json:"data"` }
-                if err := json.Unmarshal(payload, &env); err != nil || env.ID == "" || env.Version == "" || env.TS == 0 {
-                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_envelope")
-                    logging.Warn("redis_dlq_bad_envelope", logging.F("id", id))
+                _ = jti // reserved for future gating
+                // Parse lean event JSON from payload
+                var ev struct{
+                    EventID string `json:"event_id"`
+                    TS      string `json:"ts"`
+                    SubjectID string `json:"subject_id"`
+                    Payload json.RawMessage `json:"payload"`
+                    Tags    json.RawMessage `json:"tags"`
+                }
+                if err := json.Unmarshal(payload, &ev); err != nil || ev.EventID == "" || ev.TS == "" || ev.SubjectID == "" || len(ev.Payload) == 0 {
+                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_event_json")
+                    logging.Warn("redis_dlq_bad_event_json", logging.F("id", id))
                     metrics.RedisDLQTotal.Add(1)
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
                     continue
                 }
-                // handle control plane ops (e.g., ensure_schema_subject)
-                if env.Type == "control" {
+                // if token has sid, enforce match
+                if subjectIDFromToken != "" && !strings.EqualFold(subjectIDFromToken, ev.SubjectID) {
+                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "subject_mismatch_token")
+                    logging.Warn("redis_subject_mismatch", logging.F("id", id))
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
-                    _ = k.handleControl(ctx, m.ID, protocolEnvelopeLite{Version: env.Version, Type: env.Type, ID: env.ID, TS: env.TS, Data: env.Data}, payload)
-                    logging.Info("redis_control_handled", logging.F("id", id))
+                    continue
+                }
+                // Verify producer-subject binding
+                if producerID != "" {
+                    if ok, err := k.pg.CheckProducerSubject(ctx, producerID, ev.SubjectID); err != nil || !ok {
+                        _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_subject_forbidden")
+                        logging.Warn("redis_producer_subject_forbidden", logging.F("id", id))
+                        _ = k.rd.Ack(ctx, m.ID)
+                        metrics.RedisAckTotal.Add(1)
+                        continue
+                    }
+                }
+                // Resolve schema via cache→DB
+                var schemaID string
+                if sid, ok := k.rd.SchemaCacheGet(ctx, ev.SubjectID); ok {
+                    schemaID = sid
+                } else if s, err := k.pg.GetCurrentSchemaID(ctx, ev.SubjectID); err == nil && s != "" {
+                    schemaID = s
+                    _ = k.rd.SchemaCacheSet(ctx, ev.SubjectID, s, time.Hour)
+                }
+                if schemaID == "" {
+                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "missing_subject_schema")
+                    logging.Warn("redis_missing_subject_schema", logging.F("id", id))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    metrics.RedisAckTotal.Add(1)
                     continue
                 }
                 // route for durable handling; ack will be done after persistence via router callback
-                k.rt.handleRedis(m.ID, protocolEnvelope(env))
+                k.rt.handleLeanEvent(m.ID, ev.EventID, ev.TS, ev.SubjectID, producerID, ev.Payload, ev.Tags, schemaID)
                 logging.Debug("redis_event_enqueued", logging.F("id", id))
             }
         }
@@ -190,9 +224,40 @@ func prefixed(prefix, key string) string {
     return prefix + key
 }
 
-// protocolEnvelope adapts a lightweight parsed struct into protocol.Envelope
-func protocolEnvelope(e struct{ Version string `json:"version"`; Type string `json:"type"`; ID string `json:"id"`; TS int64 `json:"ts"`; Data json.RawMessage `json:"data"` }) protocol.Envelope {
-    return protocol.Envelope{Version: e.Version, Type: e.Type, ID: e.ID, TS: e.TS, Data: e.Data}
+// envelope adaptation removed
+
+// consumeSubjectRegister handles subject registration stream {token, payload:{subject_key, schema_id?, attrs?}}
+func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
+    if k.rd == nil || k.cfg.Redis.SubjectRegisterStream == "" || k.pg == nil { return }
+    stream := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.SubjectRegisterStream)
+    if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+    }
+    consumer := fmt.Sprintf("%s-subreg-%d", "kernel", time.Now().UnixNano())
+    for ctx.Err() == nil {
+        res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second})
+        if err != nil && !errors.Is(err, redis.Nil) { time.Sleep(200 * time.Millisecond); continue }
+        if len(res) == 0 { continue }
+        for _, s := range res {
+            for _, m := range s.Messages {
+                token, _ := m.Values["token"].(string)
+                var producerID string
+                if k.au != nil && k.cfg.Auth.RequireToken {
+                    if pid, _, _, err := k.au.Verify(ctx, token); err == nil { producerID = pid } else { _ = k.rd.Ack(ctx, m.ID); continue }
+                }
+                payloadStr, _ := m.Values["payload"].(string)
+                var req struct{ SubjectKey string `json:"subject_key"`; SchemaID string `json:"schema_id"`; Attrs json.RawMessage `json:"attrs"` }
+                if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
+                if err == nil && req.SchemaID != "" { _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID); _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour) }
+                if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
+                if k.cfg.Redis.SubjectRespStream != "" {
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.SubjectRespStream), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                }
+                _ = k.rd.Ack(ctx, m.ID)
+            }
+        }
+    }
 }
 
 

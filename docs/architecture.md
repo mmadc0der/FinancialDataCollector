@@ -8,7 +8,7 @@
 ### Data model (normalized, type-agnostic events)
 Core tables:
 - `schemas(schema_id uuid, name, version, body jsonb)`
-- `producers(producer_id uuid, name, schema_id)`
+- `producers(producer_id uuid, name)`
 - `subjects(subject_id uuid, subject_key, attrs jsonb)`
 - `tags(tag_id bigserial, key citext, value citext)`
 - See `docs/database.md` for the canonical schema. Core relations include `schemas`, `producers`, `subjects`, `tags`, `event_index`, partitioned `events`, and partitioned `event_tags`.
@@ -22,18 +22,9 @@ Incomplete (to be implemented):
 - Producer registration and authentication by tokens, mapping to `producer_id` UUIDs at ingest. Temporary config-based IDs will be removed; do not rely on them.
 
 ### Protocol boundary
-- Data-plane: Redis Streams. Modules XADD into `events` (or per-module streams). Kernel consumes via consumer group `kernel`.
-- Message envelope:
-### Registration flow (optional)
-- Stream: `fdc:register` (configurable). Kernel verifies producer signatures over registration payloads.
-- Known, approved keys: auto-issue tokens (rate-limited) and respond out-of-band (admin reviews available in DB).
-- Unknown keys: create `producer_keys` row in `pending` and `producer_registrations` pending record; admin approval binds fingerprint to `producer_id` and allows issuing.
-
-  - type: data|heartbeat|control|ack|error
-  - version: semver of protocol
-  - id: UUIDv7 of message
-  - ts: nanoseconds epoch at sender
-  - data: event or control payload
+- Data-plane: Redis Streams. Modules XADD lean events into `events`. Kernel consumes via consumer group `kernel`.
+- No envelopes or control messages. Subjects are registered via `subject:register` with `{token, payload}`.
+- Producer registration via `register` stream; unknown keys are pending; known keys may receive auto-issued tokens.
 
 ### Supervision
 - Not applicable. Modules are external and not managed by the kernel.

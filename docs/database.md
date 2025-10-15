@@ -7,6 +7,7 @@ Normalized event storage with monthly partitioning and a canonical index for rou
 - `public.schemas(schema_id uuid primary key, name text, version int, body jsonb, status text, created_at timestamptz)`
 - `public.producers(producer_id uuid primary key, name text unique, description text, created_at timestamptz, disabled_at timestamptz)`
 - `public.subjects(subject_id uuid primary key, subject_key text unique, attrs jsonb, first_seen_at timestamptz, last_seen_at timestamptz)`
+ - `public.subjects(subject_id uuid primary key, subject_key text unique, attrs jsonb, current_schema_id uuid null, first_seen_at timestamptz, last_seen_at timestamptz)`
 - `public.producer_subjects(producer_id uuid, subject_id uuid, primary key(producer_id, subject_id))`
 - `public.subject_schemas(subject_id uuid, schema_id uuid, primary key(subject_id, schema_id))`
 - `public.tags(tag_id bigserial primary key, key citext, value citext, unique(key, value))`
@@ -66,5 +67,8 @@ Convenience, read-only views:
 
 ### Permissions
 Public DML is revoked on `events`, `event_tags`, `event_index`. Role `fdc-kernel` is granted `EXECUTE` on `public.ingest_events(jsonb)` if present.
+
+### Subject helpers
+- `public.set_current_subject_schema(subject_id, schema_id)` sets `subjects.current_schema_id` and appends to `subject_schemas` if missing.
 
 

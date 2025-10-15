@@ -11,7 +11,6 @@ import (
 
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
-    "github.com/example/data-kernel/internal/protocol"
     "github.com/example/data-kernel/internal/spill"
     "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/metrics"
@@ -30,7 +29,7 @@ type router struct {
     // batching
     pgBatchSize int
     pgBatchWait time.Duration
-    // ingest config (removed static producer/schema ids; derive if needed from payload in DB)
+    // ingest config (producer/schema ids are not defaulted for lean events)
     prodID string
     schID  string
 }
@@ -39,7 +38,7 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
     r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack}
     // pick defaults from config, may be empty which signals NULL in DB
     r.prodID = cfg.Postgres.DefaultProducerID
-    r.schID = cfg.Postgres.DefaultSchemaID
+    r.schID = ""
     if cfg.Postgres.Enabled {
         if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
             r.pg = pg
@@ -83,30 +82,11 @@ func (r *router) close() {
 }
 
 // handleRedis enqueues a message coming from Redis for durable processing and optional re-publish
-func (r *router) handleRedis(redisID string, env protocol.Envelope) {
-    // Optional publish to Redis stream
-    if r.rdCh != nil && r.publishEnabled {
-        b, _ := json.Marshal(env)
-        select {
-        case r.rdCh <- rdMsg{ID: env.ID, Payload: b}:
-        default:
-        }
-    }
-    if r.pgCh != nil {
-        select {
-        case r.pgCh <- pgMsg{RedisID: redisID, Env: env}:
-        default:
-            // queue full; drop by policy (caller should DLQ), but here do nothing
-        }
-    } else {
-        // If Postgres sink is disabled, ack immediately to avoid pending backlog
-        if r.ack != nil { r.ack(redisID) }
-    }
-}
+func (r *router) handleRedis(redisID string, _ any) { /* removed for lean path */ }
 
 // routeRaw is no longer used for WS; kept for compatibility if needed.
 
-type pgMsg struct { RedisID string; Env protocol.Envelope }
+type pgMsg struct { RedisID string; Env any }
 
 // Lean event message (no envelope)
 type pgMsgLean struct {
@@ -181,16 +161,14 @@ func (r *router) pgWorkerBatch() {
         // If this looks like a connectivity error, optionally spill to filesystem (as last resort)
         if isConnectivityError(lastErr) {
             if r.sp != nil {
-                envs := make([]protocol.Envelope, 0, len(buf))
+                // spill disabled for lean events path (no envelope); keep ack/defer behavior
                 ids := make([]string, 0, len(buf))
-                for _, m := range buf { envs = append(envs, m.Env); ids = append(ids, m.RedisID) }
-                if err := r.sp.WriteEnvelopes(envs); err == nil {
+                for _, m := range buf { ids = append(ids, m.RedisID) }
+                if len(ids) > 0 {
                     logging.Error("spill_write_connectivity_fallback", logging.F("count", len(ids)), logging.F("err", lastErr.Error()))
                     if r.ack != nil { r.ack(ids...) }
                     buf = buf[:0]
                     return
-                } else {
-                    logging.Error("spill_write_error", logging.F("err", err.Error()), logging.F("count", len(ids)))
                 }
             }
             // keep buffer to retry on next cycle

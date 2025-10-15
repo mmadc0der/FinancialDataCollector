@@ -12,8 +12,8 @@
   - `producer_keys(fingerprint, pubkey, status[pending|approved|revoked], producer_id)`
   - `producer_registrations(reg_id, fingerprint, payload, sig, nonce, ts, status, reviewer, reason)`
   - `producer_tokens` and `revoked_tokens` (from previous migration) remain authoritative for issuance/blacklist.
-- Auto-issue policy: if fingerprint is approved and bound to a `producer_id`, issue a short-lived token without admin approval.
 - Unknown/first-time fingerprints are recorded as `pending` for admin approval.
+- Auto-issue policy: if fingerprint is approved and bound to a `producer_id`, kernel may issue a short-lived token without admin approval (no auto-approval of unknown keys).
 - Admin API is protected by an OpenSSH CA public key (for production hardening; PoC keeps shared admin token fallback).
 
 ### Message Format (registration stream)
@@ -53,7 +53,7 @@
 ### PoC Implementation Status
 - DB migrations added (`0005_registration.sql`). `pgcrypto` is now created in `0001_init.sql`.
 - Config extended for `redis.register_stream` and `auth.admin_ssh_ca`.
-- Kernel register consumer implemented with nonce anti-replay and Ed25519 signature verification (via OpenSSH pubkey parse), records pending, auto-issues for approved keys with a rate limit.
+- Kernel register consumer implemented with nonce anti-replay and Ed25519 signature verification (via OpenSSH pubkey parse), records pending, and auto-issues only for already approved keys.
 - Admin endpoints exist; SSH CA verification implemented (with fallback header) via `X-SSH-Cert` and `X-SSH-Principal` against configured CA.
 - Protocol and architecture docs updated to reflect flows.
 

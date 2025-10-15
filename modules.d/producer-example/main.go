@@ -32,7 +32,8 @@ type Config struct {
         RegStream  string `yaml:"register_stream"`
         EvStream   string `yaml:"events_stream"`
         RegRespStream string `yaml:"register_resp_stream"`
-        CtrlRespStream string `yaml:"control_resp_stream"`
+        SubjRegStream string `yaml:"subject_register_stream"`
+        SubjRespStream string `yaml:"subject_resp_stream"`
     } `yaml:"redis"`
     Producer struct {
         Name          string `yaml:"name"`
@@ -41,8 +42,6 @@ type Config struct {
         SSHPrivateKeyFile string `yaml:"ssh_private_key_file"`
         SSHPublicKeyFile  string `yaml:"ssh_public_key_file"`
         SSHCertFile       string `yaml:"ssh_cert_file"`
-        SchemaName        string `yaml:"schema_name"`
-        SchemaVersion     int    `yaml:"schema_version"`
         SubjectKey        string `yaml:"subject_key"`
     } `yaml:"producer"`
 }
@@ -184,44 +183,34 @@ TokenWait:
     }
     log.Printf("token_acquired producer_id=%s", producerID)
 
-    // request schema+subject provisioning via control message
-    schemaName := cfg.Producer.SchemaName
-    if schemaName == "" { schemaName = "demo_schema" }
-    schemaVersion := cfg.Producer.SchemaVersion
-    if schemaVersion <= 0 { schemaVersion = 1 }
+    // subject registration: ensure subject and optionally set schema
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
-    ctrl := map[string]any{"version":"0.1.0","type":"control","id":"CTRL1","ts": time.Now().UnixNano(), "data": map[string]any{"op":"ensure_schema_subject","name":schemaName,"version":schemaVersion,"body": map[string]any{"fields": []string{"a", "b"}}, "subject_key":subjectKey,"attrs": map[string]any{"region":"eu"}}}
-    ctrlB, _ := json.Marshal(ctrl)
-    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id":"CTRL1","payload": string(ctrlB), "token": token}}).Result()
-
-    // Wait for control response with schema_id and subject_id
-    ctrlResp := cfg.Redis.CtrlRespStream
-    if ctrlResp == "" { ctrlResp = "control:resp" }
-    ctrlRespKey := cfg.Redis.KeyPrefix + ctrlResp
-    ctrlGroup := "prod-ctl-" + fp[:8]
-    ctrlConsumer := ctrlGroup + "-1"
-    _ = rdb.XGroupCreateMkStream(ctx, ctrlRespKey, ctrlGroup, "$" ).Err()
-    var schemaID, subjectID string
-CtrlWait:
-    for schemaID == "" || subjectID == "" {
-        res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{Group: ctrlGroup, Consumer: ctrlConsumer, Streams: []string{ctrlRespKey, ">"}, Count: 10, Block: 5 * time.Second}).Result()
+    subjReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
+    subjB, _ := json.Marshal(subjReq)
+    subjStream := cfg.Redis.SubjRegStream
+    if subjStream == "" { subjStream = "subject:register" }
+    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+subjStream, Values: map[string]any{"payload": string(subjB), "token": token}}).Result()
+    subjResp := cfg.Redis.SubjRespStream
+    if subjResp == "" { subjResp = "subject:resp" }
+    subjRespKey := cfg.Redis.KeyPrefix + subjResp
+    subjGroup := "prod-sub-" + fp[:8]
+    subjConsumer := subjGroup + "-1"
+    _ = rdb.XGroupCreateMkStream(ctx, subjRespKey, subjGroup, "$" ).Err()
+    var subjectID string
+SubjWait:
+    for subjectID == "" {
+        res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{Group: subjGroup, Consumer: subjConsumer, Streams: []string{subjRespKey, ">"}, Count: 10, Block: 5 * time.Second}).Result()
         if err != nil && err != redis.Nil { time.Sleep(200 * time.Millisecond) }
         for _, s := range res {
             for _, m := range s.Messages {
-                if p, ok := m.Values["payload"].(string); ok && p != "" {
-                    var resp struct{ Op string `json:"op"`; SchemaID string `json:"schema_id"`; SubjectID string `json:"subject_id"` }
-                    if json.Unmarshal([]byte(p), &resp) == nil && resp.Op == "ensure_schema_subject" {
-                        schemaID = resp.SchemaID
-                        subjectID = resp.SubjectID
-                    }
-                }
-                _ = rdb.XAck(ctx, ctrlRespKey, ctrlGroup, m.ID).Err()
-                if schemaID != "" && subjectID != "" { break CtrlWait }
+                if v, ok := m.Values["subject_id"].(string); ok && v != "" { subjectID = v }
+                _ = rdb.XAck(ctx, subjRespKey, subjGroup, m.ID).Err()
+                if subjectID != "" { break SubjWait }
             }
         }
     }
-    log.Printf("provisioned schema_id=%s subject_id=%s", schemaID, subjectID)
+    log.Printf("subject_provisioned subject_id=%s", subjectID)
 
     // periodically send demo events with token
     interval := time.Duration(cfg.Producer.SendIntervalMs) * time.Millisecond
@@ -231,9 +220,10 @@ CtrlWait:
     for {
         select {
         case t := <-ticker.C:
-            env := map[string]any{"version":"0.1.0","type":"data","id": t.Format("20060102150405.000000000"), "ts": time.Now().UnixNano(), "data": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO", "subject_id": subjectID}}
-            envB, _ := json.Marshal(env)
-            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id": env["id"], "payload": string(envB), "token": token}}).Result()
+            // lean event payload
+            ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
+            evB, _ := json.Marshal(ev)
+            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
             if err != nil { log.Printf("event_xadd_error: %v", err) } else { log.Printf("event_sent id=%s", id) }
         case <-ctx.Done():
             log.Printf("producer_stop")

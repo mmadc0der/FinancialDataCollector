@@ -1,70 +1,41 @@
-## Kernel ↔ Module Protocol
-
-Version: 0.1.0 (DRAFT)
+## Kernel ↔ Module Protocol (lean v1)
 
 ### Transport
 - Data-plane: Redis Streams. Modules publish to `events` with XADD. Fields:
-  - `payload`: the envelope JSON
+  - `payload`: the event JSON (lean)
   - `token`: producer auth token (required when auth is enabled)
-  Kernel consumes with XREADGROUP and acknowledges after durable write (Postgres or spill).
+  The kernel consumes with XREADGROUP and acknowledges after durable write.
 
-### Envelope
+### Event JSON (payload)
 ```json
 {
-  "version": "0.1.0",
-  "type": "data|heartbeat|control|ack|error",
-  "id": "01J9Z0MZ3D0J3C3N8C4E9W6Z7Q",
-  "ts": 1727200000000000,
-  "data": { /* payload */ }
+  "event_id": "uuidv7",
+  "ts": "RFC3339Nano",
+  "subject_id": "<uuid>",
+  "payload": { /* producer-defined contents */ },
+  "tags": [{"key":"core.symbol","value":"AAPL"}]
 }
 ```
-### Data payloads
-- type=data: `kind` field defines event schema.
-```json
-{
-  "kind": "trade|quote|orderbook|ohlc|status",
-  "source": "binance",
-  "symbol": "BTCUSDT",
-  "seq": 123456789,
-  "ts_event": 1727200000000000,
-  "ts_collector": 1727200000000100,
-  "payload": { /* kind-specific */ },
-  "meta": { "module_version": "1.2.3" }
-}
-```
+- The kernel derives `producer_id` from the token and resolves `schema_id` for the `subject_id` via Redis cache → DB.
+- It enforces `producer_subjects(producer_id, subject_id)` and that the subject has a current schema.
 
-### Heartbeats
-- Not used by the kernel; modules may implement their own health mechanisms.
+### Subject registration
+- Stream: `subject:register` (configurable). Fields:
+  - `token`: producer token
+  - `payload`: `{ "subject_key": "...", "schema_id"?: "...", "attrs"?: {...} }`
+- Behavior: ensure subject by key, optionally set `current_schema_id` and append to history, bind producer↔subject. If `subject_resp_stream` is configured, kernel publishes `{subject_id}`.
 
-### Flow control
-- Redis provides buffering. Modules may set `MAXLEN ~` on XADD to cap stream length.
-- Kernel acknowledges only after durable persistence (Postgres commit) or successful spill write.
- - Unauthenticated or invalid messages are written to DLQ with reason `unauthenticated`.
+### Authentication
+- Tokens are EdDSA-signed and include `iss`, `aud`, `exp`, `nbf`, `jti`, `sub` (producer_id), and optional `sid` (subject_id). Kernel validates signature and JTI allowlist/blacklist; Redis cache accelerates checks.
+- If `sid` present, it must match the event’s `subject_id`.
 
-### Errors
-- Kernel may return type=error with `code` and `message`. Fatal errors lead to connection close.
+### Registration and refresh
+- Stream: `register` with fields `{ pubkey, payload, nonce, sig }`.
+- Unknown fingerprints: recorded as `pending` for admin approval.
+- Known, approved fingerprints: kernel may auto-issue short-lived tokens and publish `{fingerprint, token, producer_id}` to `register_resp_stream` if configured.
+- Anti-replay: nonces cached with TTL; duplicate nonces rejected; DB uniqueness enforced.
 
-### Control
-- No control-plane from kernel. Modules are decoupled and only push data to Redis.
-
-### Limits
-- Max message size: configurable (default 1 MiB).
-- Stream trimming: approximate via Redis `MAXLEN ~` when publishing.
-- No built-in rate limiting in the kernel; producers should self-throttle as needed.
-
-### Authentication (optional)
-- Minimal signed tokens (Ed25519) are supported. Tokens bind to a specific `producer_id` and carry `iss`, `aud`, `exp`, `nbf`, `jti` claims. The kernel validates signature and checks `jti` against the allowlist/blacklist in Postgres. A Redis cache accelerates validation.
-- Include the token via XADD field `token`. Without a valid token, the message is rejected.
-
-### Registration and Refresh (optional)
-- Producers can request registration or token refresh by publishing to `fdc:register` (configurable) with fields:
-  - `pubkey`: OpenSSH public key (text)
-  - `payload`: canonical JSON string (RFC8785 or sorted-keys compact form)
-  - `nonce`: random string
-  - `sig`: base64 signature over `SHA3-512(payload + "." + nonce)` using the provided `pubkey` (payload must be canonicalized)
- - If the `pubkey` fingerprint is already approved and bound to a known `producer_id`, the kernel can auto-issue a token.
-- Otherwise, the request is stored as pending for administrator review.
- - Admin flow: `GET /admin/pending` for list, `POST /admin/approve` binds key, creates a `producer` if needed (UUIDv4 generated SQL-side), and issues a token.
- - Optional response stream: if configured, kernel publishes `{fingerprint, token}` to `register_resp_stream` on auto-issue.
- - Anti-replay: nonces are cached with TTL; duplicate nonces are rejected.
+### Limits and DLQ
+- Max message size: configurable.
+- DLQ reasons include: `unauthenticated`, `bad_event_json`, `subject_mismatch_token`, `producer_subject_forbidden`, `missing_subject_schema`.
 

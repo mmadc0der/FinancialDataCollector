@@ -24,7 +24,8 @@ redis:
   stream: "events"
   register_stream: "register"
   register_resp_stream: "register:resp"
-  control_resp_stream: "control:resp"
+  subject_register_stream: "subject:register"
+  subject_resp_stream: "subject:resp"
   maxlen_approx: 1000000
   queue_size: 2048
   publish_enabled: false   # publish to Redis from router (feature flag)
@@ -49,43 +50,17 @@ spill:
 auth:
   enabled: true
   require_token: true
-  # Token verification/issuance
-  issuer: "fdc"
-  audience: "fdc-cluster"
-  key_id: "cluster-key"
-  # Public keys for verification (base64 raw ed25519) or SSH lines
-  public_keys: {}
-  public_keys_ssh: {}
-  # Private key for issuing (optional if not issuing)
-  private_key: ""
-  private_key_file: ""
-  private_key_passphrase_file: ""
-  # Admin access via OpenSSH CA (for /admin/* and /auth endpoints)
-  admin_ssh_ca: |
-    # ssh-ed25519 AAAA... cluster-admin-ca@fdc
-  # Producer identity enforcement: require producer certificates signed by Producer CA
-  producer_ssh_ca: |
-    # ssh-ed25519 AAAA... producer-ca@fdc
-  producer_cert_required: true
   issuer: "fdc-kernel"
   audience: "fdc-events"
   key_id: "kid-1"
-  # Public verification keys by key id (base64 raw Ed25519 public key)
-  public_keys:
-    kid-1: "<BASE64_PUBLIC_KEY>"
-  # Alternatively, provide SSH public keys (kid -> OpenSSH public key)
-  public_keys_ssh:
-    kid-1: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... kernel-sign-pub"
-  # Kernel signing private key (base64 raw Ed25519). Required if kernel issues tokens.
-  private_key: "<BASE64_PRIVATE_KEY>"
-  # Or point to an OpenSSH/PEM private key file (ed25519)
-  private_key_file: "./ssh/kernel_sign"
-  # SSH CA public key used to verify admin certificates (OpenSSH authorized_keys format).
-  # This is the cluster CA public key that signs admin user certificates.
-  admin_ssh_ca: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLE_CA_PUBKEY cluster-admin-ca"
-  # Producer CA (OpenSSH public key). If set, producers must present SSH certificates signed by this CA at registration.
-  producer_ssh_ca: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPRODUCER_CA_PUBKEY producer-ca"
-  producer_cert_required: true
+  public_keys: {}
+  public_keys_ssh: {}
+  private_key: ""
+  private_key_file: ""
+  private_key_passphrase_file: ""
+  admin_ssh_ca: ""
+  producer_ssh_ca: ""
+  producer_cert_required: false
   cache_ttl_seconds: 300
   skew_seconds: 60
 

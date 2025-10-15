@@ -11,7 +11,7 @@ This project provides a resilient, configurable kernel for ingesting high-freque
 ### Tech stack
 - Kernel: Go 1.23+
 - Modules: external producers (any language) publishing to Redis Streams
-- Transport: Redis Streams (JSON envelopes)
+- Transport: Redis Streams (lean JSON events)
 - Storage: Postgres (primary), spill-to-disk as fallback; optional Redis re-publish
 - Config: YAML
 - CI: GitHub Actions
@@ -22,14 +22,14 @@ See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 - Build: `make build` or `go build -o bin/kernel ./cmd/kernel`
 - Copy config: `cp config/kernel.example.yaml config/kernel.yaml` and edit values
 - Run: `./bin/kernel --config ./config/kernel.yaml`
- - Example producer: `go run ./cmd/producer-example --redis 127.0.0.1:6379 --prefix fdc:`
+- Example producer: see `modules.d/producer-example/` (uses subject:register and lean events)
 
 ### Authentication (optional)
-- Configure `auth` in `config/kernel.yaml` (issuer, audience, Ed25519 keys). When enabled, producers must include a `token` field on XADD.
- - Admin endpoints:
-   - List pending registrations: `GET /admin/pending`
-   - Approve fingerprint and issue token: `POST /admin/approve` with body `{"fingerprint":"...","name":"...","schema_id":"...","ttl_seconds":86400}`
-   - Revoke token: `POST /admin/revoke` with body `{"jti":"<token_id>","reason":"..."}`
+- Configure `auth` in `config/kernel.yaml` (issuer, audience, Ed25519/SSH keys). When enabled, producers must include `token` on XADD.
+- Admin endpoints:
+  - List pending registrations: `GET /admin/pending`
+  - Approve fingerprint and issue token: `POST /admin/approve` with body `{"fingerprint":"...","name":"...","ttl_seconds":86400}`
+  - Revoke token: `POST /admin/revoke` with body `{"jti":"<token_id>","reason":"..."}`
   - Production hardening: send OpenSSH cert in `X-SSH-Cert` with principal in `X-SSH-Principal` signed by configured CA.
 
 ### Infrastructure setup
