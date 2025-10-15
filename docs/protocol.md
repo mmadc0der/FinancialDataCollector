@@ -20,20 +20,27 @@
 - It enforces `producer_subjects(producer_id, subject_id)` and that the subject has a current schema.
 
 ### Subject registration
-- Stream: `subject:register` (configurable). Fields:
+- Stream: `fdc:subject:register` (fixed). Fields:
   - `token`: producer token
   - `payload`: `{ "subject_key": "...", "schema_id"?: "...", "attrs"?: {...} }`
-- Behavior: ensure subject by key, optionally set `current_schema_id` and append to history, bind producer↔subject. If `subject_resp_stream` is configured, kernel publishes `{subject_id}`.
+- Behavior: ensure subject by key, optionally set `current_schema_id` and append to history, bind producer↔subject.
+- Response: `fdc:subject:resp` (fixed) with `{ subject_id }`.
 
 ### Authentication
 - Tokens are EdDSA-signed and include `iss`, `aud`, `exp`, `nbf`, `jti`, `sub` (producer_id), and optional `sid` (subject_id). Kernel validates signature and JTI allowlist/blacklist; Redis cache accelerates checks.
 - If `sid` present, it must match the event’s `subject_id`.
 
-### Registration and refresh
-- Stream: `register` with fields `{ pubkey, payload, nonce, sig }`.
-- Unknown fingerprints: recorded as `pending` for admin approval.
-- Known, approved fingerprints: kernel may auto-issue short-lived tokens and publish `{fingerprint, token, producer_id}` to `register_resp_stream` if configured.
+### Producer registration
+- Stream: `fdc:register` (fixed) with fields `{ pubkey, payload, nonce, sig }`.
+- Unknown fingerprints: recorded as `pending` and bound to a newly created or existing `producer_id`.
+- Response: `fdc:register:resp` (fixed) with `{ fingerprint, producer_id, status }`.
 - Anti-replay: nonces cached with TTL; duplicate nonces rejected; DB uniqueness enforced.
+
+### Token exchange
+- Stream: `fdc:token:exchange` (fixed) with fields `{ pubkey?, token?, payload, nonce, sig? }`.
+- If using `pubkey`: verify signature and require approved binding to `producer_id`.
+- If using `token`: verify claims and allow short-lived renewal.
+- Response: `fdc:token:resp` (fixed) with `{ fingerprint, producer_id, token, exp }`.
 
 ### Limits and DLQ
 - Max message size: configurable.

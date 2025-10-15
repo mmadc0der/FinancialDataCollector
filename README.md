@@ -22,14 +22,18 @@ See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
 - Build: `make build` or `go build -o bin/kernel ./cmd/kernel`
 - Copy config: `cp config/kernel.example.yaml config/kernel.yaml` and edit values
 - Run: `./bin/kernel --config ./config/kernel.yaml`
-- Example producer: see `modules.d/producer-example/` (uses subject:register and lean events)
+- Example producer: see `modules.d/producer-example/` (uses `fdc:subject:register` and lean events)
 
-### Authentication (optional)
+### Authentication
 - Configure `auth` in `config/kernel.yaml` (issuer, audience, Ed25519/SSH keys). When enabled, producers must include `token` on XADD.
+- Streams (fixed):
+  - Producer registration: publish to `fdc:register`; responses on `fdc:register:resp`.
+  - Subject registration: publish to `fdc:subject:register`; responses on `fdc:subject:resp`.
+  - Token exchange: publish to `fdc:token:exchange`; responses on `fdc:token:resp`.
 - Admin endpoints:
   - List pending registrations: `GET /admin/pending`
-  - Approve fingerprint and issue token: `POST /admin/approve` with body `{"fingerprint":"...","name":"...","ttl_seconds":86400}`
-  - Revoke token: `POST /admin/revoke` with body `{"jti":"<token_id>","reason":"..."}`
+  - Approve fingerprint (bind to producer): `POST /admin/approve` with body `{ "fingerprint": "...", "name": "..." }`
+  - Revoke token: `POST /admin/revoke` with body `{ "jti": "<token_id>", "reason": "..." }`
   - Production hardening: send OpenSSH cert in `X-SSH-Cert` with principal in `X-SSH-Principal` signed by configured CA.
 
 ### Infrastructure setup

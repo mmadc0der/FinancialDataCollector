@@ -87,8 +87,12 @@ redis:
 - Prometheus: scrape `/metrics` on the kernel (add job in Prometheus config).
 - Grafana: import the dashboard JSON in `docs/grafana/kernel.json`.
 
-### Authentication setup (optional)
+### Authentication setup
 - Generate Ed25519 keypair; encode keys as base64 (raw).
 - Configure `auth` block in `config/kernel.yaml` with issuer/audience, `public_keys` map, and `admin_token`.
-- Use `POST /admin/issue` to mint tokens for registered `producers` and `POST /admin/revoke` to blacklist.
+- Fixed streams:
+  - `fdc:register` / `fdc:register:resp`
+  - `fdc:subject:register` / `fdc:subject:resp`
+  - `fdc:token:exchange` / `fdc:token:resp`
+- Use `/admin/approve` to approve keys and bind producers; use `/admin/revoke` to blacklist tokens. Tokens are issued via `fdc:token:exchange` only.
 

@@ -23,8 +23,11 @@ Incomplete (to be implemented):
 
 ### Protocol boundary
 - Data-plane: Redis Streams. Modules XADD lean events into `events`. Kernel consumes via consumer group `kernel`.
-- No envelopes or control messages. Subjects are registered via `subject:register` with `{token, payload}`.
-- Producer registration via `register` stream; unknown keys are pending; known keys may receive auto-issued tokens.
+- No envelopes. Fixed streams:
+  - `fdc:register` → `fdc:register:resp`
+  - `fdc:subject:register` → `fdc:subject:resp`
+  - `fdc:token:exchange` → `fdc:token:resp`
+- Registration binds or creates a `producer_id` and records as `pending`; token issuance happens only via token exchange.
 
 ### Supervision
 - Not applicable. Modules are external and not managed by the kernel.

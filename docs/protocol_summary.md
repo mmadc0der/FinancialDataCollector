@@ -1,23 +1,26 @@
 ## Producer ↔ Kernel Protocol (v0.1.0)
 
-- **Scope for modules**: Producers do NOT send data-plane envelopes. They only publish control-plane requests to registration-related streams.
+- No envelopes. Producers publish to fixed Redis Streams for registration, subjects, and token exchange.
 
-### Registration/Control Streams
-- `fdc:register` (configurable): request producer registration or token refresh
+### Streams (fixed)
+- `fdc:register`: request producer registration
   - `pubkey`: OpenSSH public key (text). If `producer_cert_required`, must be an SSH cert signed by configured CA.
   - `payload`: canonical JSON (stable key order)
   - `nonce`: random string
   - `sig`: base64 signature over `payload + "." + nonce` using Ed25519 private key corresponding to `pubkey`
-- `fdc:subject:register` (optional, configurable): request subject registration/binding if enabled by kernel/admin policy
+- `fdc:register:resp`: registration results `{ fingerprint, producer_id, status }`
+- `fdc:subject:register`: request subject registration/binding
+- `fdc:subject:resp`: subject results `{ subject_id }`
+- `fdc:token:exchange`: request a short-lived token (with approved pubkey or renewing a valid token)
+- `fdc:token:resp`: token results `{ fingerprint, producer_id, token, exp }`
 
 Kernel behavior:
 - Fingerprint pubkey (SHA3-512, base64), verify signature over `SHA3-512(payload+"."+nonce)`.
-- Upsert key and record registration as `pending`.
-- If key is `approved` and bound to a `producer_id`, auto-issue a short-lived token and publish to `register_resp_stream`:
-  - `{ fingerprint, token, producer_id }`
+- Ensure/create `producer_id` and record registration as `pending` bound to that `producer_id`.
+- Tokens are not issued during registration; use `fdc:token:exchange`.
 
 ### IDs
-- When kernel emits control envelopes (ack/error), it uses UUIDv7 for `id`.
+- When kernel emits responses (ack/error), it uses UUIDv7 for `id`.
 
 ### Authentication Tokens
 - EdDSA tokens with claims: `iss`, `aud`, `sub` (producer_id), `jti`, `exp`, `nbf`, optional `fp` (fingerprint).
