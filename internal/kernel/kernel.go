@@ -15,6 +15,11 @@ import (
     "strings"
     "errors"
     "github.com/redis/go-redis/v9"
+    "bytes"
+    "crypto/ed25519"
+    "encoding/base64"
+    ssh "golang.org/x/crypto/ssh"
+    "golang.org/x/crypto/sha3"
 )
 
 type Kernel struct {

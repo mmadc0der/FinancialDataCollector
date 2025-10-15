@@ -125,7 +125,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
 
                 // Ensure producer exists/bind key if missing; create registration record and respond
                 _ = k.pg.UpsertProducerKey(ctx, fp, pubkey)
-                exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
+                exists, _, producerID := k.pg.GetProducerKey(ctx, fp)
                 if !exists || producerID == nil || *producerID == "" {
                     // create a new producer row and bind key without changing approval status
                     if pid, err := k.pg.EnsureProducerForFingerprint(ctx, fp, ""); err == nil && pid != "" {
