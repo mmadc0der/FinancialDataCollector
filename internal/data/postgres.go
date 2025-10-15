@@ -354,4 +354,30 @@ func (p *Postgres) ApproveProducerKey(ctx context.Context, fingerprint, name, sc
     return pid, nil
 }
 
+// ApproveBindProducerKey binds an existing fingerprint to an existing producer and marks it approved.
+// Returns the producer_id on success.
+func (p *Postgres) ApproveBindProducerKey(ctx context.Context, fingerprint, producerID, reviewer, notes string) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    // ensure key exists and not revoked
+    var exists bool
+    if err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.producer_keys WHERE fingerprint=$1)`, fingerprint).Scan(&exists); err != nil { return "", err }
+    if !exists { return "", errors.New("unknown_fingerprint") }
+    var revoked bool
+    if err := p.pool.QueryRow(cctx, `SELECT status='revoked' FROM public.producer_keys WHERE fingerprint=$1`, fingerprint).Scan(&revoked); err != nil { return "", err }
+    if revoked { return "", errors.New("fingerprint_revoked") }
+    // ensure producer exists
+    if err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.producers WHERE producer_id=$1)`, producerID).Scan(&exists); err != nil { return "", err }
+    if !exists { return "", errors.New("unknown_producer") }
+    // approve and bind
+    if _, err := p.pool.Exec(cctx, `UPDATE public.producer_keys SET producer_id=$1, status='approved', approved_at=now(), notes=COALESCE(NULLIF($3,''), notes) WHERE fingerprint=$2`, producerID, fingerprint, notes); err != nil {
+        return "", err
+    }
+    if _, err := p.pool.Exec(cctx, `UPDATE public.producer_registrations SET status='approved', reviewed_at=now(), reviewer=NULLIF($2,'') WHERE fingerprint=$1 AND status='pending'`, fingerprint, reviewer); err != nil {
+        return "", err
+    }
+    return producerID, nil
+}
+
 

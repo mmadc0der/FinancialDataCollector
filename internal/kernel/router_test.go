@@ -55,8 +55,8 @@ func TestPgWorkerBatch_FlushOnSize_Acks(t *testing.T) {
 	// Use Postgres with nil pool so IngestEventsJSON returns nil (success)
 	r.pg = &data.Postgres{}
 	go r.pgWorkerBatch()
-	env1 := protocol.Envelope{ID: "e1", Version: "0.1.0", Type: "data", TS: time.Now().UnixNano(), Data: json.RawMessage(`{"s":"A"}`)}
-	env2 := protocol.Envelope{ID: "e2", Version: "0.1.0", Type: "data", TS: time.Now().UnixNano(), Data: json.RawMessage(`{"s":"B"}`)}
+    env1 := struct{}{}
+    env2 := struct{}{}
 	r.pgCh <- pgMsg{RedisID: "r1", Env: env1}
 	r.pgCh <- pgMsg{RedisID: "r2", Env: env2}
 	// Close to let worker flush and exit
@@ -66,6 +66,34 @@ func TestPgWorkerBatch_FlushOnSize_Acks(t *testing.T) {
     case got := <-ackCh:
         if len(got) != 2 { t.Fatalf("expected 2 ids in ack, got %v", got) }
         if !( (got[0]=="r1" && got[1]=="r2") || (got[0]=="r2" && got[1]=="r1") ) {
+            t.Fatalf("unexpected ack ids: %v", got)
+        }
+    case <-time.After(500 * time.Millisecond):
+        t.Fatalf("timed out waiting for ack")
+    }
+}
+
+
+func TestPgWorkerBatchLean_FlushOnSize_Acks(t *testing.T) {
+    ackCh := make(chan []string, 2)
+    r := &router{ack: func(ids ...string) {
+        cp := make([]string, len(ids))
+        copy(cp, ids)
+        ackCh <- cp
+    }}
+    r.pgBatchSize = 2
+    r.pgBatchWait = 200 * time.Millisecond
+    r.pgChLean = make(chan pgMsgLean, 2)
+    // Use Postgres with nil pool so IngestEventsJSON returns nil (success)
+    r.pg = &data.Postgres{}
+    go r.pgWorkerBatchLean()
+    r.pgChLean <- pgMsgLean{RedisID: "r1", EventID: "e1", TS: time.Now().Format(time.RFC3339Nano), SubjectID: "s1", ProducerID: "p1", SchemaID: "sch1", Payload: json.RawMessage(`{"x":1}`)}
+    r.pgChLean <- pgMsgLean{RedisID: "r2", EventID: "e2", TS: time.Now().Format(time.RFC3339Nano), SubjectID: "s2", ProducerID: "p2", SchemaID: "sch2", Payload: json.RawMessage(`{"x":2}`)}
+    close(r.pgChLean)
+    select {
+    case got := <-ackCh:
+        if len(got) != 2 { t.Fatalf("expected 2 ids in ack, got %v", got) }
+        if !((got[0]=="r1" && got[1]=="r2") || (got[0]=="r2" && got[1]=="r1")) {
             t.Fatalf("unexpected ack ids: %v", got)
         }
     case <-time.After(500 * time.Millisecond):

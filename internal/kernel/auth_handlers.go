@@ -13,10 +13,9 @@ import (
 
 type approveRequest struct {
 	Fingerprint string `json:"fingerprint"`
-	Name        string `json:"name"`        // producer name if creating
-	SchemaID    string `json:"schema_id"`   // required when creating
-	Notes       string `json:"notes"`
-	TTLSeconds  int    `json:"ttl_seconds"` // token TTL to issue after approval
+    Name        string `json:"name"`        // producer name if creating
+    ProducerID  string `json:"producer_id"` // optional: approve by existing producer id (preferred)
+    Notes       string `json:"notes"`
 }
 
 // GET /admin/pending returns pending registrations (fingerprint + ts)
@@ -60,17 +59,23 @@ func (k *Kernel) handleAuthOverview(w http.ResponseWriter, r *http.Request) {
 }
 // POST /admin/approve approves a fingerprint (and optionally creates a producer) and issues a token
 func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil || k.au == nil { w.WriteHeader(http.StatusUnauthorized); return }
+    if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
     var req approveRequest
-    if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Fingerprint == "" || req.TTLSeconds <= 0 {
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Fingerprint == "" {
         w.WriteHeader(http.StatusBadRequest); return
     }
-    pid, err := k.pg.ApproveProducerKey(r.Context(), req.Fingerprint, req.Name, req.SchemaID, r.Header.Get("X-SSH-Principal"), req.Notes)
+    var pid string
+    var err error
+    // Prefer approving by explicit producer_id when provided to avoid ambiguity
+    if req.ProducerID != "" {
+        pid, err = k.pg.ApproveBindProducerKey(r.Context(), req.Fingerprint, req.ProducerID, r.Header.Get("X-SSH-Principal"), req.Notes)
+    } else {
+        // create/bind by name if producer_id not supplied
+        pid, err = k.pg.ApproveProducerKey(r.Context(), req.Fingerprint, req.Name, "", r.Header.Get("X-SSH-Principal"), req.Notes)
+    }
     if err != nil || pid == "" { w.WriteHeader(http.StatusBadRequest); return }
-    tok, jti, exp, err := k.au.Issue(r.Context(), pid, time.Duration(req.TTLSeconds)*time.Second, "approved", req.Fingerprint)
-    if err != nil { w.WriteHeader(http.StatusInternalServerError); return }
-    logging.Info("admin_approve", logging.F("fingerprint", req.Fingerprint), logging.F("producer_id", pid), logging.F("jti", jti))
-    _ = json.NewEncoder(w).Encode(map[string]any{"producer_id": pid, "token": tok, "jti": jti, "expires_at": exp})
+    logging.Info("admin_approve", logging.F("fingerprint", req.Fingerprint), logging.F("producer_id", pid))
+    _ = json.NewEncoder(w).Encode(map[string]any{"producer_id": pid})
 }
 
 func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
