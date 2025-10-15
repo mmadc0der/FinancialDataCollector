@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+    data "github.com/example/data-kernel/internal/data"
 	"github.com/example/data-kernel/internal/kernelcfg"
 )
 
