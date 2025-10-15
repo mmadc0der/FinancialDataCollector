@@ -8,11 +8,11 @@
   - `payload`: canonical JSON (stable key order)
   - `nonce`: random string
   - `sig`: base64 signature over `payload + "." + nonce` using Ed25519 private key corresponding to `pubkey`
-- `fdc:register:resp`: registration results `{ fingerprint, producer_id, status }`
+- `fdc:register:resp:<nonce>`: per-request registration results `{ fingerprint, producer_id, status }` (ephemeral)
 - `fdc:subject:register`: request subject registration/binding
-- `fdc:subject:resp`: subject results `{ subject_id }`
+- `fdc:subject:resp:<producer_id>`: subject results `{ subject_id }`
 - `fdc:token:exchange`: request a short-lived token (with approved pubkey or renewing a valid token)
-- `fdc:token:resp`: token results `{ fingerprint, producer_id, token, exp }`
+- `fdc:token:resp:<producer_id>`: token results `{ fingerprint, producer_id, token, exp }`
 
 Kernel behavior:
 - Fingerprint pubkey (SHA3-512, base64), verify signature over `SHA3-512(payload+"."+nonce)`.
