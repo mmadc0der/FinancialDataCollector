@@ -20,6 +20,7 @@ import (
     "golang.org/x/crypto/sha3"
     "github.com/redis/go-redis/v9"
     "gopkg.in/yaml.v3"
+    "sync/atomic"
 )
 
 type Config struct {
@@ -63,6 +64,15 @@ func canonicalJSON(v any) string {
 func computeFingerprint(pubLine string) string {
     sum := sha3.Sum512([]byte(pubLine))
     return base64.StdEncoding.EncodeToString(sum[:])
+}
+
+func randomNonce() string {
+    b := make([]byte, 24)
+    if _, err := rand.Read(b); err != nil {
+        // extremely unlikely; fall back to time-based unique string
+        return fmt.Sprintf("%d", time.Now().UnixNano())
+    }
+    return base64.RawStdEncoding.EncodeToString(b)
 }
 
 func readTrim(path string) (string, error) {
@@ -126,7 +136,7 @@ func main() {
     // send registration (repeat later until token received)
     payload := map[string]any{"producer_hint": cfg.Producer.Name, "contact": cfg.Producer.Contact, "meta": map[string]string{"demo":"true"}}
     payloadStr := canonicalJSON(payload)
-    nonce := time.Now().Format(time.RFC3339Nano)
+    nonce := randomNonce()
     msg := []byte(payloadStr + "." + nonce)
     // Sign SHA3-512 hash of canonical payload + nonce
     sum := sha3.Sum512(msg)
@@ -171,7 +181,7 @@ TokenWait:
         select {
         case <-reRegTicker.C:
             // re-send registration to trigger token publish if approved while waiting
-            nonce = time.Now().Format(time.RFC3339Nano)
+            nonce = randomNonce()
             msg = []byte(payloadStr + "." + nonce)
             sum = sha3.Sum512(msg)
             if sshSig, e := signer.Sign(rand.Reader, sum[:]); e == nil { sigRaw = sshSig.Blob } else { continue }
@@ -184,6 +194,11 @@ TokenWait:
     }
     log.Printf("token_acquired producer_id=%s", producerID)
 
+    // Store token and start background refresh loop based on token expiry
+    var tokenStore atomic.Value
+    tokenStore.Store(token)
+    go refreshTokenLoop(ctx, rdb, cfg, signer, pubForRegistration, fp, regRespKey, regGroup, regConsumer, &tokenStore, payloadStr)
+
     // request schema+subject provisioning via control message
     schemaName := cfg.Producer.SchemaName
     if schemaName == "" { schemaName = "demo_schema" }
@@ -193,7 +208,8 @@ TokenWait:
     if subjectKey == "" { subjectKey = "DEMO-1" }
     ctrl := map[string]any{"version":"0.1.0","type":"control","id":"CTRL1","ts": time.Now().UnixNano(), "data": map[string]any{"op":"ensure_schema_subject","name":schemaName,"version":schemaVersion,"body": map[string]any{"fields": []string{"a", "b"}}, "subject_key":subjectKey,"attrs": map[string]any{"region":"eu"}}}
     ctrlB, _ := json.Marshal(ctrl)
-    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id":"CTRL1","payload": string(ctrlB), "token": token}}).Result()
+    curTok, _ := tokenStore.Load().(string)
+    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id":"CTRL1","payload": string(ctrlB), "token": curTok}}).Result()
 
     // Wait for control response with schema_id and subject_id
     ctrlResp := cfg.Redis.CtrlRespStream
@@ -233,7 +249,8 @@ CtrlWait:
         case t := <-ticker.C:
             env := map[string]any{"version":"0.1.0","type":"data","id": t.Format("20060102150405.000000000"), "ts": time.Now().UnixNano(), "data": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO", "subject_id": subjectID}}
             envB, _ := json.Marshal(env)
-            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id": env["id"], "payload": string(envB), "token": token}}).Result()
+            curTok, _ := tokenStore.Load().(string)
+            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.EvStream, Values: map[string]any{"id": env["id"], "payload": string(envB), "token": curTok}}).Result()
             if err != nil { log.Printf("event_xadd_error: %v", err) } else { log.Printf("event_sent id=%s", id) }
         case <-ctx.Done():
             log.Printf("producer_stop")
@@ -242,4 +259,69 @@ CtrlWait:
     }
 }
 
+
+// refreshTokenLoop re-registers periodically based on token expiry and swaps token atomically
+func refreshTokenLoop(ctx context.Context, rdb *redis.Client, cfg Config, signer ssh.Signer, pubForRegistration, fp, regRespKey, regGroup, regConsumer string, tokenStore *atomic.Value, payloadStr string) {
+    // ensure group exists (ignore BUSYGROUP)
+    _ = rdb.XGroupCreateMkStream(ctx, regRespKey, regGroup, "$" ).Err()
+    for ctx.Err() == nil {
+        tok, _ := tokenStore.Load().(string)
+        // parse expiry; if unknown, default to 10 minutes
+        exp := time.Now().Add(10 * time.Minute)
+        if t, ok := tokenExpiry(tok); ok {
+            exp = t
+        }
+        refreshAt := exp.Add(-5 * time.Minute)
+        if time.Until(refreshAt) < 30*time.Second {
+            refreshAt = time.Now().Add(30 * time.Second)
+        }
+        timer := time.NewTimer(time.Until(refreshAt))
+        select {
+        case <-ctx.Done():
+            timer.Stop()
+            return
+        case <-timer.C:
+        }
+        // send registration
+        nonce := randomNonce()
+        msg := []byte(payloadStr + "." + nonce)
+        sum := sha3.Sum512(msg)
+        sshSig, err := signer.Sign(rand.Reader, sum[:])
+        if err != nil { continue }
+        sigB64 := base64.StdEncoding.EncodeToString(sshSig.Blob)
+        if _, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+cfg.Redis.RegStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); err != nil {
+            continue
+        }
+        // wait for token for this fingerprint
+        for i := 0; i < 120 && ctx.Err() == nil; i++ { // ~10 minutes max
+            res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{Group: regGroup, Consumer: regConsumer, Streams: []string{regRespKey, ">"}, Count: 10, Block: 5 * time.Second}).Result()
+            if err != nil && err != redis.Nil { time.Sleep(200 * time.Millisecond); continue }
+            found := false
+            for _, s := range res {
+                for _, m := range s.Messages {
+                    if f, _ := m.Values["fingerprint"].(string); f != "" && f == fp {
+                        if t, ok := m.Values["token"].(string); ok && t != "" {
+                            tokenStore.Store(t)
+                            found = true
+                        }
+                    }
+                    _ = rdb.XAck(ctx, regRespKey, regGroup, m.ID).Err()
+                }
+            }
+            if found { break }
+        }
+    }
+}
+
+type tokenClaims struct { Exp int64 `json:"exp"` }
+
+func tokenExpiry(tok string) (time.Time, bool) {
+    parts := strings.Split(tok, ".")
+    if len(parts) != 3 { return time.Time{}, false }
+    cb, err := base64.RawStdEncoding.DecodeString(parts[1])
+    if err != nil { return time.Time{}, false }
+    var c tokenClaims
+    if json.Unmarshal(cb, &c) != nil || c.Exp == 0 { return time.Time{}, false }
+    return time.Unix(c.Exp, 0), true
+}
 

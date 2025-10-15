@@ -150,7 +150,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 }
                 // Authenticate producer if required
                 if k.au != nil && k.cfg.Auth.RequireToken {
-                    if _, _, err := k.au.Verify(ctx, token); err != nil {
+                    if _, _, _, err := k.au.Verify(ctx, token); err != nil {
                         metrics.AuthDeniedTotal.Inc()
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
                         logging.Warn("redis_auth_denied", logging.F("id", id), logging.Err(err))
