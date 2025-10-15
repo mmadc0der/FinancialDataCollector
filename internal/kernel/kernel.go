@@ -253,8 +253,10 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
                 if err == nil && req.SchemaID != "" { _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID); _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour) }
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
-                // Always respond on fixed stream
-                _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:subject:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                // Respond on per-producer stream
+                if producerID != "" {
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:subject:resp:"+producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                }
                 _ = k.rd.Ack(ctx, m.ID)
             }
         }
@@ -279,7 +281,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 if tok, ok := m.Values["token"].(string); ok && tok != "" {
                     if pid, _, _, err := k.au.Verify(ctx, tok); err == nil {
                         if t, _, exp, ierr := k.au.Issue(ctx, pid, time.Hour, "exchange", ""); ierr == nil {
-                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp:"+pid), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
                         }
                     }
                     _ = k.rd.Ack(ctx, m.ID)
@@ -315,7 +317,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
                 if exists && status == "approved" && producerID != nil {
                     if t, _, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
-                        _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                        _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp:"+*producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
                     }
                 }
                 _ = k.rd.Ack(ctx, m.ID)

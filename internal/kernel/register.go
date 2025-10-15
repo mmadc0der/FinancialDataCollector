@@ -120,9 +120,12 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                 regReason := ""
                 if !validSig { regStatus = "invalid_sig"; regReason = "signature_verification_failed" }
                 _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, regStatus, regReason, "")
-                // Always respond (no token here)
-                if producerID != nil && k.rd != nil && k.rd.C() != nil {
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:register:resp"), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "status": regStatus}}).Err()
+                // Respond per nonce stream: fdc:register:resp:<nonce>, with TTL
+                if k.rd != nil && k.rd.C() != nil {
+                    respStream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:register:resp:"+nonce)
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": func() string { if producerID!=nil {return *producerID}; return "" }(), "status": regStatus}}).Err()
+                    // set short TTL to auto-cleanup
+                    _ = k.rd.C().Expire(ctx, respStream, 15 * time.Minute).Err()
                 }
                 _ = k.rd.Ack(ctx, m.ID)
                 logging.Debug("register_ack", logging.F("id", m.ID))
