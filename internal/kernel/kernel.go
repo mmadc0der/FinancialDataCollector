@@ -163,6 +163,16 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                         continue
                     } else { producerID, subjectIDFromToken, jti = pid, sid, j }
                 }
+                // If producer is disabled (deregistered), reject until re-registration
+                if producerID != "" {
+                    if disabled, err := k.pg.IsProducerDisabled(ctx, producerID); err == nil && disabled {
+                        _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_disabled")
+                        logging.Warn("redis_producer_disabled", logging.F("id", id))
+                        _ = k.rd.Ack(ctx, m.ID)
+                        metrics.RedisAckTotal.Add(1)
+                        continue
+                    }
+                }
                 _ = jti // reserved for future gating
                 // Parse lean event JSON from payload
                 var ev struct{

@@ -329,6 +329,34 @@ func (p *Postgres) ApproveBindProducerKey(ctx context.Context, fingerprint, prod
     return producerID, nil
 }
 
+// Producer enable/disable flags
+func (p *Postgres) DisableProducer(ctx context.Context, producerID string) error {
+    if p.pool == nil { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    _, err := p.pool.Exec(cctx, `UPDATE public.producers SET disabled_at = now() WHERE producer_id=$1`, producerID)
+    return err
+}
+
+func (p *Postgres) EnableProducer(ctx context.Context, producerID string) error {
+    if p.pool == nil { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    _, err := p.pool.Exec(cctx, `UPDATE public.producers SET disabled_at = NULL WHERE producer_id=$1`, producerID)
+    return err
+}
+
+func (p *Postgres) IsProducerDisabled(ctx context.Context, producerID string) (bool, error) {
+    if p.pool == nil { return false, nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    var disabled *time.Time
+    if err := p.pool.QueryRow(cctx, `SELECT disabled_at FROM public.producers WHERE producer_id=$1`, producerID).Scan(&disabled); err != nil {
+        return false, err
+    }
+    return disabled != nil, nil
+}
+
 // EnsureProducerForFingerprint creates or finds a producer and binds the fingerprint without changing approval status.
 // Returns the resolved producer_id.
 func (p *Postgres) EnsureProducerForFingerprint(ctx context.Context, fingerprint, preferredName string) (string, error) {

@@ -51,6 +51,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                 payloadStr, _ := m.Values["payload"].(string)
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
+                action, _ := m.Values["action"].(string)
                 if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
                     logging.Warn("register_missing_fields", logging.F("id", m.ID))
                     _ = k.rd.Ack(ctx, m.ID); continue }
@@ -107,6 +108,21 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                         }
                     }
                 } else { logging.Warn("register_pubkey_parse_error", logging.F("fingerprint", fp), logging.Err(err)) }
+                // Deregister path: if action=deregister and signature valid, disable producer and respond
+                if action == "deregister" && validSig {
+                    exists, _, producerID := k.pg.GetProducerKey(ctx, fp)
+                    if exists && producerID != nil && *producerID != "" {
+                        _ = k.pg.DisableProducer(ctx, *producerID)
+                        if k.rd != nil && k.rd.C() != nil && nonce != "" {
+                            respStream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:register:resp:"+nonce)
+                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "status": "deregistered"}}).Err()
+                            _ = k.rd.C().Expire(ctx, respStream, 15 * time.Minute).Err()
+                        }
+                    }
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+
                 // Ensure producer exists/bind key if missing; create registration record and respond
                 _ = k.pg.UpsertProducerKey(ctx, fp, pubkey)
                 exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
