@@ -62,7 +62,7 @@ func TestVerify_Success_WithFakes(t *testing.T) {
 
     tok, jti, _, err := v.Issue(nil, "p1", time.Minute, "", "fp")
     if err != nil { t.Fatalf("issue: %v", err) }
-    pid, got, err := v.Verify(nil, tok)
+    pid, _, got, err := v.Verify(nil, tok)
     if err != nil { t.Fatalf("verify: %v", err) }
     if pid != "p1" || got != jti { t.Fatalf("mismatch pid/jti: %s/%s", pid, got) }
 }
@@ -77,7 +77,7 @@ func TestVerify_BadSignature_WithFakes(t *testing.T) {
     tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
     bt := []byte(tok)
     bt[len(bt)-1] ^= 0x01
-    if _, _, err := v.Verify(nil, string(bt)); err == nil { t.Fatalf("expected bad_signature/b64 error") }
+    if _, _, _, err := v.Verify(nil, string(bt)); err == nil { t.Fatalf("expected bad_signature/b64 error") }
 }
 
 func TestVerify_Expired_WithFakes(t *testing.T) {
@@ -88,7 +88,7 @@ func TestVerify_Expired_WithFakes(t *testing.T) {
     authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
     authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
     tok, _, _, _ := v.Issue(nil, "p1", -1*time.Second, "", "")
-    if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_expired") }
+    if _, _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_expired") }
 }
 
 func TestVerify_IssuerAudienceMismatch_WithFakes(t *testing.T) {
@@ -100,7 +100,7 @@ func TestVerify_IssuerAudienceMismatch_WithFakes(t *testing.T) {
     authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
     tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
     v.cfg.Issuer = "other"
-    if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected issuer/audience error") }
+    if _, _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected issuer/audience error") }
 }
 
 func TestVerify_RevokedViaRedis_WithFakes(t *testing.T) {
@@ -112,7 +112,7 @@ func TestVerify_RevokedViaRedis_WithFakes(t *testing.T) {
     authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
     tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
     authRedisExists = func(_ *data.Redis, ctx context.Context, key string) (int64, error) { if strings.Contains(key, "revoked:jti:") { return 1, nil }; return 0, nil }
-    if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_revoked via redis") }
+    if _, _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_revoked via redis") }
 }
 
 func TestVerify_UnknownKid(t *testing.T) {
@@ -123,7 +123,7 @@ func TestVerify_UnknownKid(t *testing.T) {
     // New verifier with no public keys -> unknown kid
     cfg2 := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud"}
     v2, _ := NewVerifier(cfg2, nil, nil)
-    if _, _, err := v2.Verify(nil, tok); err == nil { t.Fatalf("expected unknown_kid") }
+    if _, _, _, err := v2.Verify(nil, tok); err == nil { t.Fatalf("expected unknown_kid") }
 }
 
 

@@ -5,44 +5,41 @@ import (
     "testing"
     "time"
 
-    "github.com/example/data-kernel/internal/protocol"
     "github.com/example/data-kernel/internal/data"
 )
 
-func TestHandleRedis_AckWhenNoPostgres(t *testing.T) {
-	acked := []string{}
-	r := &router{ack: func(ids ...string) { acked = append(acked, ids...) }}
-	// No Postgres channel means immediate ack
-	r.handleRedis("1-0", protocol.Envelope{ID: "evt1", Version: "0.1.0", Type: "data", TS: time.Now().UnixNano(), Data: json.RawMessage(`{"k":1}`)})
-	if len(acked) != 1 || acked[0] != "1-0" {
-		t.Fatalf("expected immediate ack of redis id, got %v", acked)
-	}
+func TestHandleLeanEvent_AckWhenNoPostgres(t *testing.T) {
+    acked := []string{}
+    r := &router{ack: func(ids ...string) { acked = append(acked, ids...) }}
+    // No pgChLean means immediate ack in lean path
+    r.handleLeanEvent("1-0", "evt1", time.Now().Format(time.RFC3339Nano), "sid", "pid", json.RawMessage(`{"k":1}`), nil, "")
+    if len(acked) != 1 || acked[0] != "1-0" {
+        t.Fatalf("expected immediate ack of redis id, got %v", acked)
+    }
 }
 
-func TestHandleRedis_EnqueueToPg(t *testing.T) {
-	r := &router{pgCh: make(chan pgMsg, 1)}
-	r.handleRedis("r-1", protocol.Envelope{ID: "evt1", Version: "0.1.0", Type: "data", TS: time.Now().UnixNano(), Data: json.RawMessage(`{"k":1}`)})
-	select {
-	case m := <-r.pgCh:
-		if m.RedisID != "r-1" || m.Env.ID != "evt1" { t.Fatalf("unexpected pgMsg: %+v", m) }
-	default:
-		t.Fatalf("expected message in pgCh")
-	}
+func TestHandleLeanEvent_EnqueueToPgLean(t *testing.T) {
+    r := &router{pgChLean: make(chan pgMsgLean, 1)}
+    r.handleLeanEvent("r-1", "evt1", time.Now().Format(time.RFC3339Nano), "sid", "pid", json.RawMessage(`{"k":1}`), nil, "")
+    select {
+    case m := <-r.pgChLean:
+        if m.RedisID != "r-1" || m.EventID != "evt1" { t.Fatalf("unexpected pgMsgLean: %+v", m) }
+    default:
+        t.Fatalf("expected message in pgChLean")
+    }
 }
 
-func TestHandleRedis_PublishEnqueue(t *testing.T) {
-	r := &router{rdCh: make(chan rdMsg, 1), publishEnabled: true}
-	env := protocol.Envelope{ID: "evt2", Version: "0.1.0", Type: "data", TS: time.Now().UnixNano(), Data: json.RawMessage(`{"a":2}`)}
-	r.handleRedis("r-2", env)
-	select {
-	case m := <-r.rdCh:
-		if m.ID != "evt2" { t.Fatalf("unexpected rdMsg id: %s", m.ID) }
-		var got protocol.Envelope
-		_ = json.Unmarshal(m.Payload, &got)
-		if got.ID != env.ID || string(got.Data) != string(env.Data) { t.Fatalf("payload mismatch: %+v vs %+v", got, env) }
-	default:
-		t.Fatalf("expected message in rdCh")
-	}
+func TestRDWorker_Smoke(t *testing.T) {
+    r := &router{rdCh: make(chan rdMsg, 1), publishEnabled: true, rd: &data.Redis{}}
+    done := make(chan struct{})
+    go func() { r.rdWorker(); close(done) }()
+    r.rdCh <- rdMsg{ID: "evt2", Payload: json.RawMessage(`{"a":2}`)}
+    close(r.rdCh)
+    select {
+    case <-done:
+    case <-time.After(500 * time.Millisecond):
+        t.Fatalf("rdWorker did not exit in time")
+    }
 }
 
 func TestPgWorkerBatch_FlushOnSize_Acks(t *testing.T) {
