@@ -108,10 +108,10 @@ func TestVerify_RevokedViaRedis_WithFakes(t *testing.T) {
     cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
-    v.dbTokenExists = db.TokenExists
-    v.dbIsTokenRevoked = db.IsTokenRevoked
+    authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
+    authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
     tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
-    v.redisExists = func(ctx context.Context, key string) (int64, error) { if strings.Contains(key, "revoked:jti:") { return 1, nil }; return 0, nil }
+    authRedisExists = func(_ *data.Redis, ctx context.Context, key string) (int64, error) { if strings.Contains(key, "revoked:jti:") { return 1, nil }; return 0, nil }
     if _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("expected token_revoked via redis") }
 }
 
