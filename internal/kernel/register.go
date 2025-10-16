@@ -6,7 +6,6 @@ import (
     "bytes"
     "encoding/base64"
     "encoding/json"
-    "database/sql"
     "errors"
     "fmt"
     "time"
@@ -311,6 +310,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
 
     // Atomically create producer and bind fingerprint for first-time registration
     var producerID string
+    var err error
     producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta)
     if err != nil {
         logging.Error("registration_producer_key_register_error", 
@@ -328,7 +328,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     }
 
     // Check current key status (should exist now after RegisterProducerKey)
-    status, statusProducerID, err := k.pg.GetKeyStatus(ctx, fp)
+    status, err := k.pg.GetKeyStatus(ctx, fp)
     if err != nil {
         logging.Error("registration_status_check_error", 
             logging.F("producer_id", producerID),
