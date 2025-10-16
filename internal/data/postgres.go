@@ -329,7 +329,13 @@ func (p *Postgres) GetKeyStatus(ctx context.Context, fingerprint string) (status
     var pid *string
     var st string
     err = p.pool.QueryRow(cctx, `SELECT status, producer_id FROM public.get_key_status($1)`, fingerprint).Scan(&st, &pid)
-    if err != nil { return "", nil, err }
+    if err != nil {
+        if err == sql.ErrNoRows {
+            // Fingerprint not found - this is expected for new registrations
+            return "", nil, nil
+        }
+        return "", nil, err
+    }
     return st, pid, nil
 }
 
