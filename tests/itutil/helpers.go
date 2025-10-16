@@ -16,6 +16,7 @@ import (
     psqlmod "github.com/testcontainers/testcontainers-go/modules/postgres"
 
     "github.com/redis/go-redis/v9"
+    "github.com/jackc/pgx/v5/pgxpool"
 
     "github.com/example/data-kernel/internal/kernel"
     "github.com/example/data-kernel/internal/kernelcfg"
@@ -132,6 +133,27 @@ func WaitReadStream(t *testing.T, r *redis.Client, stream string, deadline time.
     }
     t.Fatalf("timeout reading from stream %s", stream)
     return redis.XMessage{}
+}
+
+// WaitPostgresReady attempts to connect to Postgres and run a trivial query until success.
+func WaitPostgresReady(t *testing.T, dsn string, deadline time.Duration) {
+    t.Helper()
+    end := time.Now().Add(deadline)
+    for time.Now().Before(end) {
+        pool, err := pgxpool.New(context.Background(), dsn)
+        if err == nil {
+            ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+            var one int
+            e := pool.QueryRow(ctx, "SELECT 1").Scan(&one)
+            cancel()
+            pool.Close()
+            if e == nil && one == 1 {
+                return
+            }
+        }
+        time.Sleep(150 * time.Millisecond)
+    }
+    t.Fatalf("postgres not ready: %s", dsn)
 }
 
 
