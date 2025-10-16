@@ -66,7 +66,8 @@ func (k *Kernel) Start(ctx context.Context) error {
     if k.cfg.Auth.Enabled {
         mux.HandleFunc("/admin/pending", k.handleListPending)
         mux.HandleFunc("/auth", k.handleAuthOverview)
-        mux.HandleFunc("/admin/approve", k.handleApprove)
+        mux.HandleFunc("/admin/review", k.handleReview)
+        mux.HandleFunc("/admin/approve", k.handleApprove) // backward compatibility
         mux.HandleFunc("/admin/revoke", k.handleRevokeToken)
     }
     server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux}
@@ -329,11 +330,31 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                     }
                 }
                 if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
-                exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
-                if exists && status == "approved" && producerID != nil {
-                    if t, _, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
-                        _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
-                    }
+                status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
+                if err != nil {
+                    logging.Info("token_exchange_status_check_error", logging.F("fingerprint", fp), logging.Err(err))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                if status == "" {
+                    logging.Info("token_exchange_unknown_key", logging.F("fingerprint", fp))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                if status != "approved" {
+                    logging.Info("token_exchange_key_not_approved", logging.F("fingerprint", fp), logging.F("status", status))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                if producerID == nil || *producerID == "" {
+                    logging.Info("token_exchange_no_producer", logging.F("fingerprint", fp))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                if t, _, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                } else {
+                    logging.Info("token_exchange_issue_error", logging.F("fingerprint", fp), logging.Err(ierr))
                 }
                 _ = k.rd.Ack(ctx, m.ID)
             }

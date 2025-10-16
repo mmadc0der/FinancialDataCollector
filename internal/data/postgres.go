@@ -290,42 +290,47 @@ func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload,
 
 // Removed: TryAutoIssueAndRecord (auto-issue is not used in registration flow)
 
-// ApproveProducerKey approves a fingerprint, optionally creating a new producer, and returns the producer_id
-func (p *Postgres) ApproveProducerKey(ctx context.Context, fingerprint, name, schemaID, reviewer, notes string) (string, error) {
+// ApproveNewProducerKey approves a new producer key (case 1: new producer)
+func (p *Postgres) ApproveNewProducerKey(ctx context.Context, fingerprint, name, reviewer, notes string) (string, error) {
     if p.pool == nil { return "", nil }
     cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
     defer cancel()
     var pid string
-    // New signature: (_fingerprint TEXT, _name TEXT, _reviewer TEXT, _schema_id UUID DEFAULT NULL, _notes TEXT DEFAULT NULL)
-    err := p.pool.QueryRow(cctx, `SELECT public.approve_producer_key($1,$2,$3,$4::uuid,$5)`, fingerprint, name, reviewer, schemaID, notes).Scan(&pid)
+    err := p.pool.QueryRow(cctx, `SELECT public.approve_producer_key_new($1,$2,$3,$4)`, fingerprint, name, reviewer, notes).Scan(&pid)
     if err != nil { return "", err }
     return pid, nil
 }
 
-// ApproveBindProducerKey binds an existing fingerprint to an existing producer and marks it approved.
-// Returns the producer_id on success.
-func (p *Postgres) ApproveBindProducerKey(ctx context.Context, fingerprint, producerID, reviewer, notes string) (string, error) {
+// ApproveKeyRotation approves a key rotation for existing producer (case 2: key rotation)
+func (p *Postgres) ApproveKeyRotation(ctx context.Context, fingerprint, producerID, reviewer, notes string) (string, error) {
     if p.pool == nil { return "", nil }
     cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
     defer cancel()
-    // ensure key exists and not revoked
-    var exists bool
-    if err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.producer_keys WHERE fingerprint=$1)`, fingerprint).Scan(&exists); err != nil { return "", err }
-    if !exists { return "", errors.New("unknown_fingerprint") }
-    var revoked bool
-    if err := p.pool.QueryRow(cctx, `SELECT status='revoked' FROM public.producer_keys WHERE fingerprint=$1`, fingerprint).Scan(&revoked); err != nil { return "", err }
-    if revoked { return "", errors.New("fingerprint_revoked") }
-    // ensure producer exists
-    if err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.producers WHERE producer_id=$1)`, producerID).Scan(&exists); err != nil { return "", err }
-    if !exists { return "", errors.New("unknown_producer") }
-    // approve and bind
-    if _, err := p.pool.Exec(cctx, `UPDATE public.producer_keys SET producer_id=$1, status='approved', approved_at=now(), notes=COALESCE(NULLIF($3,''), notes) WHERE fingerprint=$2`, producerID, fingerprint, notes); err != nil {
-        return "", err
-    }
-    if _, err := p.pool.Exec(cctx, `UPDATE public.producer_registrations SET status='approved', reviewed_at=now(), reviewer=NULLIF($2,'') WHERE fingerprint=$1 AND status='pending'`, fingerprint, reviewer); err != nil {
-        return "", err
-    }
-    return producerID, nil
+    var pid string
+    err := p.pool.QueryRow(cctx, `SELECT public.approve_key_rotation($1,$2,$3,$4)`, fingerprint, producerID, reviewer, notes).Scan(&pid)
+    if err != nil { return "", err }
+    return pid, nil
+}
+
+// RejectProducerKey rejects a producer key registration
+func (p *Postgres) RejectProducerKey(ctx context.Context, fingerprint, reviewer, reason string) error {
+    if p.pool == nil { return nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    _, err := p.pool.Exec(cctx, `SELECT public.reject_producer_key($1,$2,$3)`, fingerprint, reviewer, reason)
+    return err
+}
+
+// GetKeyStatus returns the current status and producer_id for a fingerprint
+func (p *Postgres) GetKeyStatus(ctx context.Context, fingerprint string) (status string, producerID *string, err error) {
+    if p.pool == nil { return "", nil, nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    var pid *string
+    var st string
+    err = p.pool.QueryRow(cctx, `SELECT status, producer_id FROM public.get_key_status($1)`, fingerprint).Scan(&st, &pid)
+    if err != nil { return "", nil, err }
+    return st, pid, nil
 }
 
 // Producer enable/disable flags

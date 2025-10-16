@@ -38,6 +38,7 @@ type Config struct {
         SSHPublicKeyFile  string `yaml:"ssh_public_key_file"`
         SSHCertFile       string `yaml:"ssh_cert_file"`
         SubjectKey        string `yaml:"subject_key"`
+        ProducerID        string `yaml:"producer_id"` // optional for key rotation
     } `yaml:"producer"`
 }
 
@@ -147,7 +148,15 @@ func main() {
     // fingerprint is not used client-side; server computes and matches as needed
 
     // send registration (repeat until producer_id acquired)
-    payload := map[string]any{"producer_hint": cfg.Producer.Name, "contact": cfg.Producer.Contact, "meta": map[string]string{"demo":"true"}}
+    payload := map[string]any{
+        "producer_hint": cfg.Producer.Name, 
+        "contact": cfg.Producer.Contact, 
+        "meta": map[string]string{"demo":"true"},
+    }
+    // Add producer_id for key rotation if configured
+    if cfg.Producer.ProducerID != "" {
+        payload["producer_id"] = cfg.Producer.ProducerID
+    }
     payloadStr := canonicalJSON(payload)
     regStream := cfg.Redis.KeyPrefix + "register"
     var producerID string
@@ -162,7 +171,25 @@ func main() {
         // wait on per-nonce response stream
         respStream := cfg.Redis.KeyPrefix + "register:resp:" + nonce
         if msg, e := xreadOne(ctx, rdb, respStream, 10*time.Second); e == nil {
-            if pid, ok := msg.Values["producer_id"].(string); ok { producerID = pid }
+            if pid, ok := msg.Values["producer_id"].(string); ok { 
+                producerID = pid 
+            }
+            if status, ok := msg.Values["status"].(string); ok {
+                switch status {
+                case "approved":
+                    log.Printf("registration_approved producer_id=%s", producerID)
+                case "pending":
+                    log.Printf("registration_pending producer_id=%s", producerID)
+                case "denied", "invalid_sig", "invalid_cert":
+                    if reason, ok := msg.Values["reason"].(string); ok {
+                        log.Printf("registration_denied status=%s reason=%s", status, reason)
+                    } else {
+                        log.Printf("registration_denied status=%s", status)
+                    }
+                    // For denied registrations, we should exit or retry with different credentials
+                    log.Fatalf("registration_denied: %s", status)
+                }
+            }
         }
         if producerID == "" {
             select { case <-reRegTicker.C: default: }

@@ -32,20 +32,36 @@
 
 ### Producer registration
 - Stream: `fdc:register` (fixed) with fields `{ pubkey, payload, nonce, sig }`.
-- Unknown fingerprints: recorded as `pending` and bound to a newly created or existing `producer_id`.
-- Response: `fdc:register:resp:<nonce>` with `{ fingerprint, producer_id, status }` (per-request ephemeral).
-- Anti-replay: nonces cached with TTL; duplicate nonces rejected; DB uniqueness enforced.
+- **New Registration Flow (v2)**:
+  - **Case 1 (New Producer)**: Unknown fingerprint, no `producer_id` in payload → creates new producer, key status=`pending`
+  - **Case 2 (Key Rotation)**: Unknown fingerprint, WITH `producer_id` in payload → validates existing producer, key status=`pending`
+  - **Case 3 (Known Approved)**: Known fingerprint, status=`approved` → returns existing `producer_id`
+  - **Case 4 (Known Pending)**: Known fingerprint, status=`pending` → silent (no response)
+  - **Case 5 (Known Denied)**: Known fingerprint, status=`revoked`/`superseded` → returns denial
+- Response: `fdc:register:resp:<nonce>` with `{ fingerprint, producer_id, status, reason? }` (per-request ephemeral).
+- **Rate Limiting**: Kernel-side enforcement (default 10 RPM), silent drop on limit exceeded.
+- **Anti-replay**: nonces cached with TTL; duplicate nonces rejected; DB uniqueness enforced.
+- **Admin Review**: Keys require manual approval via `/admin/review` endpoint before becoming `approved`.
 
 ### Token exchange
 - Stream: `fdc:token:exchange` (fixed) with fields `{ pubkey?, token?, payload, nonce, sig? }`.
-- If using `pubkey`: verify signature and require approved binding to `producer_id`.
+- If using `pubkey`: verify signature and require **approved** binding to `producer_id`.
 - If using `token`: verify claims and allow short-lived renewal.
+- **Key Status Validation**: Only keys with status=`approved` can exchange for tokens.
 - Response: `fdc:token:resp:<producer_id>` with `{ fingerprint, producer_id, token, exp }`.
+
+### Admin Endpoints
+- **`/admin/review`** (POST): Review and approve/deny producer registrations
+  - Request: `{ "action": "approve"|"deny", "producer_id": "uuid", "fingerprint": "string", "reason": "string", "notes": "string" }`
+  - Headers: `X-SSH-Cert` (admin certificate), `X-SSH-Principal` (admin principal)
+  - Response: `{ "producer_id": "uuid", "status": "approved"|"denied", "fingerprint": "string" }`
+- **`/admin/pending`** (GET): List pending registrations
+- **`/admin/auth`** (GET): List all producer keys and their statuses
 
 ### Deregistration
 - Stream: `fdc:register` with `{ action: "deregister", pubkey, payload, nonce, sig }`.
 - On valid signature and known binding, kernel sets `producers.disabled_at` and responds on `fdc:register:resp:<nonce>` with `{ status: "deregistered" }`.
-- Disabled producers’ events are rejected (`producer_disabled`) until re-registration.
+- Disabled producers' events are rejected (`producer_disabled`) until re-registration.
 
 ### Limits and DLQ
 - Max message size: configurable.

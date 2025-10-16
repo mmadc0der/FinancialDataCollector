@@ -35,6 +35,7 @@ redis:
   read_count: 100
   block_ms: 5000
   dlq_stream: "events:dlq"
+  registration_rate_limit_rpm: 10  # rate limit for registration requests per minute
 
 logging:
   level: "info"
@@ -63,4 +64,5 @@ auth:
   producer_cert_required: false
   cache_ttl_seconds: 300
   skew_seconds: 60
+  registration_response_ttl_seconds: 300  # TTL for registration response streams (5 minutes)
 

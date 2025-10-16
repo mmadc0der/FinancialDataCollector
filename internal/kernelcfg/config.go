@@ -61,6 +61,8 @@ type RedisConfig struct {
     DLQStream       string `yaml:"dlq_stream"`
     // Producer (publisher) feature flag
     PublishEnabled  bool   `yaml:"publish_enabled"`
+    // Registration rate limiting
+    RegistrationRateLimitRPM int `yaml:"registration_rate_limit_rpm"`
 }
 
 type SpillConfig struct {
@@ -96,6 +98,8 @@ type AuthConfig struct {
     // Cache and clock skew
     CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
     SkewSeconds int `yaml:"skew_seconds"`
+    // Registration response TTL
+    RegistrationResponseTTLSeconds int `yaml:"registration_response_ttl_seconds"`
 }
 
 func Load(path string) (*Config, error) {
@@ -135,6 +139,7 @@ func Load(path string) (*Config, error) {
     if cfg.Redis.ReadCount <= 0 { cfg.Redis.ReadCount = 100 }
     if cfg.Redis.BlockMs <= 0 { cfg.Redis.BlockMs = 5000 }
     if cfg.Redis.DLQStream == "" && cfg.Redis.Stream != "" { cfg.Redis.DLQStream = cfg.Redis.Stream + ":dlq" }
+    if cfg.Redis.RegistrationRateLimitRPM <= 0 { cfg.Redis.RegistrationRateLimitRPM = 10 }
     // Defaults for Postgres batching
     if cfg.Postgres.BatchSize <= 0 { cfg.Postgres.BatchSize = 1000 }
     if cfg.Postgres.BatchMaxWaitMs <= 0 { cfg.Postgres.BatchMaxWaitMs = 200 }
@@ -144,6 +149,7 @@ func Load(path string) (*Config, error) {
         if cfg.Auth.SkewSeconds <= 0 { cfg.Auth.SkewSeconds = 60 }
         if !cfg.Auth.RequireToken { cfg.Auth.RequireToken = true }
         if cfg.Auth.ProducerSSHCA != "" && !cfg.Auth.ProducerCertRequired { cfg.Auth.ProducerCertRequired = true }
+        if cfg.Auth.RegistrationResponseTTLSeconds <= 0 { cfg.Auth.RegistrationResponseTTLSeconds = 300 }
     }
 	return &cfg, nil
 }
