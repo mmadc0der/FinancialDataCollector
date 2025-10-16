@@ -55,55 +55,53 @@ func (k *Kernel) checkNonceReplay(ctx context.Context, fingerprint, nonce string
 }
 
 // Verify certificate signature and TTL
-func (k *Kernel) verifyCertificate(pubkey string) (bool, string) {
+func (k *Kernel) verifyCertificate(pubkey string) (bool, string, time.Time, time.Time) {
     if !k.cfg.Auth.ProducerCertRequired || k.cfg.Auth.ProducerSSHCA == "" {
-        return true, "" // no cert verification required
+        return true, "", time.Time{}, time.Time{} // no cert verification required
     }
     
     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
     if err != nil {
         logging.Info("registration_cert_parse_error", logging.Err(err))
-        return false, ""
+        return false, "", time.Time{}, time.Time{}
     }
     
     cert, ok := parsedPub.(*ssh.Certificate)
     if !ok {
         logging.Info("registration_not_certificate")
-        return false, ""
+        return false, "", time.Time{}, time.Time{}
     }
     
     // Check CA signature
     caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
     if err != nil || caPub == nil {
         logging.Info("registration_ca_parse_error", logging.Err(err))
-        return false, ""
+        return false, "", time.Time{}, time.Time{}
     }
     
     if !bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
         logging.Info("registration_ca_signature_invalid")
-        return false, ""
+        return false, "", time.Time{}, time.Time{}
     }
     
     // Check TTL
     now := time.Now()
+    va := time.Unix(int64(cert.ValidAfter), 0)
+    vb := time.Unix(int64(cert.ValidBefore), 0)
     if cert.ValidAfter != 0 && now.Before(time.Unix(int64(cert.ValidAfter), 0)) {
         logging.Info("registration_cert_not_yet_valid", 
-            logging.F("valid_after", time.Unix(int64(cert.ValidAfter), 0)))
-        return false, ""
+            logging.F("valid_after", va))
+        return false, "", time.Time{}, time.Time{}
     }
     
     if cert.ValidBefore != 0 && now.After(time.Unix(int64(cert.ValidBefore), 0)) {
         logging.Info("registration_cert_expired", 
-            logging.F("valid_before", time.Unix(int64(cert.ValidBefore), 0)))
-        return false, ""
+            logging.F("valid_before", vb))
+        return false, "", time.Time{}, time.Time{}
     }
-    
-    logging.Info("registration_cert_verified", 
-        logging.F("cert_key_id", cert.KeyId),
-        logging.F("valid_after", time.Unix(int64(cert.ValidAfter), 0)),
-        logging.F("valid_before", time.Unix(int64(cert.ValidBefore), 0)))
-    
-    return true, cert.KeyId
+
+    // Do not log here to avoid duplicate events; caller will emit a single combined log
+    return true, cert.KeyId, va, vb
 }
 
 // Verify signature over payload + nonce
@@ -291,7 +289,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     
     // Verify certificate if required
     if k.cfg.Auth.ProducerCertRequired {
-        certValid, keyID := k.verifyCertificate(pubkey)
+        certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
         if !certValid {
             logging.Info("registration_cert_invalid", logging.F("fingerprint", fp))
             k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed", "")
@@ -305,7 +303,9 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         }
         logging.Info("registration_cert_verified", 
             logging.F("fingerprint", fp), 
-            logging.F("cert_key_id", keyID))
+            logging.F("cert_key_id", keyID),
+            logging.F("valid_after", validAfter),
+            logging.F("valid_before", validBefore))
     }
     
     // Handle deregister action
@@ -317,7 +317,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     // Check current key status
     status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
     if err != nil {
-        logging.Info("registration_status_check_error", 
+        logging.Error("registration_status_check_error", 
             logging.F("fingerprint", fp), 
             logging.Err(err))
         k.rd.Ack(ctx, m.ID)
