@@ -6,6 +6,7 @@ import (
     "bytes"
     "encoding/base64"
     "encoding/json"
+    "database/sql"
     "errors"
     "fmt"
     "time"
@@ -317,11 +318,16 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     // Check current key status
     status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
     if err != nil {
-        logging.Error("registration_status_check_error", 
-            logging.F("fingerprint", fp), 
-            logging.Err(err))
-        k.rd.Ack(ctx, m.ID)
-        return
+        if errors.Is(err, sql.ErrNoRows) {
+            // Treat as unknown fingerprint (expected path for first-time registration)
+            status, producerID, err = "", nil, nil
+        } else {
+            logging.Error("registration_status_check_error", 
+                logging.F("fingerprint", fp), 
+                logging.Err(err))
+            k.rd.Ack(ctx, m.ID)
+            return
+        }
     }
     
     // State machine based on current status
