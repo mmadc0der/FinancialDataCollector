@@ -5,8 +5,6 @@ package it
 import (
     "context"
     "encoding/base64"
-    "encoding/json"
-    "net/http"
     "os"
     "strconv"
     "testing"

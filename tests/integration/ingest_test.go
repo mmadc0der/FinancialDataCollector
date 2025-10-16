@@ -4,8 +4,6 @@ package it
 
 import (
     "context"
-    "encoding/json"
-    "net/http"
     "os"
     "strconv"
     "testing"
