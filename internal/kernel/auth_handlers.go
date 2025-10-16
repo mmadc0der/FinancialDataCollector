@@ -116,7 +116,7 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
         }
         
         if err != nil {
-            logging.Info("admin_review_error", logging.Err(err))
+            logging.Error("admin_review_error", logging.F("producer_id", req.ProducerID), logging.F("action", "approve"), logging.Err(err))
             w.WriteHeader(http.StatusInternalServerError)
             return
         }
@@ -124,14 +124,21 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
         if hasApprovedKey {
             // Key rotation - need fingerprint
             if req.Fingerprint == "" {
+                logging.Warn("admin_review_missing_field", logging.F("producer_id", req.ProducerID), logging.F("action", "approve"), logging.F("field", "fingerprint"))
                 w.WriteHeader(http.StatusBadRequest)
                 return
             }
             _, err = k.pg.ApproveKeyRotation(r.Context(), req.Fingerprint, req.ProducerID, adminPrincipal, req.Notes)
+            if err != nil {
+                logging.Error("admin_approve_key_rotation_error", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.Err(err))
+                w.WriteHeader(http.StatusBadRequest)
+                return
+            }
             result = map[string]any{"producer_id": req.ProducerID, "status": "approved", "fingerprint": req.Fingerprint, "type": "key_rotation"}
         } else {
-            // New producer - need name
+            // New producer - need fingerprint
             if req.Fingerprint == "" {
+                logging.Warn("admin_review_missing_field", logging.F("producer_id", req.ProducerID), logging.F("action", "approve"), logging.F("field", "fingerprint"))
                 w.WriteHeader(http.StatusBadRequest)
                 return
             }
@@ -147,35 +154,37 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
                 }
             }
             if err != nil || producerName == "" {
-                logging.Info("admin_review_error", logging.Err(err))
+                logging.Error("admin_approve_producer_lookup_error", logging.F("producer_id", req.ProducerID), logging.Err(err))
                 w.WriteHeader(http.StatusInternalServerError)
                 return
             }
             _, err = k.pg.ApproveNewProducerKey(r.Context(), req.Fingerprint, producerName, adminPrincipal, req.Notes)
+            if err != nil {
+                logging.Error("admin_approve_new_producer_error", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("name", producerName), logging.Err(err))
+                w.WriteHeader(http.StatusBadRequest)
+                return
+            }
             result = map[string]any{"producer_id": req.ProducerID, "status": "approved", "fingerprint": req.Fingerprint, "type": "new_producer"}
         }
         
-        if err != nil {
-            logging.Info("admin_approve_error", logging.Err(err))
-            w.WriteHeader(http.StatusBadRequest)
-            return
-        }
         logging.Info("admin_approved", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint))
         
     } else if req.Action == "deny" {
         if req.Fingerprint == "" {
+            logging.Warn("admin_review_missing_field", logging.F("producer_id", req.ProducerID), logging.F("action", "deny"), logging.F("field", "fingerprint"))
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         err = k.pg.RejectProducerKey(r.Context(), req.Fingerprint, adminPrincipal, req.Reason)
         if err != nil {
-            logging.Info("admin_deny_error", logging.Err(err))
+            logging.Error("admin_deny_error", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("reason", req.Reason), logging.Err(err))
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         result = map[string]any{"producer_id": req.ProducerID, "status": "denied", "fingerprint": req.Fingerprint, "reason": req.Reason}
         logging.Info("admin_denied", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("reason", req.Reason))
     } else {
+        logging.Warn("admin_review_invalid_action", logging.F("action", req.Action), logging.F("admin_principal", adminPrincipal))
         w.WriteHeader(http.StatusBadRequest)
         return
     }
@@ -207,18 +216,20 @@ func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
     // If no producer_id provided, we need to create one - this is legacy behavior
     if reviewReq.ProducerID == "" {
         if req.Fingerprint == "" {
+            logging.Warn("admin_approve_legacy_missing_field", logging.F("field", "fingerprint"))
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         // For legacy, create producer with the provided name
         if req.Name == "" {
+            logging.Warn("admin_approve_legacy_missing_field", logging.F("field", "name"))
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         // This is a simplified legacy path - create producer and approve key
         pid, err := k.pg.ApproveNewProducerKey(r.Context(), req.Fingerprint, req.Name, r.Header.Get("X-SSH-Principal"), req.Notes)
         if err != nil {
-            logging.Info("admin_approve_legacy_error", logging.Err(err))
+            logging.Error("admin_approve_legacy_error", logging.F("fingerprint", req.Fingerprint), logging.F("name", req.Name), logging.Err(err))
             w.WriteHeader(http.StatusBadRequest)
             return
         }
