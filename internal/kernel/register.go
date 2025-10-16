@@ -309,6 +309,11 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
             logging.F("valid_before", validBefore))
     }
     
+    // Ensure a producer_keys row exists (pending by default) prior to status check
+    if err := k.pg.UpsertProducerKey(ctx, fp, pubkey); err != nil {
+        logging.Info("registration_key_upsert_error", logging.F("fingerprint", fp), logging.Err(err))
+    }
+
     // Handle deregister action
     if action == "deregister" {
         k.handleDeregister(ctx, fp, m.ID, nonce)
@@ -330,6 +335,18 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         }
     }
     
+    // If key is pending and not yet bound to a producer, ensure a producer row and bind
+    if status == "pending" && (producerID == nil || *producerID == "") {
+        if pid, e := k.pg.EnsureProducerForFingerprint(ctx, fp, payload.ProducerHint); e == nil && pid != "" {
+            producerID = &pid
+            logging.Info("registration_pending_bound_producer", logging.F("fingerprint", fp), logging.F("producer_id", pid))
+        } else if e != nil {
+            logging.Info("registration_pending_bind_error", logging.F("fingerprint", fp), logging.Err(e))
+        }
+        // Record pending registration for audit
+        _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "pending", "", "")
+    }
+
     // State machine based on current status
     switch status {
     case "approved":
