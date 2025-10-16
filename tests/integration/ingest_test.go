@@ -7,24 +7,24 @@ import (
     "encoding/json"
     "net/http"
     "os"
-    "path/filepath"
+    "strconv"
     "testing"
     "time"
 
     "github.com/jackc/pgx/v5/pgxpool"
     "github.com/redis/go-redis/v9"
 
+    itutil "github.com/example/data-kernel/tests/itutil"
     "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/kernel"
     "github.com/example/data-kernel/internal/kernelcfg"
 )
 
 func TestIngestE2E_RedisToPostgres(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
     // spin up deps
-    pgc, dsn := startPostgres(t)
+    pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())
-    rc, addr := startRedis(t)
+    rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
     // Prepare DB: apply migrations and create default entities
@@ -49,32 +49,19 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
         t.Fatalf("set current schema: %v", err)
     }
 
-    // write a temp config file
-    dir := t.TempDir()
-    cfgPath := filepath.Join(dir, "kernel.yaml")
+    // dynamic port
+    port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
-        Server: kernelcfg.ServerConfig{Listen: ":7600"},
+        Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 100, DefaultProducerID: producerID},
         Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerEnabled: true, PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
     }
-    b, _ := json.Marshal(cfg)
-    if err := os.WriteFile(cfgPath, b, 0o644); err != nil { t.Fatalf("write cfg: %v", err) }
-
-    // start kernel
-    k, err := kernel.NewKernel(cfgPath)
-    if err != nil { t.Fatalf("kernel new: %v", err) }
-    ctx, cancel := context.WithCancel(context.Background())
+    cancel := itutil.StartKernel(t, cfg)
     defer cancel()
-    go func() { _ = k.Start(ctx) }()
 
     // wait for readyz
-    waitFor[bool](t, 10*time.Second, func() (bool, bool) {
-        resp, err := http.Get("http://127.0.0.1:7600/readyz")
-        if err != nil { return false, false }
-        defer resp.Body.Close()
-        return resp.StatusCode == 200, resp.StatusCode == 200
-    })
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
 
     // publish a message into Redis
     rcli := redis.NewClient(&redis.Options{Addr: addr})

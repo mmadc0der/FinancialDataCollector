@@ -1,4 +1,4 @@
-.PHONY: all build run test unit it coverage cover-html lint fmt clean producer
+.PHONY: all build run test unit it it-producer coverage cover-html lint fmt clean producer
 
 APP:=kernel
 BIN:=bin/$(APP)
@@ -9,7 +9,7 @@ PKG?=
 
 # Package lists (Linux/macOS shells). On Windows without a Unix shell, run the commands directly.
 PKGS_ALL:=$(shell go list ./...)
-PKGS_UNIT:=$(shell echo "$(PKGS_ALL)" | tr ' ' '\n' | grep -v "/tests/integration$$" | grep -v "/modules.d/producer-example$$")
+PKGS_UNIT:=$(shell echo "$(PKGS_ALL)" | tr ' ' '\n' | grep -v "/tests/integration$$" | grep -v "/tests/producer$$" | grep -v "/modules.d/producer-example$$")
 
 all: build
 
@@ -38,6 +38,10 @@ endif
 it:
 	RUN_IT=1 go test -tags=integration -race -v -cover -covermode=atomic -coverpkg=./... ./tests/integration
 
+# Run producer-side integration tests (requires Docker). Set RUN_IT=1 RUN_PRODUCER=1.
+it-producer:
+	RUN_IT=1 RUN_PRODUCER=1 go test -tags="integration producer" -race -v -cover -covermode=atomic -coverpkg=./... ./tests/producer
+
 # Aggregate coverage using Go's coverage data directories (Go 1.20+).
 # - Produces coverage.out (text) and coverage.html (HTML report).
 coverage:
@@ -48,6 +52,7 @@ else
 	GOCOVERDIR=coverage go test -race -cover -covermode=atomic $(PKG)
 endif
 	RUN_IT=1 GOCOVERDIR=coverage go test -tags=integration -race -cover -covermode=atomic -coverpkg=./... ./tests/integration || true
+	RUN_IT=1 RUN_PRODUCER=1 GOCOVERDIR=coverage go test -tags="integration producer" -race -cover -covermode=atomic -coverpkg=./... ./tests/producer || true
 	go tool covdata textfmt -i=coverage -o coverage.out
 	@echo "Wrote coverage.out"
 	go tool cover -html=coverage.out -o coverage.html

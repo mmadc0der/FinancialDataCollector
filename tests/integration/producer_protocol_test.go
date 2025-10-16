@@ -7,9 +7,10 @@ import (
     "encoding/base64"
     "encoding/json"
     "net/http"
+    "os"
+    "strconv"
     "testing"
     "time"
-    "os"
 
     "crypto/ed25519"
     "crypto/rand"
@@ -17,7 +18,7 @@ import (
 
     "github.com/redis/go-redis/v9"
 
-    "github.com/example/data-kernel/internal/kernel"
+    itutil "github.com/example/data-kernel/tests/itutil"
     "github.com/example/data-kernel/internal/kernelcfg"
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/auth"
@@ -27,9 +28,9 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     if testing.Short() || getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
 
     // deps
-    pgc, dsn := startPostgres(t)
+    pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())
-    rc, addr := startRedis(t)
+    rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
     // Prepare DB & approve key fingerprint and create schema
@@ -56,28 +57,19 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
 
     // start kernel with auth (private key to issue tokens)
     privB64 := base64.RawStdEncoding.EncodeToString(append([]byte{}, priv...))
+    port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
-        Server: kernelcfg.ServerConfig{Listen: ":7611"},
+        Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 50, BatchMaxWaitMs: 50},
         Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", ConsumerEnabled: true, Stream: "events"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: privB64, PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}},
     }
-    // write config to temp file
-    bcfg, _ := json.Marshal(cfg)
-    cfgPath := filepath.Join(t.TempDir(), "kernel.json")
-    if err := os.WriteFile(cfgPath, bcfg, 0o644); err != nil { t.Fatalf("write cfg: %v", err) }
-    k, err := kernel.NewKernel(cfgPath); if err != nil { t.Fatalf("kernel new: %v", err) }
-    ctx, cancel := context.WithCancel(context.Background()); defer cancel()
-    go func() { _ = k.Start(ctx) }()
+    cancel := itutil.StartKernel(t, cfg)
+    defer cancel()
 
     // wait ready
-    waitFor[bool](t, 10*time.Second, func() (bool, bool) {
-        resp, err := http.Get("http://127.0.0.1:7611/readyz")
-        if err != nil { return false, false }
-        defer resp.Body.Close()
-        return resp.StatusCode == 200, resp.StatusCode == 200
-    })
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
 
     rcli := redis.NewClient(&redis.Options{Addr: addr})
     // 1) Registration: send and wait on per-nonce response
