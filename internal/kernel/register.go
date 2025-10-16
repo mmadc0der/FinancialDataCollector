@@ -26,36 +26,9 @@ type regPayload struct {
 }
 
 // Rate limiting check - returns true if request should be allowed
+// For now, rate limiting is disabled - can be implemented at load balancer or application level
 func (k *Kernel) checkRateLimit(ctx context.Context) bool {
-    if k.rd == nil || k.rd.C() == nil {
-        return true // no rate limiting if Redis unavailable
-    }
-    
-    rateLimitKey := prefixed(k.cfg.Redis.KeyPrefix, "ratelimit:register")
-    current, err := k.rd.C().Incr(ctx, rateLimitKey).Result()
-    if err != nil {
-        logging.Warn("registration_rate_limit_error", logging.Err(err))
-        return true // allow on error
-    }
-    
-    // Set expiry on first increment
-    if current == 1 {
-        k.rd.C().Expire(ctx, rateLimitKey, 60*time.Second)
-    }
-    
-    limit := k.cfg.Redis.RegistrationRateLimitRPM
-    if limit <= 0 {
-        limit = 10 // default
-    }
-    
-    if current > int64(limit) {
-        logging.Info("registration_rate_limit_exceeded", 
-            logging.F("current", current), 
-            logging.F("limit", limit))
-        return false
-    }
-    
-    return true
+    return true // no rate limiting for now
 }
 
 // Check nonce replay prevention

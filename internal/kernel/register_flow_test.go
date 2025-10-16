@@ -5,7 +5,8 @@ package kernel
 import (
     "context"
     "encoding/base64"
-    "strconv"
+    "encoding/json"
+    "net/http"
     "os"
     "testing"
     "time"
@@ -46,21 +47,21 @@ func TestRegisterAndDeregister_Flow(t *testing.T) {
     sigB64 := base64.RawStdEncoding.EncodeToString(sig)
 
     rcli := redis.NewClient(&redis.Options{Addr: addr})
-    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "register", Values: map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}}).Err(); err != nil {
+    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:register", Values: map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}}).Err(); err != nil {
         t.Fatalf("xadd reg: %v", err)
     }
     // wait resp on per-nonce stream
-    itutil.WaitStreamLen(t, rcli, cfg.Redis.KeyPrefix + "register:resp:"+nonce, 1, 10*time.Second)
+    itutil.WaitStreamLen(t, rcli, "fdc:register:resp:"+nonce, 1, 10*time.Second)
 
     // deregister
     nonce2 := "8899aabbccddeeff"
     sum2 := sha3.Sum512([]byte("{}." + nonce2))
     sig2 := ed25519.Sign(priv, sum2[:])
     sig2B64 := base64.RawStdEncoding.EncodeToString(sig2)
-    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "register", Values: map[string]any{"action":"deregister", "pubkey": pubLine, "payload": "{}", "nonce": nonce2, "sig": sig2B64}}).Err(); err != nil {
+    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:register", Values: map[string]any{"action":"deregister", "pubkey": pubLine, "payload": "{}", "nonce": nonce2, "sig": sig2B64}}).Err(); err != nil {
         t.Fatalf("xadd dereg: %v", err)
     }
-    itutil.WaitStreamLen(t, rcli, cfg.Redis.KeyPrefix + "register:resp:"+nonce2, 1, 10*time.Second)
+    itutil.WaitStreamLen(t, rcli, "fdc:register:resp:"+nonce2, 1, 10*time.Second)
 }
 
 func minimalConfig(dsn, addr string) kernelcfg.Config {

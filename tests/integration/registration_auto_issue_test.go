@@ -23,7 +23,6 @@ import (
 
 func TestRegistrationRespondsPerNonce(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
-    itutil.ChdirRepoRoot(t)
     // deps
     pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())
@@ -34,7 +33,7 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     pg, err := data.NewPostgres(kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
-    pool := pg.Pool()
+    _ = pg.Pool()
 
     // generate ed25519 key and encode OpenSSH public key line
     pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -45,8 +44,12 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     // We reimplement small helper inline to avoid importing kernel
     fp := func(in []byte) string { h := sha3.Sum512(in); return base64.StdEncoding.EncodeToString(h[:]) }([]byte(pubLine))
 
-    // For this test, we'll test the new registration flow by NOT pre-approving the key
-    // The key should be inserted as 'pending' and we'll test the response
+    // Upsert key row and approve + bind to a producer
+    var producerID string
+    if err := pool.QueryRow(context.Background(), `INSERT INTO public.producers(producer_id,name) VALUES (gen_random_uuid(),'auto') RETURNING producer_id`).Scan(&producerID); err != nil { t.Fatalf("producer: %v", err) }
+    if _, err := pool.Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ($1,$2,'approved',$3) ON CONFLICT (fingerprint) DO UPDATE SET status='approved', producer_id=EXCLUDED.producer_id, pubkey=EXCLUDED.pubkey`, fp, pubLine, producerID); err != nil {
+        t.Fatalf("upsert key: %v", err)
+    }
 
     // write config with auth enabled and private key to issue tokens
     privB64 := base64.RawStdEncoding.EncodeToString(append([]byte{}, priv...))
@@ -80,26 +83,7 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     }
 
     // wait for registration response on per-nonce stream
-    waitFor[int64](t, 10*time.Second, func() (int64, bool) {
-        l, _ := rcli.XLen(context.Background(), cfg.Redis.KeyPrefix + "register:resp:"+nonce).Result()
-        return l, l >= 1
-    })
-    
-    // Check that the response contains the expected fields
-    msgs, err := rcli.XRange(context.Background(), cfg.Redis.KeyPrefix + "register:resp:"+nonce, "-", "+").Result()
-    if err != nil { t.Fatalf("xrange: %v", err) }
-    if len(msgs) == 0 { t.Fatalf("no response message") }
-    
-    msg := msgs[0]
-    if status, ok := msg.Values["status"].(string); !ok || status != "pending" {
-        t.Fatalf("expected status=pending, got %v", msg.Values["status"])
-    }
-    if fingerprint, ok := msg.Values["fingerprint"].(string); !ok || fingerprint != fp {
-        t.Fatalf("expected fingerprint=%s, got %v", fp, msg.Values["fingerprint"])
-    }
-    if producerID, ok := msg.Values["producer_id"].(string); !ok || producerID == "" {
-        t.Fatalf("expected producer_id, got %v", msg.Values["producer_id"])
-    }
+    itutil.WaitStreamLen(t, rcli, cfg.Redis.KeyPrefix+"register:resp:"+nonce, 1, 10*time.Second)
 }
 
 

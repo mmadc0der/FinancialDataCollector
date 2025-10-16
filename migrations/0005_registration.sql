@@ -15,7 +15,13 @@ CREATE TABLE IF NOT EXISTS public.producer_keys (
     notes TEXT
 );
 
--- Add constraints for status values
+-- Add constraints for status values (drop existing first)
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_status' AND conrelid = 'public.producer_keys'::regclass) THEN
+        ALTER TABLE public.producer_keys DROP CONSTRAINT check_status;
+    END IF;
+END $$;
+
 ALTER TABLE public.producer_keys 
 ADD CONSTRAINT check_status CHECK (status IN ('pending', 'approved', 'revoked', 'superseded'));
 

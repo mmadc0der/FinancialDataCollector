@@ -35,7 +35,6 @@ redis:
   read_count: 100
   block_ms: 5000
   dlq_stream: "events:dlq"
-  registration_rate_limit_rpm: 10  # rate limit for registration requests per minute
 
 logging:
   level: "info"

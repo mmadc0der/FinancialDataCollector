@@ -17,8 +17,6 @@ import (
 
 func TestDLQOnUnauthenticatedPublish(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
-    // ensure CWD at repo root so migrations resolve
-    itutil.ChdirRepoRoot(t)
     // deps
     pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())

@@ -25,7 +25,6 @@ import (
 
 func TestProducerProtocol_EndToEnd(t *testing.T) {
     if testing.Short() || getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
-    itutil.ChdirRepoRoot(t)
 
     // deps
     pgc, dsn := itutil.StartPostgres(t)
@@ -34,7 +33,6 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     defer rc.Terminate(context.Background())
 
     // Prepare DB & approve key fingerprint and create schema
-    itutil.WaitPostgresReady(t, dsn, 10*time.Second)
     pg, err := data.NewPostgres(kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
