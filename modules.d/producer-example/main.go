@@ -144,7 +144,7 @@ func main() {
         log.Fatalf("read_cert_file: %v", e)
         return ""
     }()
-    fp := computeFingerprint(pubForRegistration)
+    // fingerprint is not used client-side; server computes and matches as needed
 
     // send registration (repeat until producer_id acquired)
     payload := map[string]any{"producer_hint": cfg.Producer.Name, "contact": cfg.Producer.Contact, "meta": map[string]string{"demo":"true"}}
@@ -153,7 +153,6 @@ func main() {
     var producerID string
     reRegTicker := time.NewTicker(30 * time.Second)
     defer reRegTicker.Stop()
-RegWait:
     for producerID == "" {
         nonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
         sigB64, e := signPayloadNonce(signer, payloadStr, nonce); if e != nil { log.Fatalf("sign_error: %v", e) }
