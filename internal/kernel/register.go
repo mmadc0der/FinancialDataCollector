@@ -400,12 +400,7 @@ func (k *Kernel) handleKnownPending(ctx context.Context, producerID, fp string, 
         logging.F("producer_id", producerID), 
         logging.F("fingerprint", fp))
     
-    // Send response with producer_id for pending new registrations
-    k.sendRegistrationResponse(ctx, nonce, map[string]any{
-        "fingerprint": fp,
-        "producer_id": producerID,
-        "status": "pending",
-    })
+    // Silent - no response for pending keys per protocol
     k.rd.Ack(ctx, msgID)
 }
 
