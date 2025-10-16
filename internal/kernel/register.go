@@ -308,177 +308,99 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
             logging.F("valid_after", validAfter),
             logging.F("valid_before", validBefore))
     }
-    
-    // Ensure a producer_keys row exists (pending by default) prior to status check
-    if err := k.pg.UpsertProducerKey(ctx, fp, pubkey); err != nil {
-        logging.Info("registration_key_upsert_error", logging.F("fingerprint", fp), logging.Err(err))
+
+    // Atomically create producer and bind fingerprint for first-time registration
+    var producerID string
+    producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta)
+    if err != nil {
+        logging.Error("registration_producer_key_register_error", 
+            logging.F("fingerprint", fp), 
+            logging.Err(err))
+        k.rd.Ack(ctx, m.ID)
+        return
     }
+    logging.Info("registration_producer_registered", logging.F("producer_id", producerID), logging.F("fingerprint", fp), logging.F("hint", payload.ProducerHint))
 
     // Handle deregister action
     if action == "deregister" {
-        k.handleDeregister(ctx, fp, m.ID, nonce)
+        k.handleDeregister(ctx, producerID, fp, m.ID, nonce)
         return
     }
-    
-    // Check current key status
-    status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
+
+    // Check current key status (should exist now after RegisterProducerKey)
+    status, statusProducerID, err := k.pg.GetKeyStatus(ctx, fp)
     if err != nil {
-        if errors.Is(err, sql.ErrNoRows) {
-            // Treat as unknown fingerprint (expected path for first-time registration)
-            status, producerID, err = "", nil, nil
-        } else {
-            logging.Error("registration_status_check_error", 
-                logging.F("fingerprint", fp), 
-                logging.Err(err))
-            k.rd.Ack(ctx, m.ID)
-            return
-        }
+        logging.Error("registration_status_check_error", 
+            logging.F("producer_id", producerID),
+            logging.F("fingerprint", fp), 
+            logging.Err(err))
+        k.rd.Ack(ctx, m.ID)
+        return
     }
-    
-    // If key is pending and not yet bound to a producer, ensure a producer row and bind
-    if status == "pending" && (producerID == nil || *producerID == "") {
-        if pid, e := k.pg.EnsureProducerForFingerprint(ctx, fp, payload.ProducerHint); e == nil && pid != "" {
-            producerID = &pid
-            logging.Info("registration_pending_bound_producer", logging.F("fingerprint", fp), logging.F("producer_id", pid))
-        } else if e != nil {
-            logging.Info("registration_pending_bind_error", logging.F("fingerprint", fp), logging.Err(e))
-        }
-        // Record pending registration for audit
-        _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "pending", "", "")
-    }
+
+    // Create pending registration record for audit
+    _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, status, "", "")
 
     // State machine based on current status
     switch status {
     case "approved":
-        k.handleKnownApproved(ctx, fp, producerID, m.ID, nonce)
+        k.handleKnownApproved(ctx, producerID, fp, m.ID, nonce)
     case "pending":
-        k.handleKnownPending(ctx, fp, producerID, m.ID, nonce)
+        k.handleKnownPending(ctx, producerID, fp, m.ID, nonce)
     case "revoked", "superseded":
-        k.handleKnownDenied(ctx, fp, producerID, status, m.ID, nonce)
+        k.handleKnownDenied(ctx, &producerID, fp, status, m.ID, nonce)
     default:
-        // Unknown fingerprint - determine if new producer or key rotation
-        if payload.ProducerID != "" {
-            k.handleKeyRotation(ctx, fp, payload.ProducerID, payloadStr, sigB64, nonce, m.ID)
-        } else {
-            k.handleNewProducer(ctx, fp, payload, payloadStr, sigB64, nonce, m.ID)
-        }
+        // This shouldn't happen after RegisterProducerKey, but handle gracefully
+        logging.Info("registration_unknown_status", logging.F("producer_id", producerID), logging.F("fingerprint", fp), logging.F("status", status))
+        k.handleNewProducer(ctx, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID)
     }
 }
 
 // Handle deregister action
-func (k *Kernel) handleDeregister(ctx context.Context, fp string, msgID, nonce string) {
-    logging.Info("registration_deregister_received", logging.F("fingerprint", fp))
+func (k *Kernel) handleDeregister(ctx context.Context, producerID, fp string, msgID, nonce string) {
+    logging.Info("registration_deregister_received", logging.F("producer_id", producerID), logging.F("fingerprint", fp))
     
-    status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
-    if err != nil || status != "approved" || producerID == nil {
-        logging.Info("registration_deregister_invalid", 
-            logging.F("fingerprint", fp), 
-            logging.F("status", status))
-        k.rd.Ack(ctx, msgID)
-        return
-    }
-    
-    err = k.pg.DisableProducer(ctx, *producerID)
+    err := k.pg.DisableProducer(ctx, producerID)
     if err != nil {
-        logging.Info("registration_deregister_error", 
+        logging.Error("registration_deregister_error", 
+            logging.F("producer_id", producerID),
             logging.F("fingerprint", fp), 
             logging.Err(err))
     } else {
         logging.Info("registration_deregister_success", 
-            logging.F("fingerprint", fp), 
-            logging.F("producer_id", *producerID))
+            logging.F("producer_id", producerID),
+            logging.F("fingerprint", fp))
     }
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
-        "producer_id": *producerID,
+        "producer_id": producerID,
         "status": "deregistered",
     })
     k.rd.Ack(ctx, msgID)
 }
 
 // Handle known approved key
-func (k *Kernel) handleKnownApproved(ctx context.Context, fp string, producerID *string, msgID, nonce string) {
+func (k *Kernel) handleKnownApproved(ctx context.Context, producerID, fp string, msgID, nonce string) {
     logging.Info("registration_known_approved", 
-        logging.F("fingerprint", fp), 
-        logging.F("producer_id", producerID))
+        logging.F("producer_id", producerID), 
+        logging.F("fingerprint", fp))
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
-        "producer_id": func() string { if producerID != nil { return *producerID }; return "" }(),
+        "producer_id": producerID,
         "status": "approved",
     })
     k.rd.Ack(ctx, msgID)
 }
 
 // Handle known pending key
-func (k *Kernel) handleKnownPending(ctx context.Context, fp string, producerID *string, msgID, nonce string) {
+func (k *Kernel) handleKnownPending(ctx context.Context, producerID, fp string, msgID, nonce string) {
     logging.Info("registration_known_pending", 
-        logging.F("fingerprint", fp), 
-        logging.F("producer_id", producerID))
+        logging.F("producer_id", producerID), 
+        logging.F("fingerprint", fp))
     
-    // Silent - no response for pending keys
-    k.rd.Ack(ctx, msgID)
-}
-
-// Handle known denied key
-func (k *Kernel) handleKnownDenied(ctx context.Context, fp string, producerID *string, status, msgID, nonce string) {
-    logging.Info("registration_known_denied", 
-        logging.F("fingerprint", fp), 
-        logging.F("producer_id", producerID),
-        logging.F("status", status))
-    
-    k.sendRegistrationResponse(ctx, nonce, map[string]any{
-        "fingerprint": fp,
-        "producer_id": func() string { if producerID != nil { return *producerID }; return "" }(),
-        "status": "denied",
-        "reason": status,
-    })
-    k.rd.Ack(ctx, msgID)
-}
-
-// Handle new producer registration
-func (k *Kernel) handleNewProducer(ctx context.Context, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
-    logging.Info("registration_new_producer", logging.F("fingerprint", fp))
-    
-    // Create producer (never nullable producer_id)
-    producerName := payload.ProducerHint
-    if producerName == "" {
-        // Generate deterministic name from fingerprint
-        if len(fp) > 12 {
-            producerName = "auto_" + fp[:12]
-        } else {
-            producerName = "auto_" + fp
-        }
-    }
-    
-    // Create producer and bind key
-    producerID, err := k.pg.EnsureProducerForFingerprint(ctx, fp, producerName)
-    if err != nil {
-        logging.Info("registration_producer_create_error", 
-            logging.F("fingerprint", fp), 
-            logging.Err(err))
-        k.rd.Ack(ctx, msgID)
-        return
-    }
-    
-    logging.Info("registration_producer_created", 
-        logging.F("fingerprint", fp), 
-        logging.F("producer_id", producerID),
-        logging.F("name", producerName))
-    
-    // Create registration record
-    err = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "pending", "", "")
-    if err != nil {
-        logging.Info("registration_record_create_error", 
-            logging.F("fingerprint", fp), 
-            logging.Err(err))
-    }
-    
-    logging.Info("registration_pending", 
-        logging.F("fingerprint", fp), 
-        logging.F("producer_id", producerID))
-    
+    // Send response with producer_id for pending new registrations
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
         "producer_id": producerID,
@@ -487,119 +409,27 @@ func (k *Kernel) handleNewProducer(ctx context.Context, fp string, payload regPa
     k.rd.Ack(ctx, msgID)
 }
 
-// Handle key rotation for existing producer
-func (k *Kernel) handleKeyRotation(ctx context.Context, fp, producerID, payloadStr, sigB64, nonce, msgID string) {
-    logging.Info("registration_key_rotation", 
-        logging.F("fingerprint", fp), 
-        logging.F("producer_id", producerID))
+// Handle known denied key
+func (k *Kernel) handleKnownDenied(ctx context.Context, producerID *string, fp, status, msgID, nonce string) {
+    var pid string
+    if producerID != nil { pid = *producerID }
+    logging.Info("registration_known_denied", 
+        logging.F("producer_id", pid), 
+        logging.F("fingerprint", fp),
+        logging.F("status", status))
     
-    // Check producer exists
-    var exists bool
-    if k.pg.Pool() != nil {
-        conn, err := k.pg.Pool().Acquire(ctx)
-        if err == nil {
-            defer conn.Release()
-            err = conn.QueryRow(ctx, 
-                `SELECT EXISTS(SELECT 1 FROM public.producers WHERE producer_id=$1)`, 
-                producerID).Scan(&exists)
-        }
-        if err != nil {
-            logging.Info("registration_producer_check_error", 
-                logging.F("fingerprint", fp), 
-                logging.F("producer_id", producerID), 
-                logging.Err(err))
-            k.rd.Ack(ctx, msgID)
-            return
-        }
-    }
-    
-    if !exists {
-        logging.Info("registration_producer_not_found", 
-            logging.F("fingerprint", fp), 
-            logging.F("producer_id", producerID))
-        k.sendRegistrationResponse(ctx, nonce, map[string]any{
-            "fingerprint": fp,
-            "producer_id": producerID,
-            "status": "denied",
-            "reason": "producer_not_found",
-        })
-        k.rd.Ack(ctx, msgID)
-        return
-    }
-    
-    // Check producer has approved key
-    var hasApprovedKey bool
-    if k.pg.Pool() != nil {
-        conn, err := k.pg.Pool().Acquire(ctx)
-        if err == nil {
-            defer conn.Release()
-            err = conn.QueryRow(ctx, 
-                `SELECT EXISTS(SELECT 1 FROM public.producer_keys WHERE producer_id=$1 AND status='approved')`, 
-                producerID).Scan(&hasApprovedKey)
-        }
-        if err != nil {
-            logging.Info("registration_approved_key_check_error", 
-                logging.F("fingerprint", fp), 
-                logging.F("producer_id", producerID), 
-                logging.Err(err))
-            k.rd.Ack(ctx, msgID)
-            return
-        }
-    }
-    
-    if !hasApprovedKey {
-        logging.Info("registration_producer_not_approved", 
-            logging.F("fingerprint", fp), 
-            logging.F("producer_id", producerID))
-        k.sendRegistrationResponse(ctx, nonce, map[string]any{
-            "fingerprint": fp,
-            "producer_id": producerID,
-            "status": "denied",
-            "reason": "producer_not_approved",
-        })
-        k.rd.Ack(ctx, msgID)
-        return
-    }
-    
-    // Bind new key to producer
-    err := k.pg.UpsertProducerKey(ctx, fp, "")
-    if err != nil {
-        logging.Info("registration_key_bind_error", 
-            logging.F("fingerprint", fp), 
-            logging.F("producer_id", producerID), 
-            logging.Err(err))
-        k.rd.Ack(ctx, msgID)
-        return
-    }
-    
-    // Update producer_id on the key
-    if k.pg.Pool() != nil {
-        conn, err := k.pg.Pool().Acquire(ctx)
-        if err == nil {
-            defer conn.Release()
-            _, err = conn.Exec(ctx, 
-                `UPDATE public.producer_keys SET producer_id=$1 WHERE fingerprint=$2`, 
-                producerID, fp)
-        }
-        if err != nil {
-            logging.Info("registration_key_producer_update_error", 
-                logging.F("fingerprint", fp), 
-                logging.F("producer_id", producerID), 
-                logging.Err(err))
-        }
-    }
-    
-    // Create registration record
-    err = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "pending", "", "")
-    if err != nil {
-        logging.Info("registration_record_create_error", 
-            logging.F("fingerprint", fp), 
-            logging.Err(err))
-    }
-    
-    logging.Info("registration_key_rotation_pending", 
-        logging.F("fingerprint", fp), 
-        logging.F("producer_id", producerID))
+    k.sendRegistrationResponse(ctx, nonce, map[string]any{
+        "fingerprint": fp,
+        "producer_id": pid,
+        "status": "denied",
+        "reason": status,
+    })
+    k.rd.Ack(ctx, msgID)
+}
+
+// Handle new producer registration (fallback - should not occur post-RegisterProducerKey)
+func (k *Kernel) handleNewProducer(ctx context.Context, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
+    logging.Info("registration_new_producer", logging.F("producer_id", producerID), logging.F("fingerprint", fp))
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,

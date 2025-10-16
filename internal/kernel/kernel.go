@@ -332,7 +332,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
                 status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
                 if err != nil {
-                    logging.Info("token_exchange_status_check_error", logging.F("fingerprint", fp), logging.Err(err))
+                    logging.Error("token_exchange_status_check_error", logging.F("fingerprint", fp), logging.Err(err))
                     _ = k.rd.Ack(ctx, m.ID)
                     continue
                 }

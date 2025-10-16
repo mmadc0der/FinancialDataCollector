@@ -252,6 +252,66 @@ BEGIN
 END;
 $$;
 
+-- Function: Register new producer + key atomically (for first-time registration)
+-- Creates a new producer, inserts the key row with producer_id binding, and returns producer_id
+CREATE OR REPLACE FUNCTION public.register_producer_key(
+    _fingerprint TEXT,
+    _pubkey TEXT,
+    _producer_hint TEXT DEFAULT NULL,
+    _contact TEXT DEFAULT NULL,
+    _meta JSONB DEFAULT NULL
+) RETURNS UUID LANGUAGE plpgsql AS $$
+DECLARE 
+    v_producer_id UUID;
+    v_producer_name TEXT;
+    v_description TEXT;
+BEGIN
+    -- Validate inputs
+    IF _fingerprint IS NULL OR length(_fingerprint) = 0 THEN
+        RAISE EXCEPTION 'fingerprint required';
+    END IF;
+    IF _pubkey IS NULL OR length(_pubkey) = 0 THEN
+        RAISE EXCEPTION 'pubkey required';
+    END IF;
+    
+    -- Determine producer name (human-readable or auto-generated)
+    v_producer_name := COALESCE(_producer_hint, '');
+    IF length(v_producer_name) = 0 THEN
+        -- Generate deterministic name from fingerprint
+        v_producer_name := 'auto_' || substring(_fingerprint, 1, 12);
+    END IF;
+    
+    -- Build description from contact and meta
+    v_description := '';
+    IF _contact IS NOT NULL AND length(_contact) > 0 THEN
+        v_description := 'Contact: ' || _contact;
+    END IF;
+    IF _meta IS NOT NULL THEN
+        IF length(v_description) > 0 THEN
+            v_description := v_description || ' | Meta: ' || _meta::text;
+        ELSE
+            v_description := 'Meta: ' || _meta::text;
+        END IF;
+    END IF;
+    
+    -- Create or get producer
+    INSERT INTO public.producers(producer_id, name, description)
+    VALUES (gen_random_uuid(), v_producer_name, NULLIF(v_description, ''))
+    ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name, description = NULLIF(v_description, '')
+    RETURNING producer_id INTO v_producer_id;
+    
+    -- Insert or update producer_key row with producer binding (starts as pending)
+    INSERT INTO public.producer_keys(fingerprint, producer_id, pubkey, status)
+    VALUES (_fingerprint, v_producer_id, _pubkey, 'pending')
+    ON CONFLICT (fingerprint) DO UPDATE 
+    SET producer_id = v_producer_id, 
+        pubkey = EXCLUDED.pubkey
+    WHERE public.producer_keys.status NOT IN ('approved', 'revoked');
+    
+    RETURN v_producer_id;
+END;
+$$;
+
 -- Update producer_overview view to include superseded info
 CREATE OR REPLACE VIEW public.producer_overview AS
 SELECT pk.fingerprint,

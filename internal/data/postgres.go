@@ -396,4 +396,17 @@ func (p *Postgres) EnsureProducerForFingerprint(ctx context.Context, fingerprint
     return pid, nil
 }
 
+// RegisterProducerKey atomically creates a producer and binds a fingerprint in a single Postgres transaction.
+// Returns the new producer_id.
+func (p *Postgres) RegisterProducerKey(ctx context.Context, fingerprint, pubkey, producerHint, contact string, meta map[string]string) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    var producerID string
+    metaJSON, _ := json.Marshal(meta)
+    err := p.pool.QueryRow(cctx, `SELECT public.register_producer_key($1, $2, $3, $4, $5)`, fingerprint, pubkey, producerHint, contact, metaJSON).Scan(&producerID)
+    if err != nil { return "", err }
+    return producerID, nil
+}
+
 
