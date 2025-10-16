@@ -1,5 +1,33 @@
 -- Registration Security Redesign v2 - Fixed Migration
--- Handle existing constraints properly
+-- Create tables and handle existing constraints properly
+
+-- Create producer_keys table if it doesn't exist
+CREATE TABLE IF NOT EXISTS public.producer_keys (
+    fingerprint TEXT PRIMARY KEY,
+    producer_id UUID REFERENCES public.producers(producer_id),
+    pubkey TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|revoked|superseded
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    approved_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    superseded_at TIMESTAMPTZ,
+    superseded_by TEXT REFERENCES public.producer_keys(fingerprint),
+    notes TEXT
+);
+
+-- Create producer_registrations table if it doesn't exist
+CREATE TABLE IF NOT EXISTS public.producer_registrations (
+    reg_id UUID PRIMARY KEY,
+    fingerprint TEXT NOT NULL REFERENCES public.producer_keys(fingerprint),
+    payload JSONB NOT NULL,
+    sig TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+    status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
+    reason TEXT,
+    reviewed_at TIMESTAMPTZ,
+    reviewer TEXT
+);
 
 -- Drop existing constraints if they exist
 DO $$ BEGIN
@@ -34,6 +62,13 @@ ADD CONSTRAINT check_status CHECK (status IN ('pending', 'approved', 'revoked', 
 
 ALTER TABLE public.producer_registrations 
 ADD CONSTRAINT check_reg_status CHECK (status IN ('pending', 'approved', 'rejected'));
+
+-- Enforce DB-backed nonce uniqueness per fingerprint
+DO $$ BEGIN IF NOT EXISTS (
+    SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='idx_producer_registrations_fp_nonce'
+) THEN
+    EXECUTE 'CREATE UNIQUE INDEX idx_producer_registrations_fp_nonce ON public.producer_registrations(fingerprint, nonce)';
+END IF; END $$;
 
 -- Add unique constraint: only ONE approved key per producer at a time
 -- First, handle any existing violations by superseding duplicates
