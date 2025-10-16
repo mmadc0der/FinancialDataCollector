@@ -328,7 +328,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     }
 
     // Check current key status (should exist now after RegisterProducerKey)
-    status, err := k.pg.GetKeyStatus(ctx, fp)
+    status, statusProducerID, err := k.pg.GetKeyStatus(ctx, fp)
     if err != nil {
         logging.Error("registration_status_check_error", 
             logging.F("producer_id", producerID),
@@ -337,6 +337,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         k.rd.Ack(ctx, m.ID)
         return
     }
+    _ = statusProducerID // unused but part of API
 
     // Create pending registration record for audit
     _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, status, "", "")
