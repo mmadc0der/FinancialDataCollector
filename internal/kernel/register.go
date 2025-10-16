@@ -34,7 +34,7 @@ func (k *Kernel) checkRateLimit(ctx context.Context) bool {
     rateLimitKey := prefixed(k.cfg.Redis.KeyPrefix, "ratelimit:register")
     current, err := k.rd.C().Incr(ctx, rateLimitKey).Result()
     if err != nil {
-        logging.Info("registration_rate_limit_error", logging.Err(err))
+        logging.Warn("registration_rate_limit_error", logging.Err(err))
         return true // allow on error
     }
     
