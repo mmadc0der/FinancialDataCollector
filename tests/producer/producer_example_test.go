@@ -106,7 +106,7 @@ func TestProducerExample_EndToEnd(t *testing.T) {
     // Wait for token issuance and first event persisted
     rcli := redis.NewClient(&redis.Options{Addr: addr})
     // token response stream is per producer id; ensure at least one message
-    itutil.WaitStreamLen(t, rcli, "fdc:token:resp:"+producerID, 1, 15*time.Second)
+    itutil.WaitStreamLen(t, rcli, cfg.Redis.KeyPrefix + "token:resp:"+producerID, 1, 15*time.Second)
 
     // Wait for event persisted
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 2*time.Second)

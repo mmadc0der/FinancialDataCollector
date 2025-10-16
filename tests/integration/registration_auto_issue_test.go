@@ -78,13 +78,13 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     sum := sha3.Sum512(msg)
     sig := ed25519.Sign(priv, sum[:])
     sigB64 := base64.RawStdEncoding.EncodeToString(sig)
-    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:register", Values: map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}}).Err(); err != nil {
+    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "register", Values: map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}}).Err(); err != nil {
         t.Fatalf("xadd reg: %v", err)
     }
 
     // wait for registration response on per-nonce stream
     waitFor[int64](t, 10*time.Second, func() (int64, bool) {
-        l, _ := rcli.XLen(context.Background(), "fdc:register:resp:"+nonce).Result()
+        l, _ := rcli.XLen(context.Background(), cfg.Redis.KeyPrefix + "register:resp:"+nonce).Result()
         return l, l >= 1
     })
 }

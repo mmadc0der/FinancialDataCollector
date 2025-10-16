@@ -30,7 +30,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
         logging.Warn("register_consumer_disabled_no_pg")
         return
     }
-    stream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:register")
+    stream := prefixed(k.cfg.Redis.KeyPrefix, "register")
     // Ensure consumer group exists for the registration stream (ignore BUSYGROUP errors)
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
         _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
@@ -114,7 +114,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                     if exists && producerID != nil && *producerID != "" {
                         _ = k.pg.DisableProducer(ctx, *producerID)
                         if k.rd != nil && k.rd.C() != nil && nonce != "" {
-                            respStream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:register:resp:"+nonce)
+                            respStream := prefixed(k.cfg.Redis.KeyPrefix, "register:resp:"+nonce)
                             _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "status": "deregistered"}}).Err()
                             _ = k.rd.C().Expire(ctx, respStream, 15 * time.Minute).Err()
                         }
@@ -138,7 +138,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
                 _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, regStatus, regReason, "")
                 // Respond per nonce stream: fdc:register:resp:<nonce>, with TTL
                 if k.rd != nil && k.rd.C() != nil {
-                    respStream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:register:resp:"+nonce)
+                    respStream := prefixed(k.cfg.Redis.KeyPrefix, "register:resp:"+nonce)
                     _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": func() string { if producerID!=nil {return *producerID}; return "" }(), "status": regStatus}}).Err()
                     // set short TTL to auto-cleanup
                     _ = k.rd.C().Expire(ctx, respStream, 15 * time.Minute).Err()

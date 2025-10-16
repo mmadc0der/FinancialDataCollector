@@ -246,7 +246,7 @@ func prefixed(prefix, key string) string {
 // consumeSubjectRegister handles subject registration stream {token, payload:{subject_key, schema_id?, attrs?}}
 func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
     if k.rd == nil || k.pg == nil { return }
-    stream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:subject:register")
+    stream := prefixed(k.cfg.Redis.KeyPrefix, "subject:register")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
         _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
     }
@@ -270,7 +270,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:subject:resp:"+producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
                 }
                 _ = k.rd.Ack(ctx, m.ID)
             }
@@ -281,7 +281,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
 // consumeTokenExchange handles token issuance/renewal via either approved pubkey signature or a valid existing token
 func (k *Kernel) consumeTokenExchange(ctx context.Context) {
     if k.rd == nil || k.pg == nil || k.au == nil { return }
-    stream := prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:exchange")
+    stream := prefixed(k.cfg.Redis.KeyPrefix, "token:exchange")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
         _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
     }
@@ -296,7 +296,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 if tok, ok := m.Values["token"].(string); ok && tok != "" {
                     if pid, _, _, err := k.au.Verify(ctx, tok); err == nil {
                         if t, _, exp, ierr := k.au.Issue(ctx, pid, time.Hour, "exchange", ""); ierr == nil {
-                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp:"+pid), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+pid), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
                         }
                     }
                     _ = k.rd.Ack(ctx, m.ID)
@@ -332,7 +332,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 exists, status, producerID := k.pg.GetProducerKey(ctx, fp)
                 if exists && status == "approved" && producerID != nil {
                     if t, _, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
-                        _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "fdc:token:resp:"+*producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                        _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
                     }
                 }
                 _ = k.rd.Ack(ctx, m.ID)
