@@ -1,75 +1,60 @@
--- Registration Security Redesign v2
--- Complete registration system with superseded status, single active key per producer, key rotation tracking
+-- Registration Security Redesign v2 - Fixed Migration
+-- Handle existing constraints properly
 
--- Registration and key management tables
-CREATE TABLE IF NOT EXISTS public.producer_keys (
-    fingerprint TEXT PRIMARY KEY,
-    producer_id UUID NOT NULL REFERENCES public.producers(producer_id),
-    pubkey TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|revoked|superseded
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    approved_at TIMESTAMPTZ,
-    revoked_at TIMESTAMPTZ,
-    superseded_at TIMESTAMPTZ,
-    superseded_by TEXT REFERENCES public.producer_keys(fingerprint),
-    notes TEXT
-);
-
--- Add constraints for status values (drop existing first)
+-- Drop existing constraints if they exist
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_status' AND conrelid = 'public.producer_keys'::regclass) THEN
         ALTER TABLE public.producer_keys DROP CONSTRAINT check_status;
     END IF;
 END $$;
 
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'check_reg_status' AND conrelid = 'public.producer_registrations'::regclass) THEN
+        ALTER TABLE public.producer_registrations DROP CONSTRAINT check_reg_status;
+    END IF;
+END $$;
+
+-- Add superseded columns to producer_keys if they don't exist
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'producer_keys' AND column_name = 'superseded_at') THEN
+        ALTER TABLE public.producer_keys ADD COLUMN superseded_at TIMESTAMPTZ;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'producer_keys' AND column_name = 'superseded_by') THEN
+        ALTER TABLE public.producer_keys ADD COLUMN superseded_by TEXT REFERENCES public.producer_keys(fingerprint);
+    END IF;
+END $$;
+
+-- Make producer_id NOT NULL (clean up orphaned keys first)
+DELETE FROM public.producer_keys WHERE producer_id IS NULL;
+ALTER TABLE public.producer_keys ALTER COLUMN producer_id SET NOT NULL;
+
+-- Add new constraints
 ALTER TABLE public.producer_keys 
 ADD CONSTRAINT check_status CHECK (status IN ('pending', 'approved', 'revoked', 'superseded'));
 
--- Add unique constraint: only ONE approved key per producer at a time
-CREATE UNIQUE INDEX IF NOT EXISTS idx_producer_keys_one_approved_per_producer 
-ON public.producer_keys (producer_id) 
-WHERE status = 'approved';
-
--- Registration tracking table
-CREATE TABLE IF NOT EXISTS public.producer_registrations (
-    reg_id UUID PRIMARY KEY,
-    fingerprint TEXT NOT NULL REFERENCES public.producer_keys(fingerprint),
-    payload JSONB NOT NULL,
-    sig TEXT NOT NULL,
-    nonce TEXT NOT NULL,
-    ts TIMESTAMPTZ NOT NULL DEFAULT now(),
-    status TEXT NOT NULL DEFAULT 'pending', -- pending|approved|rejected
-    reason TEXT,
-    reviewed_at TIMESTAMPTZ,
-    reviewer TEXT
-);
-
--- Add constraint for registration status values
 ALTER TABLE public.producer_registrations 
 ADD CONSTRAINT check_reg_status CHECK (status IN ('pending', 'approved', 'rejected'));
 
--- Enforce DB-backed nonce uniqueness per fingerprint
-DO $$ BEGIN IF NOT EXISTS (
-    SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='idx_producer_registrations_fp_nonce'
-) THEN
-    EXECUTE 'CREATE UNIQUE INDEX idx_producer_registrations_fp_nonce ON public.producer_registrations(fingerprint, nonce)';
-END IF; END $$;
+-- Add unique constraint: only ONE approved key per producer at a time
+-- First, handle any existing violations by superseding duplicates
+WITH ranked_keys AS (
+    SELECT fingerprint, producer_id, 
+           ROW_NUMBER() OVER (PARTITION BY producer_id ORDER BY approved_at DESC NULLS LAST, created_at DESC) as rn
+    FROM public.producer_keys 
+    WHERE status = 'approved'
+)
+UPDATE public.producer_keys 
+SET status = 'superseded', 
+    superseded_at = now(),
+    superseded_by = (SELECT fingerprint FROM ranked_keys rk2 WHERE rk2.producer_id = producer_keys.producer_id AND rk2.rn = 1)
+FROM ranked_keys 
+WHERE public.producer_keys.fingerprint = ranked_keys.fingerprint 
+  AND ranked_keys.rn > 1;
 
--- View to list known producers and key statuses
-CREATE OR REPLACE VIEW public.producer_overview AS
-SELECT pk.fingerprint,
-       pk.status,
-       pk.created_at,
-       pk.approved_at,
-       pk.revoked_at,
-       pk.superseded_at,
-       pk.superseded_by,
-       p.producer_id,
-       p.name,
-       p.description,
-       p.created_at AS producer_created_at
-FROM public.producer_keys pk
-LEFT JOIN public.producers p ON p.producer_id = pk.producer_id;
+-- Now add the unique constraint
+CREATE UNIQUE INDEX IF NOT EXISTS idx_producer_keys_one_approved_per_producer 
+ON public.producer_keys (producer_id) 
+WHERE status = 'approved';
 
 -- Function: Approve new producer key (case 1: new producer)
 CREATE OR REPLACE FUNCTION public.approve_producer_key_new(
@@ -231,3 +216,19 @@ BEGIN
     WHERE pk.fingerprint = _fingerprint;
 END;
 $$;
+
+-- Update producer_overview view to include superseded info
+CREATE OR REPLACE VIEW public.producer_overview AS
+SELECT pk.fingerprint,
+       pk.status,
+       pk.created_at,
+       pk.approved_at,
+       pk.revoked_at,
+       pk.superseded_at,
+       pk.superseded_by,
+       p.producer_id,
+       p.name,
+       p.description,
+       p.created_at AS producer_created_at
+FROM public.producer_keys pk
+LEFT JOIN public.producers p ON p.producer_id = pk.producer_id;
