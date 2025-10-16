@@ -8,8 +8,8 @@ import (
     "fmt"
     "net"
     "net/http"
-    "os"
     "path/filepath"
+    "os"
     "testing"
     "time"
 
@@ -20,6 +20,7 @@ import (
 
     "github.com/example/data-kernel/internal/kernel"
     "github.com/example/data-kernel/internal/kernelcfg"
+    yaml "gopkg.in/yaml.v3"
 )
 
 // StartPostgres launches a Postgres container and returns the container handle and DSN.
@@ -58,10 +59,29 @@ func FreePort(t *testing.T) int {
 // WriteKernelConfig writes a kernel config to a temp file and returns its path.
 func WriteKernelConfig(t *testing.T, cfg kernelcfg.Config) string {
     t.Helper()
-    b, _ := json.Marshal(cfg)
+    // Write YAML to ensure tag alignment with kernelcfg.Load
+    b, _ := yaml.Marshal(cfg)
     p := filepath.Join(t.TempDir(), "kernel.json")
     if err := os.WriteFile(p, b, 0o644); err != nil { t.Fatalf("write cfg: %v", err) }
     return p
+}
+
+// ChdirRepoRoot changes the working directory to the repository root (where go.mod is located).
+// This ensures relative paths like "migrations/*.sql" resolve correctly during integration tests.
+func ChdirRepoRoot(t *testing.T) {
+    t.Helper()
+    cwd, _ := os.Getwd()
+    dir := cwd
+    for i := 0; i < 10; i++ {
+        if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+            if chErr := os.Chdir(dir); chErr != nil { t.Fatalf("chdir repo root: %v", chErr) }
+            return
+        }
+        parent := filepath.Dir(dir)
+        if parent == dir { break }
+        dir = parent
+    }
+    t.Fatalf("could not find go.mod from %s", cwd)
 }
 
 // StartKernel starts the kernel with the provided config and returns a cancel function.

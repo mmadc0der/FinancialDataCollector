@@ -25,6 +25,7 @@ import (
 
 func TestProducerProtocol_EndToEnd(t *testing.T) {
     if testing.Short() || getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
+    itutil.ChdirRepoRoot(t)
 
     // deps
     pgc, dsn := itutil.StartPostgres(t)

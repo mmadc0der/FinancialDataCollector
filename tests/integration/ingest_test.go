@@ -19,6 +19,7 @@ import (
 
 func TestIngestE2E_RedisToPostgres(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
+    itutil.ChdirRepoRoot(t)
     // spin up deps
     pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())

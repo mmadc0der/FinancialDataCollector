@@ -23,6 +23,7 @@ import (
 
 func TestRegistrationRespondsPerNonce(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
+    itutil.ChdirRepoRoot(t)
     // deps
     pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())
