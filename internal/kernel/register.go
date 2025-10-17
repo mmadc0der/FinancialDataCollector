@@ -11,6 +11,7 @@ import (
     "time"
 
     "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/metrics"
     "github.com/redis/go-redis/v9"
     ssh "golang.org/x/crypto/ssh"
     "golang.org/x/crypto/sha3"
@@ -26,9 +27,78 @@ type regPayload struct {
 }
 
 // Rate limiting check - returns true if request should be allowed
-// For now, rate limiting is disabled - can be implemented at load balancer or application level
-func (k *Kernel) checkRateLimit(ctx context.Context) bool {
-    return true // no rate limiting for now
+// Uses Redis sliding window rate limiting per fingerprint
+func (k *Kernel) checkRateLimit(ctx context.Context, fingerprint string) bool {
+    if k.rd == nil || k.rd.C() == nil {
+        return true // allow if Redis unavailable
+    }
+    
+    rpm := k.cfg.Auth.RegistrationRateLimitRPM
+    burst := k.cfg.Auth.RegistrationRateLimitBurst
+    if rpm <= 0 {
+        return true // no rate limiting configured
+    }
+    
+    // Use sliding window rate limiting with Redis
+    // Key format: fdc:rate:reg:<fingerprint>
+    rateKey := prefixed(k.cfg.Redis.KeyPrefix, "rate:reg:"+fingerprint)
+    
+    // Lua script for sliding window rate limiting
+    // Returns 1 if allowed, 0 if rate limited
+    script := `
+        local key = KEYS[1]
+        local window = tonumber(ARGV[1])  -- window size in seconds (60)
+        local limit = tonumber(ARGV[2])   -- max requests per window
+        local burst = tonumber(ARGV[3])   -- burst allowance
+        local now = tonumber(ARGV[4])     -- current timestamp
+        
+        -- Clean old entries (older than window)
+        redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
+        
+        -- Count current requests in window
+        local current = redis.call('ZCARD', key)
+        
+        -- Check if we're within limits
+        if current < limit then
+            -- Add this request
+            redis.call('ZADD', key, now, now .. ':' .. math.random())
+            redis.call('EXPIRE', key, window)
+            return 1
+        elseif current < limit + burst then
+            -- Allow burst
+            redis.call('ZADD', key, now, now .. ':' .. math.random())
+            redis.call('EXPIRE', key, window)
+            return 1
+        else
+            -- Rate limited
+            return 0
+        end
+    `
+    
+    result, err := k.rd.C().Eval(ctx, script, []string{rateKey}, 
+        "60",                    // 60 second window
+        fmt.Sprintf("%d", rpm),  // requests per minute
+        fmt.Sprintf("%d", burst), // burst allowance
+        fmt.Sprintf("%d", time.Now().Unix())).Result()
+    
+    if err != nil {
+        logging.Info("registration_rate_limit_error", 
+            logging.Err(err), 
+            logging.F("fingerprint", fingerprint))
+        metrics.RegistrationRateLimitErrors.Inc()
+        return true // allow on error
+    }
+    
+    allowed := result.(int64) == 1
+    if !allowed {
+        logging.Info("registration_rate_limited", 
+            logging.F("fingerprint", fingerprint),
+            logging.F("rpm", rpm),
+            logging.F("burst", burst))
+        metrics.RegistrationRateLimited.Inc()
+    }
+    
+    return allowed
 }
 
 // Check nonce replay prevention
@@ -250,8 +320,8 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         logging.F("fingerprint", fp),
         logging.F("action", action))
     
-    // Rate limiting check
-    if !k.checkRateLimit(ctx) {
+    // Rate limiting check per fingerprint
+    if !k.checkRateLimit(ctx, fp) {
         k.rd.Ack(ctx, m.ID)
         return // silent drop for rate limited requests
     }

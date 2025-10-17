@@ -98,6 +98,9 @@ type AuthConfig struct {
     SkewSeconds int `yaml:"skew_seconds"`
     // Registration response TTL
     RegistrationResponseTTLSeconds int `yaml:"registration_response_ttl_seconds"`
+    // Rate limiting
+    RegistrationRateLimitRPM int `yaml:"registration_rate_limit_rpm"` // requests per minute per fingerprint
+    RegistrationRateLimitBurst int `yaml:"registration_rate_limit_burst"` // burst allowance
 }
 
 func Load(path string) (*Config, error) {
@@ -147,6 +150,8 @@ func Load(path string) (*Config, error) {
         if !cfg.Auth.RequireToken { cfg.Auth.RequireToken = true }
         if cfg.Auth.ProducerSSHCA != "" && !cfg.Auth.ProducerCertRequired { cfg.Auth.ProducerCertRequired = true }
         if cfg.Auth.RegistrationResponseTTLSeconds <= 0 { cfg.Auth.RegistrationResponseTTLSeconds = 300 }
+        if cfg.Auth.RegistrationRateLimitRPM <= 0 { cfg.Auth.RegistrationRateLimitRPM = 10 }
+        if cfg.Auth.RegistrationRateLimitBurst <= 0 { cfg.Auth.RegistrationRateLimitBurst = 3 }
     }
 	return &cfg, nil
 }

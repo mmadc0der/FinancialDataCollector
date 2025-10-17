@@ -64,4 +64,6 @@ auth:
   cache_ttl_seconds: 300
   skew_seconds: 60
   registration_response_ttl_seconds: 300  # TTL for registration response streams (5 minutes)
+  registration_rate_limit_rpm: 10  # requests per minute per fingerprint
+  registration_rate_limit_burst: 3  # burst allowance for rapid initial requests
 

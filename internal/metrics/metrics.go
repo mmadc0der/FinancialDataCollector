@@ -21,13 +21,16 @@ var (
     SpillBytesTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_spill_bytes_total", Help: "Bytes written to spill"})
     SpillReplayTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_spill_replay_total", Help: "Batches replayed from spill"})
     RedisPendingGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_redis_pending", Help: "Approx pending messages in consumer group"})
-    RedisStreamLenGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_redis_stream_len", Help: "Approx length of the ingest stream"})
+    RedisStreamLenGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_redis_stream_length", Help: "Approx length of Redis stream"})
     SpillFilesGauge = prom.NewGauge(prom.GaugeOpts{Name: "kernel_spill_files", Help: "Number of spill files on disk"})
     AuthDeniedTotal = prom.NewCounter(prom.CounterOpts{Name: "kernel_auth_denied_total", Help: "Messages rejected due to failed authentication"})
+    // Registration rate limiting metrics
+    RegistrationRateLimited = prom.NewCounter(prom.CounterOpts{Name: "kernel_registration_rate_limited_total", Help: "Registration requests rate limited"})
+    RegistrationRateLimitErrors = prom.NewCounter(prom.CounterOpts{Name: "kernel_registration_rate_limit_errors_total", Help: "Errors in rate limiting checks"})
 )
 
 func init() {
-    prom.MustRegister(IngestDropped, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge, AuthDeniedTotal)
+    prom.MustRegister(IngestDropped, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge, AuthDeniedTotal, RegistrationRateLimited, RegistrationRateLimitErrors)
 }
 
 func Handler() http.Handler { return promhttp.Handler() }
