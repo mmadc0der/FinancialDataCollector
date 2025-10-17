@@ -331,6 +331,16 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         logging.F("fingerprint", fp),
         logging.F("action", action))
 
+    // Parse payload first to get producer_id for rate limiting
+    var payload regPayload
+    if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
+        logging.Info("registration_payload_parse_error",
+            logging.F("fingerprint", fp),
+            logging.Err(err))
+        k.rd.Ack(ctx, m.ID)
+        return
+    }
+
     // For new producers, we don't have producer_id yet, so we'll use fingerprint for rate limiting
     // For existing producers, we'll use producer_id
     var rateLimitID string
@@ -344,16 +354,6 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     if !k.checkRateLimit(ctx, rateLimitID) {
         k.rd.Ack(ctx, m.ID)
         return // silent drop for rate limited requests
-    }
-    
-    // Parse payload
-    var payload regPayload
-    if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-        logging.Info("registration_payload_parse_error",
-            logging.F("fingerprint", fp),
-            logging.Err(err))
-        k.rd.Ack(ctx, m.ID)
-        return
     }
     
     // Check nonce replay
