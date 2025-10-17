@@ -260,18 +260,39 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
             for _, m := range s.Messages {
                 token, _ := m.Values["token"].(string)
                 var producerID string
+                var verifyErr error
                 if k.au != nil && k.cfg.Auth.RequireToken {
-                    if pid, _, _, err := k.au.Verify(ctx, token); err == nil { producerID = pid } else { _ = k.rd.Ack(ctx, m.ID); continue }
+                    if pid, _, _, err := k.au.Verify(ctx, token); err == nil { 
+                        producerID = pid 
+                    } else { 
+                        verifyErr = err
+                        logging.Error("subject_register_token_verify_error", logging.F("id", m.ID), logging.Err(err))
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue 
+                    }
                 }
                 payloadStr, _ := m.Values["payload"].(string)
                 var req struct{ SubjectKey string `json:"subject_key"`; SchemaID string `json:"schema_id"`; Attrs json.RawMessage `json:"attrs"` }
-                if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
+                    logging.Warn("subject_register_invalid_payload", logging.F("id", m.ID), logging.F("payload", payloadStr))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue 
+                }
                 sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
                 if err == nil && req.SchemaID != "" { _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID); _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour) }
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {
                     _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                    logging.Info("subject_register_success", logging.F("producer_id", producerID), logging.F("subject_id", sid))
+                } else if verifyErr != nil {
+                    tokenPreview := token
+                    if len(token) > 20 {
+                        tokenPreview = token[:20] + "..."
+                    }
+                    logging.Error("subject_register_no_producer", logging.F("id", m.ID), logging.F("token", tokenPreview), logging.Err(verifyErr))
+                } else {
+                    logging.Warn("subject_register_no_producer_no_token", logging.F("id", m.ID))
                 }
                 _ = k.rd.Ack(ctx, m.ID)
             }
