@@ -27,22 +27,23 @@ type regPayload struct {
 }
 
 // Rate limiting check - returns true if request should be allowed
-// Uses Redis sliding window rate limiting per fingerprint
-func (k *Kernel) checkRateLimit(ctx context.Context, fingerprint string) bool {
+// Uses Redis sliding window rate limiting per producer_id (fail-closed security)
+func (k *Kernel) checkRateLimit(ctx context.Context, producerID string) bool {
     if k.rd == nil || k.rd.C() == nil {
-        return true // allow if Redis unavailable
+        logging.Error("rate_limit_redis_unavailable")
+        return false // deny if Redis unavailable (fail-closed)
     }
-    
+
     rpm := k.cfg.Auth.RegistrationRateLimitRPM
     burst := k.cfg.Auth.RegistrationRateLimitBurst
     if rpm <= 0 {
         return true // no rate limiting configured
     }
-    
+
     // Use sliding window rate limiting with Redis
-    // Key format: fdc:rate:reg:<fingerprint>
-    rateKey := prefixed(k.cfg.Redis.KeyPrefix, "rate:reg:"+fingerprint)
-    
+    // Key format: fdc:rate:reg:<producer_id>
+    rateKey := prefixed(k.cfg.Redis.KeyPrefix, "rate:reg:"+producerID)
+
     // Lua script for sliding window rate limiting
     // Returns 1 if allowed, 0 if rate limited
     script := `
@@ -51,13 +52,13 @@ func (k *Kernel) checkRateLimit(ctx context.Context, fingerprint string) bool {
         local limit = tonumber(ARGV[2])   -- max requests per window
         local burst = tonumber(ARGV[3])   -- burst allowance
         local now = tonumber(ARGV[4])     -- current timestamp
-        
+
         -- Clean old entries (older than window)
         redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
-        
+
         -- Count current requests in window
         local current = redis.call('ZCARD', key)
-        
+
         -- Check if we're within limits
         if current < limit then
             -- Add this request
@@ -74,32 +75,33 @@ func (k *Kernel) checkRateLimit(ctx context.Context, fingerprint string) bool {
             return 0
         end
     `
-    
-    result, err := k.rd.C().Eval(ctx, script, []string{rateKey}, 
+
+    result, err := k.rd.C().Eval(ctx, script, []string{rateKey},
         "60",                    // 60 second window
         fmt.Sprintf("%d", rpm),  // requests per minute
         fmt.Sprintf("%d", burst), // burst allowance
         fmt.Sprintf("%d", time.Now().Unix())).Result()
-    
+
     if err != nil {
-        logging.Info("registration_rate_limit_error", 
-            logging.Err(err), 
-            logging.F("fingerprint", fingerprint))
+        logging.Info("rate_limit_error",
+            logging.Err(err),
+            logging.F("producer_id", producerID))
         metrics.RegistrationRateLimitErrors.Inc()
-        return true // allow on error
+        return false // deny on any error (fail-closed security)
     }
-    
+
     allowed := result.(int64) == 1
     if !allowed {
-        logging.Info("registration_rate_limited", 
-            logging.F("fingerprint", fingerprint),
+        logging.Info("rate_limited",
+            logging.F("producer_id", producerID),
             logging.F("rpm", rpm),
             logging.F("burst", burst))
         metrics.RegistrationRateLimited.Inc()
     }
-    
+
     return allowed
 }
+
 
 // Check nonce replay prevention
 func (k *Kernel) checkNonceReplay(ctx context.Context, fingerprint, nonce string) bool {
@@ -228,27 +230,36 @@ func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool 
 // Send response to Redis stream
 func (k *Kernel) sendRegistrationResponse(ctx context.Context, nonce string, response map[string]any) {
     if k.rd == nil || k.rd.C() == nil {
+        logging.Error("registration_response_error", logging.F("error", "redis_unavailable"))
         return
     }
-    
+
     respStream := prefixed(k.cfg.Redis.KeyPrefix, "register:resp:"+nonce)
     ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
     if ttl <= 0 {
         ttl = 5 * time.Minute // default
     }
-    
+
+    // Log the response being sent for debugging
+    logging.Info("registration_response_sending",
+        logging.F("nonce", nonce),
+        logging.F("stream", respStream),
+        logging.F("status", response["status"]))
+
     err := k.rd.C().XAdd(ctx, &redis.XAddArgs{
-        Stream: respStream, 
-        MaxLen: k.cfg.Redis.MaxLenApprox, 
-        Approx: true, 
+        Stream: respStream,
+        MaxLen: k.cfg.Redis.MaxLenApprox,
+        Approx: true,
         Values: response,
     }).Err()
-    
+
     if err != nil {
-        logging.Info("registration_response_error", logging.Err(err))
+        logging.Info("registration_response_error", logging.Err(err), logging.F("stream", respStream))
     } else {
         // Set TTL on response stream
-        k.rd.C().Expire(ctx, respStream, ttl)
+        if expireErr := k.rd.C().Expire(ctx, respStream, ttl).Err(); expireErr != nil {
+            logging.Info("registration_response_ttl_error", logging.Err(expireErr), logging.F("stream", respStream))
+        }
     }
 }
 
@@ -315,13 +326,22 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     }
     
     fp := sshFingerprint([]byte(pubkey))
-    logging.Info("registration_received", 
-        logging.F("id", m.ID), 
+    logging.Info("registration_received",
+        logging.F("id", m.ID),
         logging.F("fingerprint", fp),
         logging.F("action", action))
-    
-    // Rate limiting check per fingerprint
-    if !k.checkRateLimit(ctx, fp) {
+
+    // For new producers, we don't have producer_id yet, so we'll use fingerprint for rate limiting
+    // For existing producers, we'll use producer_id
+    var rateLimitID string
+    if payload.ProducerID != "" {
+        rateLimitID = payload.ProducerID
+    } else {
+        rateLimitID = fp // fallback to fingerprint for new producers
+    }
+
+    // Rate limiting check per producer_id/fingerprint
+    if !k.checkRateLimit(ctx, rateLimitID) {
         k.rd.Ack(ctx, m.ID)
         return // silent drop for rate limited requests
     }
@@ -329,8 +349,8 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     // Parse payload
     var payload regPayload
     if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-        logging.Info("registration_payload_parse_error", 
-            logging.F("fingerprint", fp), 
+        logging.Info("registration_payload_parse_error",
+            logging.F("fingerprint", fp),
             logging.Err(err))
         k.rd.Ack(ctx, m.ID)
         return
@@ -371,8 +391,8 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
             k.rd.Ack(ctx, m.ID)
             return
         }
-        logging.Info("registration_cert_verified", 
-            logging.F("fingerprint", fp), 
+        logging.Info("registration_cert_verified",
+            logging.F("fingerprint", fp),
             logging.F("cert_key_id", keyID),
             logging.F("valid_after", validAfter),
             logging.F("valid_before", validBefore))
@@ -383,8 +403,8 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     var err error
     producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta)
     if err != nil {
-        logging.Error("registration_producer_key_register_error", 
-            logging.F("fingerprint", fp), 
+        logging.Error("registration_producer_key_register_error",
+            logging.F("fingerprint", fp),
             logging.Err(err))
         k.rd.Ack(ctx, m.ID)
         return
@@ -400,9 +420,9 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     // Check current key status (should exist now after RegisterProducerKey)
     status, statusProducerID, err := k.pg.GetKeyStatus(ctx, fp)
     if err != nil {
-        logging.Error("registration_status_check_error", 
+        logging.Error("registration_status_check_error",
             logging.F("producer_id", producerID),
-            logging.F("fingerprint", fp), 
+            logging.F("fingerprint", fp),
             logging.Err(err))
         k.rd.Ack(ctx, m.ID)
         return
@@ -422,25 +442,23 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         k.handleKnownDenied(ctx, &producerID, fp, status, m.ID, nonce)
     default:
         // This shouldn't happen after RegisterProducerKey, but handle gracefully
-        logging.Info("registration_unknown_status", logging.F("producer_id", producerID), logging.F("fingerprint", fp), logging.F("status", status))
+        logging.Info("registration_unknown_status", logging.F("producer_id", producerID), logging.F("status", status))
         k.handleNewProducer(ctx, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID)
     }
 }
 
 // Handle deregister action
 func (k *Kernel) handleDeregister(ctx context.Context, producerID, fp string, msgID, nonce string) {
-    logging.Info("registration_deregister_received", logging.F("producer_id", producerID), logging.F("fingerprint", fp))
+    logging.Info("registration_deregister_received", logging.F("producer_id", producerID))
     
     err := k.pg.DisableProducer(ctx, producerID)
     if err != nil {
-        logging.Error("registration_deregister_error", 
+        logging.Error("registration_deregister_error",
             logging.F("producer_id", producerID),
-            logging.F("fingerprint", fp), 
             logging.Err(err))
     } else {
-        logging.Info("registration_deregister_success", 
-            logging.F("producer_id", producerID),
-            logging.F("fingerprint", fp))
+        logging.Info("registration_deregister_success",
+            logging.F("producer_id", producerID))
     }
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
@@ -479,9 +497,8 @@ func (k *Kernel) handleKnownPending(ctx context.Context, producerID, fp string, 
 func (k *Kernel) handleKnownDenied(ctx context.Context, producerID *string, fp, status, msgID, nonce string) {
     var pid string
     if producerID != nil { pid = *producerID }
-    logging.Info("registration_known_denied", 
-        logging.F("producer_id", pid), 
-        logging.F("fingerprint", fp),
+    logging.Info("registration_known_denied",
+        logging.F("producer_id", pid),
         logging.F("status", status))
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
@@ -495,7 +512,7 @@ func (k *Kernel) handleKnownDenied(ctx context.Context, producerID *string, fp, 
 
 // Handle new producer registration (fallback - should not occur post-RegisterProducerKey)
 func (k *Kernel) handleNewProducer(ctx context.Context, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
-    logging.Info("registration_new_producer", logging.F("producer_id", producerID), logging.F("fingerprint", fp))
+    logging.Info("registration_new_producer", logging.F("producer_id", producerID))
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,

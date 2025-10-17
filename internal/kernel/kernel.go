@@ -262,13 +262,18 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 var producerID string
                 var verifyErr error
                 if k.au != nil && k.cfg.Auth.RequireToken {
-                    if pid, _, _, err := k.au.Verify(ctx, token); err == nil { 
-                        producerID = pid 
-                    } else { 
+                    if pid, _, _, err := k.au.Verify(ctx, token); err == nil {
+                        producerID = pid
+                        // Rate limiting check for subject registration
+                        if !k.checkRateLimit(ctx, producerID) {
+                            _ = k.rd.Ack(ctx, m.ID)
+                            continue // silent drop for rate limited requests
+                        }
+                    } else {
                         verifyErr = err
                         logging.Error("subject_register_token_verify_error", logging.F("id", m.ID), logging.Err(err))
                         _ = k.rd.Ack(ctx, m.ID)
-                        continue 
+                        continue
                     }
                 }
                 payloadStr, _ := m.Values["payload"].(string)
@@ -372,6 +377,13 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                     _ = k.rd.Ack(ctx, m.ID)
                     continue
                 }
+
+                // Rate limiting check for token exchange
+                if !k.checkRateLimit(ctx, *producerID) {
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue // silent drop for rate limited requests
+                }
+
                 if t, jti, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
                     logging.Info("token_exchange_issued", logging.F("fingerprint", fp), logging.F("producer_id", *producerID), logging.F("jti", jti))
                     respStream := prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID)
