@@ -104,26 +104,18 @@ func signPayloadNonce(signer ssh.Signer, payloadStr, nonce string) (string, erro
 }
 
 func xreadOne(ctx context.Context, rdb *redis.Client, stream string, block time.Duration) (redis.XMessage, error) {
-    // Initialize consumer group pointing to latest message
-    _ = rdb.XGroupCreateMkStream(ctx, stream, "producer", "$").Err()
-    
-    // Use consumer group to read only NEW messages
-    consumerName := fmt.Sprintf("producer-%d", time.Now().UnixNano())
+    // Use XREAD to read new messages from the stream (no consumer groups for response streams)
     for ctx.Err() == nil {
-        res, err := rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
-            Group:    "producer",
-            Consumer: consumerName,
-            Streams:  []string{stream, ">"},
-            Count:    1,
-            Block:    block,
+        res, err := rdb.XRead(ctx, &redis.XReadArgs{
+            Streams: []string{stream, "0"},
+            Count:   1,
+            Block:   block,
         }).Result()
         if err == redis.Nil { continue }
         if err != nil { return redis.XMessage{}, err }
         for _, s := range res {
             if len(s.Messages) > 0 {
-                msg := s.Messages[0]
-                _ = rdb.XAck(ctx, stream, "producer", msg.ID)
-                return msg, nil
+                return s.Messages[0], nil
             }
         }
     }
