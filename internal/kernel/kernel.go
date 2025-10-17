@@ -372,9 +372,13 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                     _ = k.rd.Ack(ctx, m.ID)
                     continue
                 }
-                if t, _, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
-                    logging.Info("token_exchange_issued", logging.F("fingerprint", fp), logging.F("producer_id", *producerID))
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                if t, jti, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
+                    logging.Info("token_exchange_issued", logging.F("fingerprint", fp), logging.F("producer_id", *producerID), logging.F("jti", jti))
+                    respStream := prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID)
+                    err := k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                    if err != nil {
+                        logging.Error("token_exchange_response_error", logging.F("jti", jti), logging.F("producer_id", *producerID), logging.Err(err))
+                    }
                 } else {
                     logging.Info("token_exchange_issue_error", logging.F("fingerprint", fp), logging.Err(ierr))
                 }
