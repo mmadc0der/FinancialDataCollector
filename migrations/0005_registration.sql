@@ -114,15 +114,23 @@ BEGIN
         RAISE EXCEPTION 'unknown or non-pending fingerprint %', _fingerprint;
     END IF;
     
-    -- Create new producer
-    v_producer_id := gen_random_uuid();
-    INSERT INTO public.producers(producer_id, name, description)
-    VALUES (v_producer_id, _name, COALESCE(_notes, ''));
+    -- Get the producer_id from the pending key
+    SELECT producer_id INTO v_producer_id FROM public.producer_keys 
+    WHERE fingerprint = _fingerprint AND status = 'pending';
     
-    -- Approve and bind the key
+    IF v_producer_id IS NULL THEN
+        RAISE EXCEPTION 'producer not found for fingerprint %', _fingerprint;
+    END IF;
+    
+    -- Update existing producer with approved name and notes
+    UPDATE public.producers
+    SET name = _name,
+        description = COALESCE(_notes, description)
+    WHERE producer_id = v_producer_id;
+    
+    -- Approve and update the key
     UPDATE public.producer_keys
-    SET producer_id = v_producer_id,
-        status = 'approved',
+    SET status = 'approved',
         approved_at = now(),
         notes = COALESCE(_notes, notes)
     WHERE fingerprint = _fingerprint;

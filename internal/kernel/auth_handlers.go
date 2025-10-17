@@ -77,16 +77,24 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
     
     var req reviewRequest
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        logging.Warn("admin_review_decode_error", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.Err(err))
         w.WriteHeader(http.StatusBadRequest)
         return
     }
     
     // Validate required fields
-    if req.Action == "" || req.ProducerID == "" {
+    if req.Action == "" {
+        logging.Warn("admin_review_missing_action", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint))
+        w.WriteHeader(http.StatusBadRequest)
+        return
+    }
+    if req.ProducerID == "" {
+        logging.Warn("admin_review_missing_producer_id", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.F("action", req.Action))
         w.WriteHeader(http.StatusBadRequest)
         return
     }
     if req.Action == "deny" && req.Reason == "" {
+        logging.Warn("admin_review_missing_reason", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.F("action", req.Action), logging.F("producer_id", req.ProducerID))
         w.WriteHeader(http.StatusBadRequest)
         return
     }
