@@ -227,6 +227,7 @@ func main() {
     if interval <= 0 { interval = time.Second }
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
+    eventsSent := 0
     for {
         select {
         case t := <-ticker.C:
@@ -234,7 +235,16 @@ func main() {
             ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
             evB, _ := json.Marshal(ev)
             id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"events", Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
-            if err != nil { log.Printf("event_xadd_error: %v", err) } else { log.Printf("event_sent id=%s", id) }
+            if err != nil { 
+                log.Printf("event_xadd_error: %v", err) 
+            } else { 
+                eventsSent++
+                if eventsSent == 1 {
+                    log.Printf("event_sending_started events_total=1 id=%s", id)
+                } else if eventsSent % 100 == 0 {
+                    log.Printf("event_sent_progress events_total=%d id=%s", eventsSent, id)
+                }
+            }
         case <-ctx.Done():
             log.Printf("producer_stop")
             // send deregister on shutdown
