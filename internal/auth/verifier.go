@@ -191,7 +191,14 @@ func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, stri
         }
     }
     ok, prod := authDbTokenExists(v.pg, ctx, c.Jti)
-    if !ok || prod != c.Sub { return "", "", "", errors.New("unknown_or_mismatched_token") }
+    if !ok {
+        logging.Error("token_verify_not_found", logging.F("jti", c.Jti), logging.F("expected_producer", c.Sub))
+        return "", "", "", errors.New("unknown_or_mismatched_token")
+    }
+    if prod != c.Sub {
+        logging.Error("token_verify_producer_mismatch", logging.F("jti", c.Jti), logging.F("db_producer", prod), logging.F("token_producer", c.Sub))
+        return "", "", "", errors.New("unknown_or_mismatched_token")
+    }
     if authDbIsTokenRevoked(v.pg, ctx, c.Jti) { return "", "", "", errors.New("token_revoked") }
     // Cache allow in Redis for remaining TTL
     if ttl := time.Until(time.Unix(c.Exp, 0)); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+c.Jti, c.Sub+"|"+c.Fp, ttl) }

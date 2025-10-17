@@ -373,6 +373,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                     continue
                 }
                 if t, _, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
+                    logging.Info("token_exchange_issued", logging.F("fingerprint", fp), logging.F("producer_id", *producerID))
                     _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
                 } else {
                     logging.Info("token_exchange_issue_error", logging.F("fingerprint", fp), logging.Err(ierr))
