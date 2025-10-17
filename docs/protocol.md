@@ -51,14 +51,14 @@
 - Response: `fdc:token:resp:<producer_id>` with `{ fingerprint, producer_id, token, exp }`.
 
 ### Admin Endpoints
-- **`/admin/review`** (POST): Review and approve/deny producer registrations
+- **`/auth/review`** (POST): Review and approve/deny producer registrations
   - Request: `{ "action": "approve"|"deny", "producer_id": "uuid", "fingerprint": "string", "reason": "string" (required for deny), "notes": "string" (optional) }`
   - Headers: `X-SSH-Cert` (admin certificate), `X-SSH-Principal` (admin principal)
   - Response: `{ "producer_id": "uuid", "status": "approved"|"denied", "fingerprint": "string", "type": "new_producer"|"key_rotation" (for approve), "reason": "string" (for deny) }`
   - Note: fingerprint is required to identify which key to approve/deny for the producer
-- **`/admin/pending`** (GET): List pending registrations
+- **`/auth/pending`** (GET): List pending registrations
   - Response: Array of `{ "fingerprint": "string", "ts": "RFC3339Nano" }`
-- **`/admin/auth`** (GET): List all producer keys and their statuses
+- **`/auth`** (GET): List all producer keys and their statuses
   - Response: Array of `{ "fingerprint": "string", "status": "pending|approved|revoked|superseded", "producer_id": "uuid", "name": "string", "created_at": "RFC3339Nano" }`
 
 ### Deregistration
