@@ -288,7 +288,12 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                    respStream := prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID)
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                    // Set TTL on subject response stream to prevent accumulation
+                    ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
+                    if ttl <= 0 { ttl = 5 * time.Minute }
+                    _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
                     logging.Info("subject_register_success", logging.F("producer_id", producerID), logging.F("subject_id", sid))
                 } else if verifyErr != nil {
                     tokenPreview := token
@@ -323,7 +328,12 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 if tok, ok := m.Values["token"].(string); ok && tok != "" {
                     if pid, _, _, err := k.au.Verify(ctx, tok); err == nil {
                         if t, _, exp, ierr := k.au.Issue(ctx, pid, time.Hour, "exchange", ""); ierr == nil {
-                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+pid), MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                            respStream := prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+pid)
+                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                            // Set TTL on token response stream to prevent accumulation of stale responses
+                            ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
+                            if ttl <= 0 { ttl = 5 * time.Minute }
+                            _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
                         }
                     }
                     _ = k.rd.Ack(ctx, m.ID)
@@ -390,6 +400,13 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                     err := k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
                     if err != nil {
                         logging.Error("token_exchange_response_error", logging.F("jti", jti), logging.F("producer_id", *producerID), logging.Err(err))
+                    } else {
+                        // Set TTL on token response stream to prevent accumulation of stale responses
+                        ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
+                        if ttl <= 0 { ttl = 5 * time.Minute }
+                        if expireErr := k.rd.C().Expire(ctx, respStream, ttl).Err(); expireErr != nil {
+                            logging.Warn("token_resp_ttl_error", logging.F("jti", jti), logging.F("producer_id", *producerID), logging.Err(expireErr))
+                        }
                     }
                 } else {
                     logging.Info("token_exchange_issue_error", logging.F("fingerprint", fp), logging.Err(ierr))

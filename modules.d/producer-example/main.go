@@ -103,23 +103,41 @@ func signPayloadNonce(signer ssh.Signer, payloadStr, nonce string) (string, erro
     return base64.StdEncoding.EncodeToString(sshSig.Blob), nil
 }
 
-func xreadOne(ctx context.Context, rdb *redis.Client, stream string, block time.Duration) (redis.XMessage, error) {
-    // Use XREAD to read new messages from the stream (no consumer groups for response streams)
+// readResponseOnce reads ONE message from a response stream, tracking position to avoid stale messages.
+// This prevents reading old expired tokens from stream start ("0").
+// On first call (lastID == ""), reads from "$" (new messages only).
+// On subsequent calls, reads from after lastID.
+func readResponseOnce(ctx context.Context, rdb *redis.Client, stream string, lastID string, block time.Duration) (redis.XMessage, string, error) {
+    startID := lastID
+    if startID == "" {
+        // First call: Start from new messages only (not from stream beginning)
+        // "$" means "only messages added after this read starts"
+        // Use blocking read to wait for first message
+        startID = "$"
+    }
+    
     for ctx.Err() == nil {
         res, err := rdb.XRead(ctx, &redis.XReadArgs{
-            Streams: []string{stream, "0"},
+            Streams: []string{stream, startID},
             Count:   1,
             Block:   block,
         }).Result()
-        if err == redis.Nil { continue }
-        if err != nil { return redis.XMessage{}, err }
+        if err == redis.Nil { 
+            // No new messages yet, but could be a timeout - continue waiting
+            continue 
+        }
+        if err != nil { 
+            return redis.XMessage{}, "", err 
+        }
         for _, s := range res {
             if len(s.Messages) > 0 {
-                return s.Messages[0], nil
+                msg := s.Messages[0]
+                // Return message and its ID so caller can track position
+                return msg, msg.ID, nil
             }
         }
     }
-    return redis.XMessage{}, ctx.Err()
+    return redis.XMessage{}, "", ctx.Err()
 }
 
 func main() {
@@ -175,7 +193,7 @@ func main() {
     } else { log.Fatalf("register_send_error: %v", e) }
     respStream := cfg.Redis.KeyPrefix + "register:resp:" + nonce
     for producerID == "" {
-        if msg, e := xreadOne(ctx, rdb, respStream, 60*time.Second); e == nil {
+        if msg, _, e := readResponseOnce(ctx, rdb, respStream, "", 60*time.Second); e == nil {
             if pid, ok := msg.Values["producer_id"].(string); ok { producerID = pid }
             if status, ok := msg.Values["status"].(string); ok {
                 switch status {
@@ -205,8 +223,9 @@ func main() {
     nonceEx, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
     sigEx, e := signPayloadNonce(signer, exchPayload, nonceEx); if e != nil { log.Fatalf("sign_error: %v", e) }
     _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"token:exchange", Values: map[string]any{"pubkey": pubForRegistration, "payload": exchPayload, "nonce": nonceEx, "sig": sigEx}}).Result()
-    // wait on per-producer token response
-    tokMsg, e := xreadOne(ctx, rdb, cfg.Redis.KeyPrefix+"token:resp:"+producerID, 15*time.Second)
+    // wait on per-producer token response - read from new messages only
+    var lastTokenID string
+    tokMsg, lastTokenID, e := readResponseOnce(ctx, rdb, cfg.Redis.KeyPrefix+"token:resp:"+producerID, lastTokenID, 15*time.Second)
     if e != nil { log.Fatalf("token_exchange_timeout: %v", e) }
     token, _ := tokMsg.Values["token"].(string)
     if token == "" { log.Fatalf("token_exchange_empty") }
@@ -218,7 +237,8 @@ func main() {
     subjReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
     subjB, _ := json.Marshal(subjReq)
     _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"subject:register", Values: map[string]any{"payload": string(subjB), "token": token}}).Result()
-    subjMsg, e := xreadOne(ctx, rdb, cfg.Redis.KeyPrefix+"subject:resp:"+producerID, 15*time.Second)
+    var lastSubjectID string
+    subjMsg, lastSubjectID, e := readResponseOnce(ctx, rdb, cfg.Redis.KeyPrefix+"subject:resp:"+producerID, lastSubjectID, 15*time.Second)
     if e != nil { log.Fatalf("subject_resp_timeout: %v", e) }
     var subjectID string
     if v, ok := subjMsg.Values["subject_id"].(string); ok { subjectID = v }
@@ -255,7 +275,7 @@ func main() {
                 if sig, e2 := signPayloadNonce(signer, canonicalJSON(map[string]any{"action":"deregister"}), nonce); e2 == nil {
                     _, _ = rdb.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"register", Values: map[string]any{"action":"deregister", "pubkey": pubForRegistration, "payload": canonicalJSON(map[string]any{"reason":"shutdown"}), "nonce": nonce, "sig": sig}}).Result()
                     // optionally wait brief confirm
-                    _, _ = xreadOne(context.Background(), rdb, cfg.Redis.KeyPrefix+"register:resp:"+nonce, 3*time.Second)
+                    _, _, _ = readResponseOnce(context.Background(), rdb, cfg.Redis.KeyPrefix+"register:resp:"+nonce, "", 3*time.Second)
                 }
             }
             return
