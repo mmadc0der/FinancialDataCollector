@@ -174,40 +174,36 @@ func main() {
     }
     payloadStr := canonicalJSON(payload)
     regStream := cfg.Redis.KeyPrefix + "register"
+    // Send registration ONCE, then wait on the same response stream until approved/denied
     var producerID string
-    reRegTicker := time.NewTicker(30 * time.Second)
-    defer reRegTicker.Stop()
+    nonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
+    sigB64, e := signPayloadNonce(signer, payloadStr, nonce); if e != nil { log.Fatalf("sign_error: %v", e) }
+    if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: regStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
+        log.Printf("register_sent id=%s", id)
+    } else { log.Fatalf("register_send_error: %v", e) }
+    respStream := cfg.Redis.KeyPrefix + "register:resp:" + nonce
     for producerID == "" {
-        nonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
-        sigB64, e := signPayloadNonce(signer, payloadStr, nonce); if e != nil { log.Fatalf("sign_error: %v", e) }
-        if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: regStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
-            log.Printf("register_sent id=%s", id)
-        } else { time.Sleep(500 * time.Millisecond); continue }
-        // wait on per-nonce response stream
-        respStream := cfg.Redis.KeyPrefix + "register:resp:" + nonce
-        if msg, e := xreadOne(ctx, rdb, respStream, 10*time.Second); e == nil {
-            if pid, ok := msg.Values["producer_id"].(string); ok { 
-                producerID = pid 
-            }
+        if msg, e := xreadOne(ctx, rdb, respStream, 60*time.Second); e == nil {
+            if pid, ok := msg.Values["producer_id"].(string); ok { producerID = pid }
             if status, ok := msg.Values["status"].(string); ok {
                 switch status {
                 case "approved":
                     log.Printf("registration_approved producer_id=%s", producerID)
                 case "pending":
-                    log.Printf("registration_pending producer_id=%s", producerID)
+                    // keep waiting for admin approval notification pushed by kernel
+                    if producerID != "" { log.Printf("registration_pending producer_id=%s", producerID) } else { log.Printf("registration_pending") }
                 case "denied", "invalid_sig", "invalid_cert":
                     if reason, ok := msg.Values["reason"].(string); ok {
                         log.Printf("registration_denied status=%s reason=%s", status, reason)
                     } else {
                         log.Printf("registration_denied status=%s", status)
                     }
-                    // For denied registrations, we should exit or retry with different credentials
                     log.Fatalf("registration_denied: %s", status)
                 }
             }
-        }
-        if producerID == "" {
-            select { case <-reRegTicker.C: default: }
+        } else if e == context.DeadlineExceeded || e == context.Canceled {
+            // continue waiting unless canceled
+            if e == context.Canceled { return }
         }
     }
     log.Printf("registered producer_id=%s", producerID)
