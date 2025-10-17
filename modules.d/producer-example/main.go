@@ -22,6 +22,44 @@ import (
     "gopkg.in/yaml.v3"
 )
 
+// Minimal JWT-like structs for debug logging of tokens
+type jwtHeader struct {
+    Alg string `json:"alg"`
+    Kid string `json:"kid"`
+    Typ string `json:"typ"`
+}
+
+type jwtClaims struct {
+    Iss string `json:"iss"`
+    Aud string `json:"aud"`
+    Sub string `json:"sub"`
+    Sid string `json:"sid"`
+    Iat int64  `json:"iat"`
+    Nbf int64  `json:"nbf"`
+    Exp int64  `json:"exp"`
+    Jti string `json:"jti"`
+    Fp  string `json:"fp"`
+}
+
+func parseTokenUnsafe(tok string) (jwtHeader, jwtClaims, error) {
+    var h jwtHeader
+    var c jwtClaims
+    parts := strings.Split(tok, ".")
+    if len(parts) != 3 { return h, c, fmt.Errorf("bad_token_format") }
+    hb, err := base64.RawURLEncoding.DecodeString(parts[0])
+    if err != nil { return h, c, fmt.Errorf("bad_header_b64: %w", err) }
+    cb, err := base64.RawURLEncoding.DecodeString(parts[1])
+    if err != nil { return h, c, fmt.Errorf("bad_claims_b64: %w", err) }
+    if err := json.Unmarshal(hb, &h); err != nil { return h, c, fmt.Errorf("bad_header_json: %w", err) }
+    if err := json.Unmarshal(cb, &c); err != nil { return h, c, fmt.Errorf("bad_claims_json: %w", err) }
+    return h, c, nil
+}
+
+func tokenPreview(tok string) string {
+    if len(tok) > 24 { return tok[:24] + "..." }
+    return tok
+}
+
 type Config struct {
     Redis struct {
         Addr       string `yaml:"addr"`
@@ -171,6 +209,8 @@ func main() {
         return ""
     }()
     // fingerprint is not used client-side; server computes and matches as needed
+    fp := computeFingerprint(pubForRegistration)
+    log.Printf("registration_prepare fingerprint=%s pubkey_len=%d", fp, len(pubForRegistration))
 
     // send registration (repeat until producer_id acquired)
     payload := map[string]any{
@@ -187,18 +227,21 @@ func main() {
     // Send registration ONCE, then wait on the same response stream until approved/denied
     var producerID string
     nonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
+    log.Printf("registration_signing stream=%s nonce=%s payload_len=%d", regStream, nonce, len(payloadStr))
     sigB64, e := signPayloadNonce(signer, payloadStr, nonce); if e != nil { log.Fatalf("sign_error: %v", e) }
     if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: regStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
-        log.Printf("register_sent id=%s", id)
+        log.Printf("register_sent id=%s stream=%s fp=%s", id, regStream, fp)
     } else { log.Fatalf("register_send_error: %v", e) }
     respStream := cfg.Redis.KeyPrefix + "register:resp:" + nonce
+    log.Printf("registration_waiting resp_stream=%s", respStream)
     for producerID == "" {
         if msg, _, e := readResponseOnce(ctx, rdb, respStream, "", 60*time.Second); e == nil {
+            log.Printf("registration_response id=%s values=%v", msg.ID, msg.Values)
             if pid, ok := msg.Values["producer_id"].(string); ok { producerID = pid }
             if status, ok := msg.Values["status"].(string); ok {
                 switch status {
                 case "approved":
-                    log.Printf("registration_approved producer_id=%s", producerID)
+                    log.Printf("registration_approved producer_id=%s fp=%s", producerID, fp)
                 case "pending":
                     // keep waiting for admin approval notification pushed by kernel
                     if producerID != "" { log.Printf("registration_pending producer_id=%s", producerID) } else { log.Printf("registration_pending") }
@@ -216,30 +259,53 @@ func main() {
             if e == context.Canceled { return }
         }
     }
-    log.Printf("registered producer_id=%s", producerID)
+    log.Printf("registered producer_id=%s fp=%s", producerID, fp)
 
     // token exchange: request short-lived token using pubkey path
     exchPayload := canonicalJSON(map[string]any{"purpose":"exchange"})
     nonceEx, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
     sigEx, e := signPayloadNonce(signer, exchPayload, nonceEx); if e != nil { log.Fatalf("sign_error: %v", e) }
-    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"token:exchange", Values: map[string]any{"pubkey": pubForRegistration, "payload": exchPayload, "nonce": nonceEx, "sig": sigEx}}).Result()
+    exchStream := cfg.Redis.KeyPrefix+"token:exchange"
+    if xid, xe := rdb.XAdd(ctx, &redis.XAddArgs{Stream: exchStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": exchPayload, "nonce": nonceEx, "sig": sigEx}}).Result(); xe == nil {
+        log.Printf("token_exchange_sent id=%s stream=%s nonce=%s fp=%s", xid, exchStream, nonceEx, fp)
+    } else {
+        log.Fatalf("token_exchange_send_error: %v", xe)
+    }
     // wait on per-producer token response - read from new messages only
     var lastTokenID string
-    tokMsg, lastTokenID, e := readResponseOnce(ctx, rdb, cfg.Redis.KeyPrefix+"token:resp:"+producerID, lastTokenID, 15*time.Second)
+    tokenRespStream := cfg.Redis.KeyPrefix+"token:resp:"+producerID
+    log.Printf("token_exchange_waiting resp_stream=%s", tokenRespStream)
+    tokMsg, lastTokenID, e := readResponseOnce(ctx, rdb, tokenRespStream, lastTokenID, 15*time.Second)
     if e != nil { log.Fatalf("token_exchange_timeout: %v", e) }
+    log.Printf("token_exchange_response id=%s values=%v", tokMsg.ID, tokMsg.Values)
     token, _ := tokMsg.Values["token"].(string)
     if token == "" { log.Fatalf("token_exchange_empty") }
-    log.Printf("token_received for producer_id=%s", producerID)
+    if h, c, pe := parseTokenUnsafe(token); pe == nil {
+        exp := time.Unix(c.Exp, 0).UTC().Format(time.RFC3339Nano)
+        log.Printf("token_received producer_id=%s jti=%s kid=%s exp=%s fp=%s preview=%s", producerID, c.Jti, h.Kid, exp, c.Fp, tokenPreview(token))
+    } else {
+        log.Printf("token_received producer_id=%s token_len=%d preview=%s", producerID, len(token), tokenPreview(token))
+    }
 
     // subject registration: ensure subject and optionally set schema
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
     subjReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
     subjB, _ := json.Marshal(subjReq)
-    _, _ = rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"subject:register", Values: map[string]any{"payload": string(subjB), "token": token}}).Result()
+    subjStream := cfg.Redis.KeyPrefix+"subject:register"
+    if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"payload": string(subjB), "token": token}}).Result(); se == nil {
+        jti := ""
+        if _, c, pe := parseTokenUnsafe(token); pe == nil { jti = c.Jti }
+        log.Printf("subject_register_sent id=%s stream=%s subject_key=%s jti=%s", sid, subjStream, subjectKey, jti)
+    } else {
+        log.Fatalf("subject_register_send_error: %v", se)
+    }
     var lastSubjectID string
-    subjMsg, lastSubjectID, e := readResponseOnce(ctx, rdb, cfg.Redis.KeyPrefix+"subject:resp:"+producerID, lastSubjectID, 15*time.Second)
+    subjRespStream := cfg.Redis.KeyPrefix+"subject:resp:"+producerID
+    log.Printf("subject_register_waiting resp_stream=%s", subjRespStream)
+    subjMsg, lastSubjectID, e := readResponseOnce(ctx, rdb, subjRespStream, lastSubjectID, 15*time.Second)
     if e != nil { log.Fatalf("subject_resp_timeout: %v", e) }
+    log.Printf("subject_register_response id=%s values=%v", subjMsg.ID, subjMsg.Values)
     var subjectID string
     if v, ok := subjMsg.Values["subject_id"].(string); ok { subjectID = v }
     if subjectID == "" { log.Fatalf("subject_id_empty") }
