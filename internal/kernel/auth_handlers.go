@@ -11,6 +11,7 @@ import (
 
     "github.com/example/data-kernel/internal/logging"
     ssh "golang.org/x/crypto/ssh"
+    "github.com/redis/go-redis/v9"
 )
 
 type reviewRequest struct {
@@ -195,6 +196,42 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
         logging.Warn("admin_review_invalid_action", logging.F("action", req.Action), logging.F("admin_principal", adminPrincipal))
         w.WriteHeader(http.StatusBadRequest)
         return
+    }
+    
+    // After successful action, notify producer if this is an approval
+    if req.Action == "approve" && req.Fingerprint != "" && k.rd != nil && k.rd.C() != nil && k.cfg != nil {
+        // Retrieve the nonce from the most recent registration attempt for this fingerprint
+        var nonce string
+        if k.pg != nil && k.pg.Pool() != nil {
+            conn, err := k.pg.Pool().Acquire(r.Context())
+            if err == nil {
+                defer conn.Release()
+                // Get the most recent nonce for this fingerprint
+                err = conn.QueryRow(r.Context(),
+                    `SELECT nonce FROM public.producer_registrations WHERE fingerprint=$1 ORDER BY ts DESC LIMIT 1`,
+                    req.Fingerprint).Scan(&nonce)
+                if err == nil && nonce != "" {
+                    // Send approval notification back to producer
+                    respStream := prefixed(k.cfg.Redis.KeyPrefix, "register:resp:"+nonce)
+                    ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
+                    if ttl <= 0 {
+                        ttl = 5 * time.Minute
+                    }
+                    k.rd.C().XAdd(r.Context(), &redis.XAddArgs{
+                        Stream: respStream,
+                        MaxLen: k.cfg.Redis.MaxLenApprox,
+                        Approx: true,
+                        Values: map[string]any{
+                            "fingerprint": req.Fingerprint,
+                            "producer_id": req.ProducerID,
+                            "status": "approved",
+                        },
+                    })
+                    k.rd.C().Expire(r.Context(), respStream, ttl)
+                    logging.Info("admin_approval_notified_producer", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("nonce", nonce))
+                }
+            }
+        }
     }
     
     _ = json.NewEncoder(w).Encode(result)
