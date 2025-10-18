@@ -30,27 +30,38 @@ type approveRequest struct {
     Notes       string `json:"notes"`
 }
 
-// GET /auth returns pending registrations (fingerprint + ts)
+// GET /auth returns pending registrations (fingerprint + ts + producer_id + name)
 func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
     // log admin access
     logging.Info("admin_pending_list")
-	type row struct{ Fingerprint string `json:"fingerprint"`; TS time.Time `json:"ts"` }
-	rows := []row{}
-	// minimal query to list fingerprints with latest ts pending
-	q := `SELECT pr.fingerprint, MAX(pr.ts) AS ts FROM public.producer_registrations pr WHERE pr.status='pending' GROUP BY pr.fingerprint ORDER BY ts DESC LIMIT 100`
+    type row struct{ Fingerprint string `json:"fingerprint"`; TS time.Time `json:"ts"`; ProducerID *string `json:"producer_id"`; Name *string `json:"name"` }
+    rows := []row{}
+    // include producer_id and name by joining keys and producers
+    q := `
+SELECT pr.fingerprint,
+       MAX(pr.ts) AS ts,
+       pk.producer_id,
+       p.name
+FROM public.producer_registrations pr
+JOIN public.producer_keys pk ON pk.fingerprint = pr.fingerprint
+LEFT JOIN public.producers p ON p.producer_id = pk.producer_id
+WHERE pr.status = 'pending'
+GROUP BY pr.fingerprint, pk.producer_id, p.name
+ORDER BY ts DESC
+LIMIT 100`
 	cctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if k.pg.Pool() != nil {
 		conn, err := k.pg.Pool().Acquire(cctx)
 		if err == nil {
 			defer conn.Release()
-			rowscan, err := conn.Query(cctx, q)
+            rowscan, err := conn.Query(cctx, q)
 			if err == nil {
 				for rowscan.Next() {
-					var f string; var ts time.Time
-					_ = rowscan.Scan(&f, &ts)
-					rows = append(rows, row{Fingerprint: f, TS: ts})
+                    var f string; var ts time.Time; var pid *string; var name *string
+                    _ = rowscan.Scan(&f, &ts, &pid, &name)
+                    rows = append(rows, row{Fingerprint: f, TS: ts, ProducerID: pid, Name: name})
 				}
 			}
 		}
