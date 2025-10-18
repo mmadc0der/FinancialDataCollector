@@ -74,8 +74,8 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
         if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
     }
     // 0004 (auth)
-    if b, err := os.ReadFile("migrations/0004_auth.sql"); err == nil {
-        logging.Info("pg_apply_migration", logging.F("file", "0004_auth.sql"))
+    if b, err := os.ReadFile("migrations/0004_auth_and_subjects.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0004_auth_and_subjects.sql"))
         cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
         defer cancel()
         if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }

@@ -116,7 +116,9 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
         sigRaw = sshSig.Blob
     }
     tok := signing + "." + b64url(sigRaw)
-    _ = authDbInsertToken(v.pg, ctx, producerID, jti, exp, notes)
+    if err := authDbInsertToken(v.pg, ctx, producerID, jti, exp, notes); err != nil {
+        logging.Error("auth_token_db_insert_error", logging.F("jti", jti), logging.F("producer_id", producerID), logging.Err(err))
+    }
     // cache JTI in Redis for fast validation
     if ttl := time.Until(exp); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+jti, producerID+"|"+fp, ttl) }
     logging.Info("auth_token_issued", logging.F("producer_id", producerID), logging.F("jti", jti), logging.F("fp", fp))
