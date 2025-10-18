@@ -302,10 +302,13 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 }
                 // Ensure schema and subject atomically; set current schema and cache
                 schemaID, sid, err := k.pg.EnsureSchemaSubject(ctx, req.SchemaName, req.SchemaVer, []byte(coalesceJSON(req.SchemaBody)), req.SubjectKey, []byte(coalesceJSON(req.Attrs)))
-                if err == nil {
-                    _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
-                    _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
+                if err != nil || schemaID == "" || sid == "" {
+                    logging.Warn("subject_register_ensure_error", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey), logging.Err(err))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
                 }
+                _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
+                _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {
