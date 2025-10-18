@@ -297,6 +297,8 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     continue 
                 }
                 sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
+                var resolvedSchemaID string
+                var schemaAction string
                 if err == nil {
                     // If full schema info provided, ensure schema exists and set as current
                     if req.SchemaName != "" && req.SchemaVer > 0 {
@@ -305,10 +307,14 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         if sErr == nil && schemaID != "" {
                             _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
                             _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
+                            resolvedSchemaID = schemaID
+                            schemaAction = "ensured"
                         }
                     } else if req.SchemaID != "" { 
                         _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID)
                         _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour)
+                        resolvedSchemaID = req.SchemaID
+                        schemaAction = "set_by_id"
                     }
                 }
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
@@ -320,7 +326,16 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
                     if ttl <= 0 { ttl = 5 * time.Minute }
                     _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
-                    logging.Info("subject_register_success", logging.F("producer_id", producerID), logging.F("subject_id", sid))
+                    logging.Info("subject_register_success",
+                        logging.F("producer_id", producerID),
+                        logging.F("subject_id", sid),
+                        logging.F("subject_key", req.SubjectKey),
+                        logging.F("attrs", coalesceJSON(req.Attrs)),
+                        logging.F("schema_id", resolvedSchemaID),
+                        logging.F("schema_name", req.SchemaName),
+                        logging.F("schema_version", req.SchemaVer),
+                        logging.F("schema_action", schemaAction),
+                    )
                 } else if verifyErr != nil {
                     tokenPreview := token
                     if len(token) > 20 {
