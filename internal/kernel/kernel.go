@@ -324,7 +324,11 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                     // replay protection
                     if k.rd != nil && k.rd.C() != nil {
-                        if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result(); !ok {
+                        ok, err := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result()
+                        if err != nil {
+                            logging.Warn("subject_register_nonce_guard_error", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce), logging.Err(err))
+                            // allow on error (do not treat as replay)
+                        } else if !ok {
                             logging.Warn("subject_register_replay", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
                             // best-effort send error response if producer is known
                             if status, pidPtr, _ := k.pg.GetKeyStatus(ctx, fp); pidPtr != nil && *pidPtr != "" {
@@ -582,8 +586,12 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
                 // replay protection
                 if k.rd != nil && k.rd.C() != nil {
-                    if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result(); !ok {
-                        logging.Warn("schema_upgrade_replay", logging.F("id", m.ID))
+                    ok, err := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result()
+                    if err != nil {
+                        logging.Warn("schema_upgrade_nonce_guard_error", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce), logging.Err(err))
+                        // allow on error
+                    } else if !ok {
+                        logging.Warn("schema_upgrade_replay", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
