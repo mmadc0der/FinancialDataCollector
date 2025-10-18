@@ -20,9 +20,6 @@ type Postgres struct {
 }
 
 func NewPostgres(cfg kernelcfg.PostgresConfig) (*Postgres, error) {
-    if !cfg.Enabled {
-        return &Postgres{cfg: cfg}, nil
-    }
     pconf, err := pgxpool.ParseConfig(cfg.DSN)
     if err != nil {
         return nil, err

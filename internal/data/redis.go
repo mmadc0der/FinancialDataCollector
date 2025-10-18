@@ -18,9 +18,6 @@ type Redis struct {
 }
 
 func NewRedis(cfg kernelcfg.RedisConfig) (*Redis, error) {
-    if !cfg.Enabled {
-        return &Redis{cfg: cfg}, nil
-    }
     client := redis.NewClient(&redis.Options{
         Addr: cfg.Addr,
         Username: cfg.Username,
