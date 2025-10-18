@@ -1,17 +1,16 @@
 package spill
 
 import (
-    "encoding/json"
-    "errors"
-    "io/fs"
-    "os"
-    "path/filepath"
-    "strings"
-    "time"
+	"encoding/json"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/logging"
-    "github.com/example/data-kernel/internal/metrics"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/logging"
+	"github.com/example/data-kernel/internal/metrics"
 )
 
 // Writer persists batches to the local filesystem as a last-resort buffer.

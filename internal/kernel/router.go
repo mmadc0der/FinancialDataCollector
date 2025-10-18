@@ -1,20 +1,19 @@
 package kernel
 
 import (
-    "context"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "io"
-    "net"
-    "strings"
-    "time"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"strings"
+	"time"
 
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/kernelcfg"
-    "github.com/example/data-kernel/internal/spill"
-    "github.com/example/data-kernel/internal/logging"
-    "github.com/example/data-kernel/internal/metrics"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	"github.com/example/data-kernel/internal/logging"
+	"github.com/example/data-kernel/internal/metrics"
+	"github.com/example/data-kernel/internal/spill"
 )
 
 type router struct {
