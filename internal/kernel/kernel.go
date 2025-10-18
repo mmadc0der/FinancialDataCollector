@@ -252,6 +252,16 @@ func coalesceJSON(b json.RawMessage) string {
 
 // envelope adaptation removed
 
+// sendSubjectResponse sends a response message to per-producer subject response stream with TTL
+func (k *Kernel) sendSubjectResponse(ctx context.Context, producerID string, values map[string]any) {
+    if k == nil || k.rd == nil || k.rd.C() == nil || producerID == "" { return }
+    respStream := prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID)
+    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: values}).Err()
+    ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
+    if ttl <= 0 { ttl = 5 * time.Minute }
+    _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
+}
+
 // consumeSubjectRegister handles subject registration stream signed by SSH pubkey
 // Message fields: pubkey, payload (canonical JSON), nonce, sig
 // Payload supports ops: set_current (default) and upgrade_auto
@@ -272,6 +282,10 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 payloadStr, _ := m.Values["payload"].(string)
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
+                // Initial request log for visibility
+                fp0 := ""
+                if pubkey != "" { fp0 = sshFingerprint([]byte(pubkey)) }
+                logging.Info("subject_register_request", logging.F("id", m.ID), logging.F("fingerprint", fp0), logging.F("nonce", nonce), logging.F("payload_len", len(payloadStr)))
                 if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
                     logging.Warn("subject_register_missing_signature", logging.F("id", m.ID))
                     _ = k.rd.Ack(ctx, m.ID)
@@ -298,23 +312,45 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                             if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) { okSig = true }
                         }
                     }
-                    if !okSig { logging.Warn("subject_register_bad_signature", logging.F("id", m.ID)); _ = k.rd.Ack(ctx, m.ID); continue }
+                    if !okSig {
+                        logging.Warn("subject_register_bad_signature", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
+                        // best-effort send error response if producer is known
+                        if status, pidPtr, _ := k.pg.GetKeyStatus(ctx, fp); pidPtr != nil && *pidPtr != "" {
+                            _ = status // status not used for this error
+                            k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "invalid_sig", "reason": "signature_verification_failed"})
+                        }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
                     // replay protection
                     if k.rd != nil && k.rd.C() != nil {
                         if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result(); !ok {
-                            logging.Warn("subject_register_replay", logging.F("id", m.ID))
+                            logging.Warn("subject_register_replay", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
+                            // best-effort send error response if producer is known
+                            if status, pidPtr, _ := k.pg.GetKeyStatus(ctx, fp); pidPtr != nil && *pidPtr != "" {
+                                _ = status // status not used here
+                                k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "replay"})
+                            }
                             _ = k.rd.Ack(ctx, m.ID)
                             continue
                         }
                     }
                     status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
                     if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" {
-                        logging.Warn("subject_register_key_not_approved", logging.F("id", m.ID))
+                        logging.Warn("subject_register_key_not_approved", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("status", status))
+                        if pidPtr != nil && *pidPtr != "" {
+                            k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "key_not_approved", "status": status})
+                        }
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
                     producerID = *pidPtr
-                    if !k.checkRateLimit(ctx, producerID) { _ = k.rd.Ack(ctx, m.ID); continue }
+                    if !k.checkRateLimit(ctx, producerID) {
+                        // best-effort notify client
+                        k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "rate_limited"})
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
                 }
                 var req struct{
                     Op         string          `json:"op"`
@@ -327,6 +363,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
                     logging.Warn("subject_register_invalid_payload", logging.F("id", m.ID), logging.F("payload", payloadStr))
+                    if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload"}) }
                     _ = k.rd.Ack(ctx, m.ID)
                     continue 
                 }
@@ -342,6 +379,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     if req.SchemaID != "" {
                         if ok, _ := k.pg.SchemaExists(ctx, req.SchemaID); !ok {
                             logging.Warn("subject_register_schema_not_found", logging.F("id", m.ID), logging.F("schema_id", req.SchemaID))
+                            if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "schema_not_found", "schema_id": req.SchemaID}) }
                             _ = k.rd.Ack(ctx, m.ID)
                             continue
                         }
@@ -355,11 +393,13 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                             sid, err = k.pg.EnsureSubject(ctx, req.SubjectKey, []byte(coalesceJSON(req.Attrs)), true)
                         } else {
                             logging.Warn("subject_register_schema_version_not_found", logging.F("id", m.ID), logging.Err(e))
+                            if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "schema_version_not_found", "schema_name": req.SchemaName, "schema_version": req.SchemaVer}) }
                             _ = k.rd.Ack(ctx, m.ID)
                             continue
                         }
                     } else {
                         logging.Warn("subject_register_missing_schema", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "missing_schema", "subject_key": req.SubjectKey}) }
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
@@ -373,12 +413,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     resp := map[string]any{"subject_id": sid, "schema_id": schemaID}
                     if schemaName != "" { resp["schema_name"] = schemaName }
                     if schemaVersion > 0 { resp["schema_version"] = schemaVersion }
-                    respStream := prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID)
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: resp}).Err()
-                    // Set TTL on subject response stream to prevent accumulation
-                    ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
-                    if ttl <= 0 { ttl = 5 * time.Minute }
-                    _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
+                    k.sendSubjectResponse(ctx, producerID, resp)
                     logging.Info("subject_register_success",
                         logging.F("producer_id", producerID),
                         logging.F("subject_id", sid),
