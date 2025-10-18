@@ -332,7 +332,6 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 var schemaID string
                 var schemaName string
                 var schemaVersion int
-                var err error
                 switch strings.ToLower(strings.TrimSpace(req.Op)) {
                 case "upgrade_auto":
                     sid, schemaID, schemaVersion, err = k.pg.UpgradeSubjectSchemaAuto(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)), true)

@@ -182,6 +182,69 @@ func readResponseOnce(ctx context.Context, rdb *redis.Client, stream string, las
     return redis.XMessage{}, "", ctx.Err()
 }
 
+// sendSubjectOpSigned sends a signed subject operation and waits for a response.
+// It retries with a fresh nonce and signature on timeout to avoid nonce replays.
+func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Signer, pubForRegistration string, cfg Config, producerID string) (string, string, int, error) {
+    subjectKey := cfg.Producer.SubjectKey
+    if subjectKey == "" { subjectKey = "DEMO-1" }
+    // Choose op automatically: upgrade_auto if schema body provided with name; otherwise set_current
+    baseReq := map[string]any{"op": "set_current", "subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
+    if cfg.Producer.SchemaID != "" {
+        baseReq["schema_id"] = cfg.Producer.SchemaID
+    } else if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaVersion > 0 {
+        baseReq["schema_name"] = cfg.Producer.SchemaName
+        baseReq["schema_version"] = cfg.Producer.SchemaVersion
+    }
+    if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaBodyFile != "" {
+        if b, err := os.ReadFile(cfg.Producer.SchemaBodyFile); err == nil {
+            var js any
+            if json.Unmarshal(b, &js) == nil { baseReq["schema_body"] = js } else { baseReq["schema_body"] = string(b) }
+            baseReq["op"] = "upgrade_auto"
+        }
+    }
+
+    subjStream := cfg.Redis.KeyPrefix+"subject:register"
+    subjRespStream := cfg.Redis.KeyPrefix+"subject:resp:"+producerID
+    var lastRespID string
+
+    attempts := 3
+    backoff := 3 * time.Second
+    for i := 1; i <= attempts; i++ {
+        payload := canonicalJSON(baseReq)
+        nonce, e := randNonce(); if e != nil { return "", "", 0, e }
+        sig, e := signPayloadNonce(signer, payload, nonce); if e != nil { return "", "", 0, e }
+        if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payload, "nonce": nonce, "sig": sig}}).Result(); se == nil {
+            log.Printf("subject_register_sent attempt=%d id=%s stream=%s subject_key=%s op=%v", i, sid, subjStream, subjectKey, baseReq["op"]) 
+        } else {
+            return "", "", 0, se
+        }
+        // wait for response
+        msg, newID, e := readResponseOnce(ctx, rdb, subjRespStream, lastRespID, 15*time.Second)
+        if e == nil && len(msg.Values) > 0 {
+            lastRespID = newID
+            var subjectID string
+            var schemaID string
+            var version int
+            if v, ok := msg.Values["subject_id"].(string); ok { subjectID = v }
+            if v, ok := msg.Values["schema_id"].(string); ok { schemaID = v }
+            switch vv := msg.Values["schema_version"].(type) {
+            case int64:
+                version = int(vv)
+            case int:
+                version = vv
+            case string:
+                // best-effort parse; ignore error
+                if n, err := fmt.Sscanf(vv, "%d", &version); n == 1 && err == nil { /* parsed */ }
+            }
+            if subjectID != "" { return subjectID, schemaID, version, nil }
+        }
+        // timeout or no response: backoff then retry with fresh nonce/signature
+        time.Sleep(backoff)
+        if backoff < 10*time.Second { backoff *= 2 }
+    }
+    return "", "", 0, fmt.Errorf("subject op timeout after retries")
+}
+
 func main() {
     cfgPath := flag.String("config", "modules.d/producer-example/config.yaml", "path to config file")
     overrideInt := flag.Int("interval_ms", 0, "override send interval in ms")
@@ -291,51 +354,12 @@ func main() {
         log.Printf("token_received producer_id=%s token_len=%d preview=%s", producerID, len(token), tokenPreview(token))
     }
 
-    // subject registration: signed ops
-    subjectKey := cfg.Producer.SubjectKey
-    if subjectKey == "" { subjectKey = "DEMO-1" }
-    // Choose op automatically: if SchemaBodyFile provided with name => upgrade_auto; else set_current
-    op := "set_current"
-    subjReq := map[string]any{"op": op, "subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
-    if cfg.Producer.SchemaID != "" {
-        subjReq["schema_id"] = cfg.Producer.SchemaID
-    } else if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaVersion > 0 {
-        subjReq["schema_name"] = cfg.Producer.SchemaName
-        subjReq["schema_version"] = cfg.Producer.SchemaVersion
-    }
-    if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaBodyFile != "" {
-        if b, err := os.ReadFile(cfg.Producer.SchemaBodyFile); err == nil {
-            var js any
-            if json.Unmarshal(b, &js) == nil { subjReq["schema_body"] = js } else { subjReq["schema_body"] = string(b) }
-            subjReq["op"] = "upgrade_auto"
-        }
-    }
-    subjPayload := canonicalJSON(subjReq)
-    subjNonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
-    subjSig, e := signPayloadNonce(signer, subjPayload, subjNonce); if e != nil { log.Fatalf("sign_error: %v", e) }
-    subjStream := cfg.Redis.KeyPrefix+"subject:register"
-    if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": subjPayload, "nonce": subjNonce, "sig": subjSig}}).Result(); se == nil {
-        log.Printf("subject_register_sent id=%s stream=%s subject_key=%s op=%s", sid, subjStream, subjectKey, subjReq["op"])
-    } else {
-        log.Fatalf("subject_register_send_error: %v", se)
-    }
-    var lastSubjectID string
-    subjRespStream := cfg.Redis.KeyPrefix+"subject:resp:"+producerID
-    log.Printf("subject_register_waiting resp_stream=%s", subjRespStream)
-    subjMsg, lastSubjectID, e := readResponseOnce(ctx, rdb, subjRespStream, lastSubjectID, 15*time.Second)
-    if e != nil { log.Fatalf("subject_resp_timeout: %v", e) }
-    log.Printf("subject_register_response id=%s values=%v", subjMsg.ID, subjMsg.Values)
-    var subjectID string
-    var schemaIDFromResp string
-    var schemaVersionFromResp int64
-    if v, ok := subjMsg.Values["subject_id"].(string); ok { subjectID = v }
-    if v, ok := subjMsg.Values["schema_id"].(string); ok { schemaIDFromResp = v }
-    if v, ok := subjMsg.Values["schema_version"].(string); ok { if n, err := fmt.Sprint(v), (error)(nil); err == nil { _ = n } }
-    if v, ok := subjMsg.Values["schema_version"].(int64); ok { schemaVersionFromResp = v }
-    if subjectID == "" { log.Fatalf("subject_id_empty") }
+    // subject registration: signed ops with retry + fresh nonces
+    subjectID, schemaIDFromResp, version, e := sendSubjectOpSigned(ctx, rdb, signer, pubForRegistration, cfg, producerID)
+    if e != nil { log.Fatalf("subject_register_error: %v", e) }
     if schemaIDFromResp != "" { cfg.Producer.SchemaID = schemaIDFromResp }
-    if schemaVersionFromResp > 0 {
-        log.Printf("subject_provisioned subject_id=%s schema_id=%s version=%d", subjectID, cfg.Producer.SchemaID, schemaVersionFromResp)
+    if version > 0 {
+        log.Printf("subject_provisioned subject_id=%s schema_id=%s version=%d", subjectID, cfg.Producer.SchemaID, version)
     } else {
         log.Printf("subject_provisioned subject_id=%s schema_id=%s", subjectID, cfg.Producer.SchemaID)
     }
