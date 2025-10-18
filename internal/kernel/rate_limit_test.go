@@ -26,12 +26,10 @@ func TestRateLimit(t *testing.T) {
     // Create test kernel with rate limiting enabled
     cfg := &kernelcfg.Config{
         Auth: kernelcfg.AuthConfig{
-            Enabled: true,
             RegistrationRateLimitRPM: 2, // 2 requests per minute
             RegistrationRateLimitBurst: 1, // 1 burst
         },
         Redis: kernelcfg.RedisConfig{
-            Enabled: true,
             KeyPrefix: "test:",
         },
     }

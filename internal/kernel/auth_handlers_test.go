@@ -21,7 +21,7 @@ func (f *fakeAU) Issue(ctx any, producerID string, ttl time.Duration, notes, fp 
 func (f *fakeAU) Revoke(ctx any, jti, reason string) error { return nil }
 
 func TestHandleApprove_UnauthorizedWithoutAdmin(t *testing.T) {
-    k := &Kernel{cfg: &kernelcfg.Config{Auth: kernelcfg.AuthConfig{Enabled: true, AdminSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAAfake"}}}
+    k := &Kernel{cfg: &kernelcfg.Config{Auth: kernelcfg.AuthConfig{AdminSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAAfake"}}}
     body := map[string]any{"fingerprint":"fp","name":"n","schema_id":"00000000-0000-0000-0000-000000000000","ttl_seconds":60}
     b, _ := json.Marshal(body)
     r := httptest.NewRequest(http.MethodPost, "/admin/approve", bytes.NewReader(b))
@@ -33,7 +33,7 @@ func TestHandleApprove_UnauthorizedWithoutAdmin(t *testing.T) {
 }
 
 func TestHandleRevoke_BadRequest(t *testing.T) {
-	k := &Kernel{cfg: &kernelcfg.Config{Auth: kernelcfg.AuthConfig{Enabled: true}}}
+	k := &Kernel{cfg: &kernelcfg.Config{Auth: kernelcfg.AuthConfig{}}}
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/admin/revoke", bytes.NewReader([]byte("{}")))
 	k.handleRevokeToken(w, r)

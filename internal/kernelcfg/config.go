@@ -35,7 +35,7 @@ type PostgresConfig struct {
     QueueSize int `yaml:"queue_size"`
     BatchSize int `yaml:"batch_size"`
     BatchMaxWaitMs int `yaml:"batch_max_wait_ms"`
-    // Defaults used by router when deriving ids at ingest is not configured
+    // Defaults used by router when deriving ids at ingest
     DefaultProducerID string `yaml:"default_producer_id"`
     DefaultSchemaID   string `yaml:"default_schema_id"`
 }
@@ -57,6 +57,7 @@ type RedisConfig struct {
     DLQStream       string `yaml:"dlq_stream"`
     // Producer (publisher) feature flag
     PublishEnabled  bool   `yaml:"publish_enabled"`
+    // Note: test-only enable flags removed; rely on production config wiring
 }
 
 type LoggingConfig struct {
@@ -69,6 +70,8 @@ type AuthConfig struct {
     Issuer string `yaml:"issuer"`
     Audience string `yaml:"audience"`
     KeyID string `yaml:"key_id"`
+    // Whether to require token exchange for producer interactions
+    RequireToken bool `yaml:"require_token"`
     // Base64 (raw) Ed25519 keys; private optional (only needed to issue tokens)
     PublicKeys map[string]string `yaml:"public_keys"`
     PrivateKey string `yaml:"private_key"`

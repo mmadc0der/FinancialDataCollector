@@ -27,10 +27,10 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
-        Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerEnabled: true, PublishEnabled: false},
+        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
-        Auth: kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k"},
+        Auth: kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k"},
     }
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()

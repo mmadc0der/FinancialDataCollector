@@ -26,7 +26,7 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     defer rc.Terminate(context.Background())
 
     // Prepare DB: apply migrations and create default entities
-    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     pool := pg.Pool()
@@ -51,8 +51,8 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 100, DefaultProducerID: producerID},
-        Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerEnabled: true, PublishEnabled: false},
+        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 100, DefaultProducerID: producerID},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
     }
     cancel := itutil.StartKernel(t, cfg)

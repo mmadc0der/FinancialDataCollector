@@ -56,10 +56,10 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 50},
-        Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", ConsumerEnabled: true, Stream: "events"},
+        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 50},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
-        Auth: kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: privB64, PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}},
+        Auth: kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: privB64, PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}},
     }
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()

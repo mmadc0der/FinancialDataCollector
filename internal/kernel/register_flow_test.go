@@ -67,10 +67,10 @@ func TestRegisterAndDeregister_Flow(t *testing.T) {
 func minimalConfig(dsn, addr string) kernelcfg.Config {
     return kernelcfg.Config{
         Server:   kernelcfg.ServerConfig{Listen: ":0"},
-        Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true, BatchSize: 50, BatchMaxWaitMs: 50},
-        Redis:    kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", ConsumerEnabled: true, Stream: "events"},
+        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 50, BatchMaxWaitMs: 50},
+        Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
         Logging:  kernelcfg.LoggingConfig{Level: "error"},
-        Auth:     kernelcfg.AuthConfig{Enabled: false},
+        Auth:     kernelcfg.AuthConfig{ /* no auth toggles here */ },
     }
 }
 func fmtInt(n int) string { return strconv.Itoa(n) }

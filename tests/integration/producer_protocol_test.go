@@ -33,7 +33,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     defer rc.Terminate(context.Background())
 
     // Prepare DB & approve key fingerprint and create schema
-    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     pool := pg.Pool()
@@ -59,10 +59,10 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: false, BatchSize: 50, BatchMaxWaitMs: 50},
-        Redis: kernelcfg.RedisConfig{Enabled: true, Addr: addr, KeyPrefix: "fdc:", ConsumerEnabled: true, Stream: "events"},
+        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 50, BatchMaxWaitMs: 50},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: true},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
-        Auth: kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: privB64, PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}},
+        Auth: kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: privB64, PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}},
     }
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
@@ -103,7 +103,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     })
     if tok == "" { t.Fatalf("empty token") }
     // verify token signature/claims
-    ver, err := auth.NewVerifier(kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "it", Audience: "it", PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}}, pg, nil)
+    ver, err := auth.NewVerifier(kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}}, pg, nil)
     if err != nil { t.Fatalf("verifier: %v", err) }
     sub, _, _, err := ver.Verify(context.Background(), tok)
     if err != nil || sub != producerID { t.Fatalf("verify token failed: %v sub=%s want=%s", err, sub, producerID) }
