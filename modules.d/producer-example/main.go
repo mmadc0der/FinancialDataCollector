@@ -19,6 +19,7 @@ import (
     ssh "golang.org/x/crypto/ssh"
     "golang.org/x/crypto/sha3"
     "github.com/redis/go-redis/v9"
+    "github.com/google/uuid"
     "gopkg.in/yaml.v3"
 )
 
@@ -393,7 +394,9 @@ func main() {
         select {
         case t := <-ticker.C:
             // lean event payload
-            ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
+            // UUIDv7 event id for time-ordered ingestion
+            eid, _ := uuid.NewV7()
+            ev := map[string]any{"event_id": eid.String(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
             evB, _ := json.Marshal(ev)
             id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"events", Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
             if err != nil { 
