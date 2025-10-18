@@ -392,7 +392,7 @@ func main() {
     eventsSent := 0
     for {
         select {
-        case t := <-ticker.C:
+        case <-ticker.C:
             // lean event payload
             // UUIDv7 event id for time-ordered ingestion
             eid, _ := uuid.NewV7()
