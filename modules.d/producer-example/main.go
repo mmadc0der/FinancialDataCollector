@@ -78,6 +78,9 @@ type Config struct {
         SubjectKey        string `yaml:"subject_key"`
         ProducerID        string `yaml:"producer_id"` // optional for key rotation
         SchemaID          string `yaml:"schema_id"`
+        SchemaName        string `yaml:"schema_name"`
+        SchemaVersion     int    `yaml:"schema_version"`
+        SchemaBodyFile    string `yaml:"schema_body_file"`
     } `yaml:"producer"`
 }
 
@@ -292,7 +295,16 @@ func main() {
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
     subjReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
-    if cfg.Producer.SchemaID != "" { subjReq["schema_id"] = cfg.Producer.SchemaID }
+    if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaVersion > 0 {
+        subjReq["schema_name"] = cfg.Producer.SchemaName
+        subjReq["schema_version"] = cfg.Producer.SchemaVersion
+        if cfg.Producer.SchemaBodyFile != "" {
+            if b, err := os.ReadFile(cfg.Producer.SchemaBodyFile); err == nil {
+                var js any
+                if json.Unmarshal(b, &js) == nil { subjReq["schema_body"] = js } else { subjReq["schema_body"] = string(b) }
+            }
+        }
+    } else if cfg.Producer.SchemaID != "" { subjReq["schema_id"] = cfg.Producer.SchemaID }
     subjB, _ := json.Marshal(subjReq)
     subjStream := cfg.Redis.KeyPrefix+"subject:register"
     if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"payload": string(subjB), "token": token}}).Result(); se == nil {
@@ -309,9 +321,12 @@ func main() {
     if e != nil { log.Fatalf("subject_resp_timeout: %v", e) }
     log.Printf("subject_register_response id=%s values=%v", subjMsg.ID, subjMsg.Values)
     var subjectID string
+    var schemaIDFromResp string
     if v, ok := subjMsg.Values["subject_id"].(string); ok { subjectID = v }
+    if v, ok := subjMsg.Values["schema_id"].(string); ok { schemaIDFromResp = v }
     if subjectID == "" { log.Fatalf("subject_id_empty") }
-    log.Printf("subject_provisioned subject_id=%s", subjectID)
+    if schemaIDFromResp != "" { cfg.Producer.SchemaID = schemaIDFromResp }
+    log.Printf("subject_provisioned subject_id=%s schema_id=%s", subjectID, cfg.Producer.SchemaID)
 
     // periodically send demo events with token
     interval := time.Duration(cfg.Producer.SendIntervalMs) * time.Millisecond
@@ -323,7 +338,7 @@ func main() {
         select {
         case t := <-ticker.C:
             // lean event payload
-            ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "schema_id": cfg.Producer.SchemaID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
+            ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
             evB, _ := json.Marshal(ev)
             id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"events", Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
             if err != nil { 

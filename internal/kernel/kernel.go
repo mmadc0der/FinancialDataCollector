@@ -185,7 +185,6 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     EventID   string          `json:"event_id"`
                     TS        string          `json:"ts"`
                     SubjectID string          `json:"subject_id"`
-                    SchemaID  string          `json:"schema_id"`
                     Payload   json.RawMessage `json:"payload"`
                     Tags      json.RawMessage `json:"tags"`
                 }
@@ -193,13 +192,6 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_event_json")
                     logging.Warn("redis_dlq_bad_event_json", logging.F("id", id))
                     metrics.RedisDLQTotal.Add(1)
-                    _ = k.rd.Ack(ctx, m.ID)
-                    metrics.RedisAckTotal.Add(1)
-                    continue
-                }
-                if ev.SchemaID == "" {
-                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "missing_event_schema_id")
-                    logging.Warn("redis_missing_event_schema_id", logging.F("id", id))
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
                     continue
@@ -233,13 +225,6 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if schemaID == "" {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "missing_subject_schema")
                     logging.Warn("redis_missing_subject_schema", logging.F("id", id))
-                    _ = k.rd.Ack(ctx, m.ID)
-                    metrics.RedisAckTotal.Add(1)
-                    continue
-                }
-                if !strings.EqualFold(schemaID, ev.SchemaID) {
-                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "schema_mismatch")
-                    logging.Warn("redis_schema_mismatch", logging.F("id", id))
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
                     continue
@@ -300,7 +285,9 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 payloadStr, _ := m.Values["payload"].(string)
                 var req struct{
                     SubjectKey string          `json:"subject_key"`
-                    SchemaID   string          `json:"schema_id"`
+                    SchemaName string          `json:"schema_name"`
+                    SchemaVer  int             `json:"schema_version"`
+                    SchemaBody json.RawMessage `json:"schema_body"`
                     Attrs      json.RawMessage `json:"attrs"`
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
@@ -308,21 +295,22 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     _ = k.rd.Ack(ctx, m.ID)
                     continue 
                 }
-                if req.SchemaID == "" { 
-                    logging.Warn("subject_register_missing_schema_id", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey))
+                if req.SchemaName == "" || req.SchemaVer <= 0 { 
+                    logging.Warn("subject_register_missing_schema", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey))
                     _ = k.rd.Ack(ctx, m.ID)
                     continue
                 }
-                sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
-                if err == nil { 
-                    _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID)
-                    _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour)
+                // Ensure schema and subject atomically; set current schema and cache
+                schemaID, sid, err := k.pg.EnsureSchemaSubject(ctx, req.SchemaName, req.SchemaVer, []byte(coalesceJSON(req.SchemaBody)), req.SubjectKey, []byte(coalesceJSON(req.Attrs)))
+                if err == nil {
+                    _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
+                    _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
                 }
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {
                     respStream := prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID)
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid}}).Err()
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid, "schema_id": schemaID}}).Err()
                     // Set TTL on subject response stream to prevent accumulation
                     ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
                     if ttl <= 0 { ttl = 5 * time.Minute }
@@ -332,7 +320,9 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         logging.F("subject_id", sid),
                         logging.F("subject_key", req.SubjectKey),
                         logging.F("attrs", coalesceJSON(req.Attrs)),
-                        logging.F("schema_id", req.SchemaID),
+                        logging.F("schema_id", schemaID),
+                        logging.F("schema_name", req.SchemaName),
+                        logging.F("schema_version", req.SchemaVer),
                     )
                 } else if verifyErr != nil {
                     tokenPreview := token
