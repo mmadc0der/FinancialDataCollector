@@ -80,7 +80,7 @@ type Config struct {
         SchemaID          string `yaml:"schema_id"`
         SchemaName        string `yaml:"schema_name"`
         SchemaVersion     int    `yaml:"schema_version"`
-        SchemaBodyFile    string `yaml:"schema_body_file"`
+        SchemaBody        string `yaml:"schema_body"`
     } `yaml:"producer"`
 }
 
@@ -195,10 +195,11 @@ func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Sign
         baseReq["schema_name"] = cfg.Producer.SchemaName
         baseReq["schema_version"] = cfg.Producer.SchemaVersion
     }
-    if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaBodyFile != "" {
-        if b, err := os.ReadFile(cfg.Producer.SchemaBodyFile); err == nil {
+    if cfg.Producer.SchemaName != "" {
+        // Prefer inline schema_body if provided
+        if s := strings.TrimSpace(cfg.Producer.SchemaBody); s != "" {
             var js any
-            if json.Unmarshal(b, &js) == nil { baseReq["schema_body"] = js } else { baseReq["schema_body"] = string(b) }
+            if json.Unmarshal([]byte(s), &js) == nil { baseReq["schema_body"] = js } else { baseReq["schema_body"] = s }
             baseReq["op"] = "upgrade_auto"
         }
     }
@@ -354,7 +355,7 @@ func main() {
         log.Printf("token_received producer_id=%s token_len=%d preview=%s", producerID, len(token), tokenPreview(token))
     }
 
-    // subject registration: signed ops with retry + fresh nonces
+    // subject set_current: signed op on subject:register
     subjectID, schemaIDFromResp, version, e := sendSubjectOpSigned(ctx, rdb, signer, pubForRegistration, cfg, producerID)
     if e != nil { log.Fatalf("subject_register_error: %v", e) }
     if schemaIDFromResp != "" { cfg.Producer.SchemaID = schemaIDFromResp }
@@ -362,6 +363,24 @@ func main() {
         log.Printf("subject_provisioned subject_id=%s schema_id=%s version=%d", subjectID, cfg.Producer.SchemaID, version)
     } else {
         log.Printf("subject_provisioned subject_id=%s schema_id=%s", subjectID, cfg.Producer.SchemaID)
+    }
+
+    // dedicated schema upgrade: send only if schema_name and schema_body provided
+    if strings.TrimSpace(cfg.Producer.SchemaName) != "" && strings.TrimSpace(cfg.Producer.SchemaBody) != "" {
+        upReq := map[string]any{
+            "subject_key": cfg.Producer.SubjectKey,
+            "schema_name": cfg.Producer.SchemaName,
+            "schema_body": json.RawMessage(cfg.Producer.SchemaBody),
+        }
+        upPayload := canonicalJSON(upReq)
+        upNonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
+        upSig, e := signPayloadNonce(signer, upPayload, upNonce); if e != nil { log.Fatalf("sign_error: %v", e) }
+        upStream := cfg.Redis.KeyPrefix+"schema:upgrade"
+        if uid, ue := rdb.XAdd(ctx, &redis.XAddArgs{Stream: upStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": upPayload, "nonce": upNonce, "sig": upSig}}).Result(); ue == nil {
+            log.Printf("schema_upgrade_sent id=%s stream=%s", uid, upStream)
+        } else {
+            log.Printf("schema_upgrade_send_error: %v", ue)
+        }
     }
 
     // periodically send demo events with token

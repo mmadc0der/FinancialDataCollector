@@ -94,6 +94,8 @@ func (k *Kernel) Start(ctx context.Context) error {
             go k.consumeSubjectRegister(ctx)
             // token exchange consumer (fixed stream)
             go k.consumeTokenExchange(ctx)
+            // schema upgrade consumer (dedicated stream)
+            go k.consumeSchemaUpgrade(ctx)
         } else {
             logging.Warn("redis_consumer_init_error", logging.Err(err))
         }
@@ -496,6 +498,91 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 } else {
                     logging.Info("token_exchange_issue_error", logging.F("fingerprint", fp), logging.Err(ierr))
                 }
+                _ = k.rd.Ack(ctx, m.ID)
+            }
+        }
+    }
+}
+
+// consumeSchemaUpgrade handles dedicated schema upgrade requests signed by producer key
+// Stream: prefix+"schema:upgrade"; fields: pubkey, payload, nonce, sig
+// Payload: { subject_key, schema_name, schema_body, attrs? }
+func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
+    if k.rd == nil || k.pg == nil { return }
+    stream := prefixed(k.cfg.Redis.KeyPrefix, "schema:upgrade")
+    if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+    }
+    consumer := fmt.Sprintf("%s-schup-%d", "kernel", time.Now().UnixNano())
+    for ctx.Err() == nil {
+        res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
+        if err != nil && !errors.Is(err, redis.Nil) { time.Sleep(200 * time.Millisecond); continue }
+        if len(res) == 0 { continue }
+        for _, s := range res {
+            for _, m := range s.Messages {
+                pubkey, _ := m.Values["pubkey"].(string)
+                payloadStr, _ := m.Values["payload"].(string)
+                nonce, _ := m.Values["nonce"].(string)
+                sigB64, _ := m.Values["sig"].(string)
+                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                // Verify signature and approved producer
+                fp := sshFingerprint([]byte(pubkey))
+                parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
+                if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
+                if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
+                    caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+                    if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
+                }
+                okSig := false
+                if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
+                    if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
+                        var tmp any
+                        if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
+                        sum := sha3.Sum512([]byte(payloadStr + "." + nonce))
+                        sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
+                        if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
+                        if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) { okSig = true }
+                    }
+                }
+                if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
+                // replay protection
+                if k.rd != nil && k.rd.C() != nil {
+                    if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result(); !ok {
+                        logging.Warn("schema_upgrade_replay", logging.F("id", m.ID))
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                }
+                status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
+                if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                producerID := *pidPtr
+                if !k.checkRateLimit(ctx, producerID) { _ = k.rd.Ack(ctx, m.ID); continue }
+
+                // Parse payload
+                var req struct{
+                    SubjectKey string          `json:"subject_key"`
+                    SchemaName string          `json:"schema_name"`
+                    SchemaBody json.RawMessage `json:"schema_body"`
+                    Attrs      json.RawMessage `json:"attrs"`
+                }
+                if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" || req.SchemaName == "" || len(req.SchemaBody) == 0 {
+                    logging.Warn("schema_upgrade_invalid_payload", logging.F("id", m.ID))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                // Perform atomic upgrade (auto-assign next version)
+                sid, schemaID, version, uerr := k.pg.UpgradeSubjectSchemaAuto(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)), true)
+                if uerr != nil { logging.Warn("schema_upgrade_error", logging.F("id", m.ID), logging.Err(uerr)); _ = k.rd.Ack(ctx, m.ID); continue }
+                _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
+                _ = k.pg.BindProducerSubject(ctx, producerID, sid)
+                // Respond via subject:resp:<producer_id>
+                resp := map[string]any{"subject_id": sid, "schema_id": schemaID, "schema_name": req.SchemaName, "schema_version": version}
+                respStream := prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID)
+                _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: resp}).Err()
+                ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
+                if ttl <= 0 { ttl = 5 * time.Minute }
+                _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
+                logging.Info("schema_upgrade_success", logging.F("producer_id", producerID), logging.F("subject_id", sid), logging.F("schema_id", schemaID), logging.F("schema_name", req.SchemaName), logging.F("schema_version", version))
                 _ = k.rd.Ack(ctx, m.ID)
             }
         }

@@ -16,4 +16,13 @@ producer:
   ssh_cert_file: "./modules.d/producer-example/ssh/id_ed25519-cert.pub"
   # Schema provisioning
   subject_key: "DEMO-1"
+  # One of the following schema references must be provided for set_current:
+  #   schema_id: "<uuid>"
+  #   schema_name: "<name>" and schema_version: <int>
+  # For upgrade_auto (atomic create+set_current), provide schema_name and schema_body
+  schema_id: ""
+  schema_name: ""
+  schema_version: 0
+  # schema_body can be provided inline as JSON string
+  schema_body: ""
 
