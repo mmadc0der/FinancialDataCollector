@@ -77,6 +77,7 @@ type Config struct {
         SSHCertFile       string `yaml:"ssh_cert_file"`
         SubjectKey        string `yaml:"subject_key"`
         ProducerID        string `yaml:"producer_id"` // optional for key rotation
+        SchemaID          string `yaml:"schema_id"`
     } `yaml:"producer"`
 }
 
@@ -291,6 +292,7 @@ func main() {
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
     subjReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
+    if cfg.Producer.SchemaID != "" { subjReq["schema_id"] = cfg.Producer.SchemaID }
     subjB, _ := json.Marshal(subjReq)
     subjStream := cfg.Redis.KeyPrefix+"subject:register"
     if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"payload": string(subjB), "token": token}}).Result(); se == nil {
@@ -321,7 +323,7 @@ func main() {
         select {
         case t := <-ticker.C:
             // lean event payload
-            ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
+            ev := map[string]any{"event_id": t.Format("20060102150405.000000000"), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "schema_id": cfg.Producer.SchemaID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
             evB, _ := json.Marshal(ev)
             id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"events", Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
             if err != nil { 

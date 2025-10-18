@@ -182,16 +182,24 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 _ = jti // reserved for future gating
                 // Parse lean event JSON from payload
                 var ev struct{
-                    EventID string `json:"event_id"`
-                    TS      string `json:"ts"`
-                    SubjectID string `json:"subject_id"`
-                    Payload json.RawMessage `json:"payload"`
-                    Tags    json.RawMessage `json:"tags"`
+                    EventID   string          `json:"event_id"`
+                    TS        string          `json:"ts"`
+                    SubjectID string          `json:"subject_id"`
+                    SchemaID  string          `json:"schema_id"`
+                    Payload   json.RawMessage `json:"payload"`
+                    Tags      json.RawMessage `json:"tags"`
                 }
                 if err := json.Unmarshal(payload, &ev); err != nil || ev.EventID == "" || ev.TS == "" || ev.SubjectID == "" || len(ev.Payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_event_json")
                     logging.Warn("redis_dlq_bad_event_json", logging.F("id", id))
                     metrics.RedisDLQTotal.Add(1)
+                    _ = k.rd.Ack(ctx, m.ID)
+                    metrics.RedisAckTotal.Add(1)
+                    continue
+                }
+                if ev.SchemaID == "" {
+                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "missing_event_schema_id")
+                    logging.Warn("redis_missing_event_schema_id", logging.F("id", id))
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
                     continue
@@ -225,6 +233,13 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if schemaID == "" {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "missing_subject_schema")
                     logging.Warn("redis_missing_subject_schema", logging.F("id", id))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    metrics.RedisAckTotal.Add(1)
+                    continue
+                }
+                if !strings.EqualFold(schemaID, ev.SchemaID) {
+                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "schema_mismatch")
+                    logging.Warn("redis_schema_mismatch", logging.F("id", id))
                     _ = k.rd.Ack(ctx, m.ID)
                     metrics.RedisAckTotal.Add(1)
                     continue
@@ -284,38 +299,24 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 }
                 payloadStr, _ := m.Values["payload"].(string)
                 var req struct{
-                    SubjectKey   string          `json:"subject_key"`
-                    SchemaID     string          `json:"schema_id"`
-                    SchemaName   string          `json:"schema_name"`
-                    SchemaVer    int             `json:"schema_version"`
-                    SchemaBody   json.RawMessage `json:"schema_body"`
-                    Attrs        json.RawMessage `json:"attrs"`
+                    SubjectKey string          `json:"subject_key"`
+                    SchemaID   string          `json:"schema_id"`
+                    Attrs      json.RawMessage `json:"attrs"`
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
                     logging.Warn("subject_register_invalid_payload", logging.F("id", m.ID), logging.F("payload", payloadStr))
                     _ = k.rd.Ack(ctx, m.ID)
                     continue 
                 }
+                if req.SchemaID == "" { 
+                    logging.Warn("subject_register_missing_schema_id", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
                 sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
-                var resolvedSchemaID string
-                var schemaAction string
-                if err == nil {
-                    // If full schema info provided, ensure schema exists and set as current
-                    if req.SchemaName != "" && req.SchemaVer > 0 {
-                        // Ensure schema via helper; empty body defaults are handled in SQL
-                        schemaID, _, sErr := k.pg.EnsureSchemaSubject(ctx, req.SchemaName, req.SchemaVer, []byte(coalesceJSON(req.SchemaBody)), req.SubjectKey, []byte(coalesceJSON(req.Attrs)))
-                        if sErr == nil && schemaID != "" {
-                            _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
-                            _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
-                            resolvedSchemaID = schemaID
-                            schemaAction = "ensured"
-                        }
-                    } else if req.SchemaID != "" { 
-                        _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID)
-                        _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour)
-                        resolvedSchemaID = req.SchemaID
-                        schemaAction = "set_by_id"
-                    }
+                if err == nil { 
+                    _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID)
+                    _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour)
                 }
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
@@ -331,10 +332,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         logging.F("subject_id", sid),
                         logging.F("subject_key", req.SubjectKey),
                         logging.F("attrs", coalesceJSON(req.Attrs)),
-                        logging.F("schema_id", resolvedSchemaID),
-                        logging.F("schema_name", req.SchemaName),
-                        logging.F("schema_version", req.SchemaVer),
-                        logging.F("schema_action", schemaAction),
+                        logging.F("schema_id", req.SchemaID),
                     )
                 } else if verifyErr != nil {
                     tokenPreview := token
