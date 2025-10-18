@@ -242,6 +242,12 @@ func prefixed(prefix, key string) string {
     return prefix + key
 }
 
+// coalesceJSON returns raw JSON string or empty object if nil/empty.
+func coalesceJSON(b json.RawMessage) string {
+    if len(b) == 0 || string(b) == "" { return "{}" }
+    return string(b)
+}
+
 // envelope adaptation removed
 
 // consumeSubjectRegister handles subject registration stream {token, payload:{subject_key, schema_id?, attrs?}}
@@ -277,14 +283,34 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                 }
                 payloadStr, _ := m.Values["payload"].(string)
-                var req struct{ SubjectKey string `json:"subject_key"`; SchemaID string `json:"schema_id"`; Attrs json.RawMessage `json:"attrs"` }
+                var req struct{
+                    SubjectKey   string          `json:"subject_key"`
+                    SchemaID     string          `json:"schema_id"`
+                    SchemaName   string          `json:"schema_name"`
+                    SchemaVer    int             `json:"schema_version"`
+                    SchemaBody   json.RawMessage `json:"schema_body"`
+                    Attrs        json.RawMessage `json:"attrs"`
+                }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
                     logging.Warn("subject_register_invalid_payload", logging.F("id", m.ID), logging.F("payload", payloadStr))
                     _ = k.rd.Ack(ctx, m.ID)
                     continue 
                 }
                 sid, err := k.pg.EnsureSubjectByKey(ctx, req.SubjectKey, req.Attrs)
-                if err == nil && req.SchemaID != "" { _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID); _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour) }
+                if err == nil {
+                    // If full schema info provided, ensure schema exists and set as current
+                    if req.SchemaName != "" && req.SchemaVer > 0 {
+                        // Ensure schema via helper; empty body defaults are handled in SQL
+                        schemaID, _, sErr := k.pg.EnsureSchemaSubject(ctx, req.SchemaName, req.SchemaVer, []byte(coalesceJSON(req.SchemaBody)), req.SubjectKey, []byte(coalesceJSON(req.Attrs)))
+                        if sErr == nil && schemaID != "" {
+                            _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
+                            _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
+                        }
+                    } else if req.SchemaID != "" { 
+                        _ = k.pg.SetCurrentSubjectSchema(ctx, sid, req.SchemaID)
+                        _ = k.rd.SchemaCacheSet(ctx, sid, req.SchemaID, time.Hour)
+                    }
+                }
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {

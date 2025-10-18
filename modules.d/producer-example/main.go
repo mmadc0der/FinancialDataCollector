@@ -337,13 +337,15 @@ func main() {
         case <-ctx.Done():
             log.Printf("producer_stop")
             // send deregister on shutdown
-            if nonce, e := randNonce(); e == nil {
-                if sig, e2 := signPayloadNonce(signer, canonicalJSON(map[string]any{"action":"deregister"}), nonce); e2 == nil {
-                    _, _ = rdb.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"register", Values: map[string]any{"action":"deregister", "pubkey": pubForRegistration, "payload": canonicalJSON(map[string]any{"reason":"shutdown"}), "nonce": nonce, "sig": sig}}).Result()
-                    // optionally wait brief confirm
-                    _, _, _ = readResponseOnce(context.Background(), rdb, cfg.Redis.KeyPrefix+"register:resp:"+nonce, "", 3*time.Second)
-                }
-            }
+			if nonce, e := randNonce(); e == nil {
+				// Sign the exact payload we send; kernel verifies signature over payload+nonce
+				deregPayload := canonicalJSON(map[string]any{"reason":"shutdown"})
+				if sig, e2 := signPayloadNonce(signer, deregPayload, nonce); e2 == nil {
+					_, _ = rdb.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"register", Values: map[string]any{"action":"deregister", "pubkey": pubForRegistration, "payload": deregPayload, "nonce": nonce, "sig": sig}}).Result()
+					// optionally wait brief confirm
+					_, _, _ = readResponseOnce(context.Background(), rdb, cfg.Redis.KeyPrefix+"register:resp:"+nonce, "", 3*time.Second)
+				}
+			}
             return
         }
     }
