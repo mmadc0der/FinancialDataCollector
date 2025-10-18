@@ -135,12 +135,12 @@ BEGIN
     INSERT INTO public.schemas(schema_id, name, version, body)
     VALUES (gen_random_uuid(), _name, _version, COALESCE(_body, '{}'::jsonb))
     ON CONFLICT (name, version) DO UPDATE SET body = EXCLUDED.body
-    RETURNING schema_id INTO v_schema_id;
+    RETURNING public.schemas.schema_id INTO v_schema_id;
     -- upsert subject by subject_key
     INSERT INTO public.subjects(subject_id, subject_key, attrs)
     VALUES (gen_random_uuid(), _subject_key, COALESCE(_attrs, '{}'::jsonb))
     ON CONFLICT (subject_key) DO UPDATE SET attrs = COALESCE(EXCLUDED.attrs, subjects.attrs), last_seen_at = now()
-    RETURNING subject_id INTO v_subject_id;
+    RETURNING public.subjects.subject_id INTO v_subject_id;
     schema_id := v_schema_id;
     subject_id := v_subject_id;
     RETURN;
