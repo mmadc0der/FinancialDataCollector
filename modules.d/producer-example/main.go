@@ -291,26 +291,31 @@ func main() {
         log.Printf("token_received producer_id=%s token_len=%d preview=%s", producerID, len(token), tokenPreview(token))
     }
 
-    // subject registration: ensure subject and optionally set schema
+    // subject registration: signed ops
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
-    subjReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
-    if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaVersion > 0 {
+    // Choose op automatically: if SchemaBodyFile provided with name => upgrade_auto; else set_current
+    op := "set_current"
+    subjReq := map[string]any{"op": op, "subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
+    if cfg.Producer.SchemaID != "" {
+        subjReq["schema_id"] = cfg.Producer.SchemaID
+    } else if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaVersion > 0 {
         subjReq["schema_name"] = cfg.Producer.SchemaName
         subjReq["schema_version"] = cfg.Producer.SchemaVersion
-        if cfg.Producer.SchemaBodyFile != "" {
-            if b, err := os.ReadFile(cfg.Producer.SchemaBodyFile); err == nil {
-                var js any
-                if json.Unmarshal(b, &js) == nil { subjReq["schema_body"] = js } else { subjReq["schema_body"] = string(b) }
-            }
+    }
+    if cfg.Producer.SchemaName != "" && cfg.Producer.SchemaBodyFile != "" {
+        if b, err := os.ReadFile(cfg.Producer.SchemaBodyFile); err == nil {
+            var js any
+            if json.Unmarshal(b, &js) == nil { subjReq["schema_body"] = js } else { subjReq["schema_body"] = string(b) }
+            subjReq["op"] = "upgrade_auto"
         }
-    } else if cfg.Producer.SchemaID != "" { subjReq["schema_id"] = cfg.Producer.SchemaID }
-    subjB, _ := json.Marshal(subjReq)
+    }
+    subjPayload := canonicalJSON(subjReq)
+    subjNonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
+    subjSig, e := signPayloadNonce(signer, subjPayload, subjNonce); if e != nil { log.Fatalf("sign_error: %v", e) }
     subjStream := cfg.Redis.KeyPrefix+"subject:register"
-    if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"payload": string(subjB), "token": token}}).Result(); se == nil {
-        jti := ""
-        if _, c, pe := parseTokenUnsafe(token); pe == nil { jti = c.Jti }
-        log.Printf("subject_register_sent id=%s stream=%s subject_key=%s jti=%s", sid, subjStream, subjectKey, jti)
+    if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": subjPayload, "nonce": subjNonce, "sig": subjSig}}).Result(); se == nil {
+        log.Printf("subject_register_sent id=%s stream=%s subject_key=%s op=%s", sid, subjStream, subjectKey, subjReq["op"])
     } else {
         log.Fatalf("subject_register_send_error: %v", se)
     }
@@ -322,11 +327,18 @@ func main() {
     log.Printf("subject_register_response id=%s values=%v", subjMsg.ID, subjMsg.Values)
     var subjectID string
     var schemaIDFromResp string
+    var schemaVersionFromResp int64
     if v, ok := subjMsg.Values["subject_id"].(string); ok { subjectID = v }
     if v, ok := subjMsg.Values["schema_id"].(string); ok { schemaIDFromResp = v }
+    if v, ok := subjMsg.Values["schema_version"].(string); ok { if n, err := fmt.Sprint(v), (error)(nil); err == nil { _ = n } }
+    if v, ok := subjMsg.Values["schema_version"].(int64); ok { schemaVersionFromResp = v }
     if subjectID == "" { log.Fatalf("subject_id_empty") }
     if schemaIDFromResp != "" { cfg.Producer.SchemaID = schemaIDFromResp }
-    log.Printf("subject_provisioned subject_id=%s schema_id=%s", subjectID, cfg.Producer.SchemaID)
+    if schemaVersionFromResp > 0 {
+        log.Printf("subject_provisioned subject_id=%s schema_id=%s version=%d", subjectID, cfg.Producer.SchemaID, schemaVersionFromResp)
+    } else {
+        log.Printf("subject_provisioned subject_id=%s schema_id=%s", subjectID, cfg.Producer.SchemaID)
+    }
 
     // periodically send demo events with token
     interval := time.Duration(cfg.Producer.SendIntervalMs) * time.Millisecond

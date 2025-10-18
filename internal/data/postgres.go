@@ -94,6 +94,13 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
         defer cancel()
         if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
     }
+    // 0007 (immutable schema helpers and atomic upgrade)
+    if b, err := os.ReadFile("migrations/0007_subject_schema_ops.sql"); err == nil {
+        logging.Info("pg_apply_migration", logging.F("file", "0007_subject_schema_ops.sql"))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        defer cancel()
+        if _, e := p.pool.Exec(cctx, string(b)); e != nil { return e }
+    }
     return nil
 }
 
@@ -144,6 +151,51 @@ func (p *Postgres) EnsureSchemaSubject(ctx context.Context, name string, version
     err := p.pool.QueryRow(cctx, `SELECT (t).schema_id, (t).subject_id FROM public.ensure_schema_subject($1,$2,$3::jsonb,$4,$5::jsonb) AS t`, name, version, string(body), subjectKey, string(attrs)).Scan(&schemaID, &subjectID)
     if err != nil { return "", "", err }
     return schemaID, subjectID, nil
+}
+
+// EnsureSchemaImmutable resolves schema by (name,version) with immutability check and optional creation.
+func (p *Postgres) EnsureSchemaImmutable(ctx context.Context, name string, version int, body []byte, createIfMissing bool) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    var schemaID string
+    err := p.pool.QueryRow(cctx, `SELECT public.ensure_schema_immutable($1,$2,$3::jsonb,$4)`, name, version, string(body), createIfMissing).Scan(&schemaID)
+    if err != nil { return "", err }
+    return schemaID, nil
+}
+
+// EnsureSubject ensures subject exists and updates attrs per merge policy.
+func (p *Postgres) EnsureSubject(ctx context.Context, subjectKey string, attrs []byte, merge bool) (string, error) {
+    if p.pool == nil { return "", nil }
+    cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+    defer cancel()
+    var sid string
+    err := p.pool.QueryRow(cctx, `SELECT public.ensure_subject($1,$2::jsonb,$3)`, subjectKey, string(attrs), merge).Scan(&sid)
+    if err != nil { return "", err }
+    return sid, nil
+}
+
+// UpgradeSubjectSchemaAuto atomically creates next version for schema name and sets current.
+func (p *Postgres) UpgradeSubjectSchemaAuto(ctx context.Context, subjectKey, name string, body []byte, attrs []byte, merge bool) (string, string, int, error) {
+    if p.pool == nil { return "", "", 0, nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    var sid, schID string
+    var ver int
+    err := p.pool.QueryRow(cctx, `SELECT (t).subject_id, (t).schema_id, (t).version FROM public.upgrade_subject_schema_auto($1,$2,$3::jsonb,$4::jsonb,$5) AS t`, subjectKey, name, string(body), string(attrs), merge).Scan(&sid, &schID, &ver)
+    if err != nil { return "", "", 0, err }
+    return sid, schID, ver, nil
+}
+
+// SchemaExists checks by schema_id.
+func (p *Postgres) SchemaExists(ctx context.Context, schemaID string) (bool, error) {
+    if p.pool == nil { return false, nil }
+    cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+    defer cancel()
+    var ok bool
+    err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.schemas WHERE schema_id=$1::uuid)`, schemaID).Scan(&ok)
+    if err != nil { return false, err }
+    return ok, nil
 }
 
 // GetCurrentSchemaID returns subjects.current_schema_id for a given subject_id, or empty if null/missing.

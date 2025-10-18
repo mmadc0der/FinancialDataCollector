@@ -143,7 +143,7 @@ BEGIN
     RETURNING public.subjects.subject_id INTO v_subject_id;
     schema_id := v_schema_id;
     subject_id := v_subject_id;
-    RETURN;
+    RETURN QUERY SELECT v_schema_id, v_subject_id;
 END;
 $$;
 

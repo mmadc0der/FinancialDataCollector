@@ -250,7 +250,9 @@ func coalesceJSON(b json.RawMessage) string {
 
 // envelope adaptation removed
 
-// consumeSubjectRegister handles subject registration stream {token, payload:{subject_key, schema_id?, attrs?}}
+// consumeSubjectRegister handles subject registration stream signed by SSH pubkey
+// Message fields: pubkey, payload (canonical JSON), nonce, sig
+// Payload supports ops: set_current (default) and upgrade_auto
 func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
     if k.rd == nil || k.pg == nil { return }
     stream := prefixed(k.cfg.Redis.KeyPrefix, "subject:register")
@@ -264,27 +266,58 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
         if len(res) == 0 { continue }
         for _, s := range res {
             for _, m := range s.Messages {
-                token, _ := m.Values["token"].(string)
-                var producerID string
-                var verifyErr error
-                if k.au != nil && k.cfg.Auth.RequireToken {
-                    if pid, _, _, err := k.au.Verify(ctx, token); err == nil {
-                        producerID = pid
-                        // Rate limiting check for subject registration
-                        if !k.checkRateLimit(ctx, producerID) {
-                            _ = k.rd.Ack(ctx, m.ID)
-                            continue // silent drop for rate limited requests
+                pubkey, _ := m.Values["pubkey"].(string)
+                payloadStr, _ := m.Values["payload"].(string)
+                nonce, _ := m.Values["nonce"].(string)
+                sigB64, _ := m.Values["sig"].(string)
+                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
+                    logging.Warn("subject_register_missing_signature", logging.F("id", m.ID))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                // Verify signature and CA; ensure key approved; get producer_id
+                producerID := ""
+                {
+                    fp := sshFingerprint([]byte(pubkey))
+                    parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
+                    if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
+                    if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
+                        caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+                        if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
+                    }
+                    okSig := false
+                    if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
+                        if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
+                            var tmp any
+                            if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
+                            sum := sha3.Sum512([]byte(payloadStr + "." + nonce))
+                            sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
+                            if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
+                            if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) { okSig = true }
                         }
-                    } else {
-                        verifyErr = err
-                        logging.Error("subject_register_token_verify_error", logging.F("id", m.ID), logging.Err(err))
+                    }
+                    if !okSig { logging.Warn("subject_register_bad_signature", logging.F("id", m.ID)); _ = k.rd.Ack(ctx, m.ID); continue }
+                    // replay protection
+                    if k.rd != nil && k.rd.C() != nil {
+                        if ok, _ := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result(); !ok {
+                            logging.Warn("subject_register_replay", logging.F("id", m.ID))
+                            _ = k.rd.Ack(ctx, m.ID)
+                            continue
+                        }
+                    }
+                    status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
+                    if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" {
+                        logging.Warn("subject_register_key_not_approved", logging.F("id", m.ID))
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
+                    producerID = *pidPtr
+                    if !k.checkRateLimit(ctx, producerID) { _ = k.rd.Ack(ctx, m.ID); continue }
                 }
-                payloadStr, _ := m.Values["payload"].(string)
                 var req struct{
+                    Op         string          `json:"op"`
                     SubjectKey string          `json:"subject_key"`
+                    SchemaID   string          `json:"schema_id"`
                     SchemaName string          `json:"schema_name"`
                     SchemaVer  int             `json:"schema_version"`
                     SchemaBody json.RawMessage `json:"schema_body"`
@@ -295,25 +328,52 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     _ = k.rd.Ack(ctx, m.ID)
                     continue 
                 }
-                if req.SchemaName == "" || req.SchemaVer <= 0 { 
-                    logging.Warn("subject_register_missing_schema", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey))
-                    _ = k.rd.Ack(ctx, m.ID)
-                    continue
+                var sid string
+                var schemaID string
+                var schemaName string
+                var schemaVersion int
+                var err error
+                switch strings.ToLower(strings.TrimSpace(req.Op)) {
+                case "upgrade_auto":
+                    sid, schemaID, schemaVersion, err = k.pg.UpgradeSubjectSchemaAuto(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)), true)
+                    schemaName = req.SchemaName
+                default: // set_current
+                    if req.SchemaID != "" {
+                        if ok, _ := k.pg.SchemaExists(ctx, req.SchemaID); !ok {
+                            logging.Warn("subject_register_schema_not_found", logging.F("id", m.ID), logging.F("schema_id", req.SchemaID))
+                            _ = k.rd.Ack(ctx, m.ID)
+                            continue
+                        }
+                        sid, err = k.pg.EnsureSubject(ctx, req.SubjectKey, []byte(coalesceJSON(req.Attrs)), true)
+                        schemaID = req.SchemaID
+                    } else if req.SchemaName != "" && req.SchemaVer > 0 {
+                        schemaName = req.SchemaName
+                        schemaVersion = req.SchemaVer
+                        if sID, e := k.pg.EnsureSchemaImmutable(ctx, req.SchemaName, req.SchemaVer, nil, false); e == nil {
+                            schemaID = sID
+                            sid, err = k.pg.EnsureSubject(ctx, req.SubjectKey, []byte(coalesceJSON(req.Attrs)), true)
+                        } else {
+                            logging.Warn("subject_register_schema_version_not_found", logging.F("id", m.ID), logging.Err(e))
+                            _ = k.rd.Ack(ctx, m.ID)
+                            continue
+                        }
+                    } else {
+                        logging.Warn("subject_register_missing_schema", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey))
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
                 }
-                // Ensure schema and subject atomically; set current schema and cache
-                schemaID, sid, err := k.pg.EnsureSchemaSubject(ctx, req.SchemaName, req.SchemaVer, []byte(coalesceJSON(req.SchemaBody)), req.SubjectKey, []byte(coalesceJSON(req.Attrs)))
-                if err != nil || schemaID == "" || sid == "" {
-                    logging.Warn("subject_register_ensure_error", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey), logging.Err(err))
-                    _ = k.rd.Ack(ctx, m.ID)
-                    continue
-                }
+                // Set current schema and cache
                 _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
                 _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {
+                    resp := map[string]any{"subject_id": sid, "schema_id": schemaID}
+                    if schemaName != "" { resp["schema_name"] = schemaName }
+                    if schemaVersion > 0 { resp["schema_version"] = schemaVersion }
                     respStream := prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID)
-                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: map[string]any{"subject_id": sid, "schema_id": schemaID}}).Err()
+                    _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, MaxLen: k.cfg.Redis.MaxLenApprox, Approx: true, Values: resp}).Err()
                     // Set TTL on subject response stream to prevent accumulation
                     ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
                     if ttl <= 0 { ttl = 5 * time.Minute }
@@ -324,17 +384,11 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         logging.F("subject_key", req.SubjectKey),
                         logging.F("attrs", coalesceJSON(req.Attrs)),
                         logging.F("schema_id", schemaID),
-                        logging.F("schema_name", req.SchemaName),
-                        logging.F("schema_version", req.SchemaVer),
+                        logging.F("schema_name", schemaName),
+                        logging.F("schema_version", schemaVersion),
                     )
-                } else if verifyErr != nil {
-                    tokenPreview := token
-                    if len(token) > 20 {
-                        tokenPreview = token[:20] + "..."
-                    }
-                    logging.Error("subject_register_no_producer", logging.F("id", m.ID), logging.F("token", tokenPreview), logging.Err(verifyErr))
                 } else {
-                    logging.Warn("subject_register_no_producer_no_token", logging.F("id", m.ID))
+                    logging.Warn("subject_register_no_producer", logging.F("id", m.ID))
                 }
                 _ = k.rd.Ack(ctx, m.ID)
             }
