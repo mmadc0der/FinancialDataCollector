@@ -2,8 +2,8 @@
 
 ### Transport
 - Data-plane: Redis Streams. Modules publish to `events` with XADD. Fields:
-  - `payload`: the event JSON (lean)
-  - `token`: producer auth token (required when auth is enabled)
+  - `payload`: the event JSON (lean, heavy payload should be exported to S3 and linked in payload)
+  - `token`: producer auth token (always required)
   The kernel consumes with XREADGROUP and acknowledges after durable write.
 
 ### Event JSON (payload)
@@ -41,25 +41,20 @@
 - Response: `fdc:register:resp:<nonce>` with `{ fingerprint, producer_id, status, reason? }` (per-request ephemeral).
 - **Rate Limiting**: Kernel-side enforcement (default 10 RPM), silent drop on limit exceeded.
 - **Anti-replay**: nonces cached with TTL; duplicate nonces rejected; DB uniqueness enforced.
-- **Admin Review**: Keys require manual approval via `/admin/review` endpoint before becoming `approved`.
+- **Admin Review**: Keys require manual approval via `POST /auth/review` before becoming `approved`.
 
 ### Token exchange
 - Stream: `fdc:token:exchange` (fixed) with fields `{ pubkey?, token?, payload, nonce, sig? }`.
-- If using `pubkey`: verify signature and require **approved** binding to `producer_id`.
+- If using `pubkey`: the signature must be made with an OpenSSH certificate signed by `producer_ssh_ca`, and the key must be **approved** and bound to `producer_id`.
 - If using `token`: verify claims and allow short-lived renewal.
 - **Key Status Validation**: Only keys with status=`approved` can exchange for tokens.
 - Response: `fdc:token:resp:<producer_id>` with `{ fingerprint, producer_id, token, exp }`.
 
-### Admin Endpoints
-- **`/auth/review`** (POST): Review and approve/deny producer registrations
-  - Request: `{ "action": "approve"|"deny", "producer_id": "uuid", "fingerprint": "string", "reason": "string" (required for deny), "notes": "string" (optional) }`
-  - Headers: `X-SSH-Cert` (admin certificate), `X-SSH-Principal` (admin principal)
-  - Response: `{ "producer_id": "uuid", "status": "approved"|"denied", "fingerprint": "string", "type": "new_producer"|"key_rotation" (for approve), "reason": "string" (for deny) }`
-  - Note: fingerprint is required to identify which key to approve/deny for the producer
-- **`/auth/pending`** (GET): List pending registrations
-  - Response: Array of `{ "fingerprint": "string", "ts": "RFC3339Nano" }`
-- **`/auth`** (GET): List all producer keys and their statuses
-  - Response: Array of `{ "fingerprint": "string", "status": "pending|approved|revoked|superseded", "producer_id": "uuid", "name": "string", "created_at": "RFC3339Nano" }`
+### Auth Endpoints
+- `GET /auth`: view pending registrations
+- `POST /auth/review`: approve/deny producer registrations
+- `POST /auth/revoke`: revoke issued tokens
+All admin requests must include `X-SSH-Cert` carrying an OpenSSH certificate signed by `admin_ssh_ca` and `X-SSH-Principal`.
 
 ### Deregistration
 - Stream: `fdc:register` with `{ action: "deregister", pubkey, payload, nonce, sig }`.

@@ -1,7 +1,7 @@
 ## Architecture
 
 ### Components
-- Kernel: core orchestrator. Responsibilities: Redis ingest (consumer group), routing to Postgres (primary), spill-to-disk fallback, optional Redis re-publish, backpressure, config, telemetry, optional auth for producers.
+- Kernel: core orchestrator. Responsibilities: Redis ingest (consumer group), routing to Postgres (primary), filesystem spill only on Postgres connectivity loss (auto-replay/erase), backpressure, config, telemetry, and strict auth for producers/admins.
 - Collector Module: external processes publish to Redis Streams; they are not supervised by the kernel.
 - Sinks: Postgres (primary), spill files only on PG outages. Redis Streams is the ingress bus.
 
@@ -34,14 +34,15 @@ Incomplete (to be implemented):
 
 ### Resilience/backpressure
 - Redis Streams provides durable decoupling (at-least-once). Kernel acknowledges messages only after Postgres commit or successful spill write; DLQ on parse/validation errors.
-- Kernel batches to Postgres with backoff; on failures, spills to disk and later replays. Bounded internal queues with drop policy for extreme pressure.
+- Kernel batches to Postgres with backoff; on Postgres connectivity failures only, spills to disk and replays when connectivity is restored. Bounded internal queues with drop policy for extreme pressure.
 
 ### Time/ordering
 - Kernel annotates `ts_kernel` on ingest. Ordering is per connection. Cross-connection ordering is best-effort; sinks include connection id.
 
 ### Configuration
-- `config/kernel.yaml`: server, postgres, redis, logging, spill settings.
-  - `auth`: optional auth configuration (issuer, audience, Ed25519 keys, admin token, cache TTL).
+- `config/kernel.yaml`: server, postgres, redis, logging, auth settings.
+  - Redis and Postgres are required; the kernel refuses to start without them.
+  - Auth is mandatory: tokens are required on every event; registration and admin endpoints require OpenSSH certificates signed by configured CAs (`producer_ssh_ca`, `admin_ssh_ca`).
 
 ### Observability
 - Structured logging (JSON). Metrics via Prometheus on `/metrics`. Health endpoints at `/healthz` and `/readyz`.
