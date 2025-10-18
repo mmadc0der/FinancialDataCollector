@@ -13,7 +13,6 @@ type Config struct {
     Postgres PostgresConfig `yaml:"postgres"`
     Redis RedisConfig `yaml:"redis"`
     Logging LoggingConfig `yaml:"logging"`
-    Spill SpillConfig `yaml:"spill"`
     Auth   AuthConfig   `yaml:"auth"`
 }
 
@@ -29,7 +28,6 @@ type ServerConfig struct {
 // removed ModulesConfig; modules are external
 
 type PostgresConfig struct {
-    Enabled bool `yaml:"enabled"`
     DSN string `yaml:"dsn"`
     MaxConns int `yaml:"max_conns"`
     ConnMaxLifetimeMs int `yaml:"conn_max_lifetime_ms"`
@@ -43,7 +41,6 @@ type PostgresConfig struct {
 }
 
 type RedisConfig struct {
-    Enabled bool `yaml:"enabled"`
     Addr string `yaml:"addr"`
     Username string `yaml:"username"`
     Password string `yaml:"password"`
@@ -53,7 +50,6 @@ type RedisConfig struct {
     MaxLenApprox int64 `yaml:"maxlen_approx"`
     QueueSize int `yaml:"queue_size"`
     // Ingest (consumer) settings
-    ConsumerEnabled bool   `yaml:"consumer_enabled"`
     ConsumerGroup   string `yaml:"consumer_group"`
     ConsumerName    string `yaml:"consumer_name"`
     ReadCount       int    `yaml:"read_count"`
@@ -63,13 +59,6 @@ type RedisConfig struct {
     PublishEnabled  bool   `yaml:"publish_enabled"`
 }
 
-type SpillConfig struct {
-    Enabled bool `yaml:"enabled"`
-    Directory string `yaml:"directory"`
-    RotateMB int `yaml:"rotate_mb"`
-    Compression string `yaml:"compression"`
-}
-
 type LoggingConfig struct {
     Level string `yaml:"level"`
     Buffer int `yaml:"buffer"`
@@ -77,8 +66,6 @@ type LoggingConfig struct {
 }
 
 type AuthConfig struct {
-    Enabled bool `yaml:"enabled"`
-    RequireToken bool `yaml:"require_token"`
     Issuer string `yaml:"issuer"`
     Audience string `yaml:"audience"`
     KeyID string `yaml:"key_id"`
@@ -91,8 +78,7 @@ type AuthConfig struct {
     PublicKeysSSH  map[string]string `yaml:"public_keys_ssh"`   // kid -> OpenSSH public key lines
     AdminSSHCA  string `yaml:"admin_ssh_ca"` // OpenSSH CA public key (text)
     ProducerSSHCA string `yaml:"producer_ssh_ca"` // OpenSSH CA public key for producers (text)
-    ProducerCertRequired bool `yaml:"producer_cert_required"`
-    TrustOnFirstUse bool `yaml:"trust_on_first_use"`
+    // Producer registrations and token exchange require CA-signed certificates
     // Cache and clock skew
     CacheTTLSeconds int `yaml:"cache_ttl_seconds"`
     SkewSeconds int `yaml:"skew_seconds"`
@@ -143,16 +129,18 @@ func Load(path string) (*Config, error) {
     // Defaults for Postgres batching
     if cfg.Postgres.BatchSize <= 0 { cfg.Postgres.BatchSize = 1000 }
     if cfg.Postgres.BatchMaxWaitMs <= 0 { cfg.Postgres.BatchMaxWaitMs = 200 }
-    // Defaults for auth
-    if cfg.Auth.Enabled {
-        if cfg.Auth.CacheTTLSeconds <= 0 { cfg.Auth.CacheTTLSeconds = 300 }
-        if cfg.Auth.SkewSeconds <= 0 { cfg.Auth.SkewSeconds = 60 }
-        if !cfg.Auth.RequireToken { cfg.Auth.RequireToken = true }
-        if cfg.Auth.ProducerSSHCA != "" && !cfg.Auth.ProducerCertRequired { cfg.Auth.ProducerCertRequired = true }
-        if cfg.Auth.RegistrationResponseTTLSeconds <= 0 { cfg.Auth.RegistrationResponseTTLSeconds = 300 }
-        if cfg.Auth.RegistrationRateLimitRPM <= 0 { cfg.Auth.RegistrationRateLimitRPM = 10 }
-        if cfg.Auth.RegistrationRateLimitBurst <= 0 { cfg.Auth.RegistrationRateLimitBurst = 3 }
-    }
+    // Defaults for auth (mandatory)
+    if cfg.Auth.CacheTTLSeconds <= 0 { cfg.Auth.CacheTTLSeconds = 300 }
+    if cfg.Auth.SkewSeconds <= 0 { cfg.Auth.SkewSeconds = 60 }
+    if cfg.Auth.RegistrationResponseTTLSeconds <= 0 { cfg.Auth.RegistrationResponseTTLSeconds = 300 }
+    if cfg.Auth.RegistrationRateLimitRPM <= 0 { cfg.Auth.RegistrationRateLimitRPM = 10 }
+    if cfg.Auth.RegistrationRateLimitBurst <= 0 { cfg.Auth.RegistrationRateLimitBurst = 3 }
+    // Validate mandatory settings
+    if cfg.Postgres.DSN == "" { return nil, fmt.Errorf("postgres.dsn is required") }
+    if cfg.Redis.Addr == "" || cfg.Redis.Stream == "" || cfg.Redis.KeyPrefix == "" { return nil, fmt.Errorf("redis.addr, redis.stream, and redis.key_prefix are required") }
+    if cfg.Auth.Issuer == "" || cfg.Auth.Audience == "" || cfg.Auth.KeyID == "" { return nil, fmt.Errorf("auth.issuer, auth.audience, and auth.key_id are required") }
+    if cfg.Auth.ProducerSSHCA == "" { return nil, fmt.Errorf("auth.producer_ssh_ca is required") }
+    if cfg.Auth.AdminSSHCA == "" { return nil, fmt.Errorf("auth.admin_ssh_ca is required") }
 	return &cfg, nil
 }
 

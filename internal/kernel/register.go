@@ -128,9 +128,8 @@ func (k *Kernel) checkNonceReplay(ctx context.Context, fingerprint, nonce string
 
 // Verify certificate signature and TTL
 func (k *Kernel) verifyCertificate(pubkey string) (bool, string, time.Time, time.Time) {
-    if !k.cfg.Auth.ProducerCertRequired || k.cfg.Auth.ProducerSSHCA == "" {
-        return true, "", time.Time{}, time.Time{} // no cert verification required
-    }
+    // Producer certificate is mandatory and must be signed by configured CA
+    if k.cfg.Auth.ProducerSSHCA == "" { return false, "", time.Time{}, time.Time{} }
     
     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
     if err != nil {
@@ -185,14 +184,14 @@ func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool 
     }
     
     // If certificate required, unwrap cert
-    if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
-        caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
-        if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
-            parsedPub = cert.Key
-        } else {
-            logging.Info("registration_cert_invalid")
-            return false
-        }
+    // Always require CA-signed certificate; unwrap to raw key for signature verify
+    if k.cfg.Auth.ProducerSSHCA == "" { logging.Info("registration_cert_missing_ca"); return false }
+    caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+    if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
+        parsedPub = cert.Key
+    } else {
+        logging.Info("registration_cert_invalid")
+        return false
     }
     
     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
@@ -378,7 +377,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     }
     
     // Verify certificate if required
-    if k.cfg.Auth.ProducerCertRequired {
+    if true {
         certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
         if !certValid {
             logging.Info("registration_cert_invalid", logging.F("fingerprint", fp))

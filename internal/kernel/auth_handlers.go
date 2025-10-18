@@ -30,9 +30,9 @@ type approveRequest struct {
     Notes       string `json:"notes"`
 }
 
-// GET /admin/pending returns pending registrations (fingerprint + ts)
+// GET /auth returns pending registrations (fingerprint + ts)
 func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
+    if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
     // log admin access
     logging.Info("admin_pending_list")
 	type row struct{ Fingerprint string `json:"fingerprint"`; TS time.Time `json:"ts"` }
@@ -58,18 +58,8 @@ func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
     _ = json.NewEncoder(w).Encode(rows)
 }
 
-// GET /auth lists producers and key statuses (overview)
-func (k *Kernel) handleAuthOverview(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
-    logging.Info("admin_auth_overview")
-	type row struct{ Fingerprint string `json:"fingerprint"`; Status string `json:"status"`; ProducerID *string `json:"producer_id"`; Name *string `json:"name"`; CreatedAt string `json:"created_at"` }
-	out := []row{}
-	q := `SELECT fingerprint, status, producer_id, name, to_char(created_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') FROM public.producer_overview ORDER BY created_at DESC LIMIT 200`
-	cctx, cancel := context.WithTimeout(r.Context(), 5*time.Second); defer cancel()
-	if k.pg.Pool() != nil { if conn, err := k.pg.Pool().Acquire(cctx); err == nil { defer conn.Release(); if rs, err := conn.Query(cctx, q); err == nil { for rs.Next() { var f, s, ts string; var pid *string; var nm *string; _ = rs.Scan(&f,&s,&pid,&nm,&ts); out = append(out, row{Fingerprint:f, Status:s, ProducerID:pid, Name:nm, CreatedAt:ts}) } } } }
-    _ = json.NewEncoder(w).Encode(out)
-}
-// POST /admin/review handles both approve and deny actions
+// Removed handleAuthOverview; /auth returns pending list in this revision.
+// POST /auth/review handles both approve and deny actions
 func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil { 
         w.WriteHeader(http.StatusUnauthorized)
@@ -237,7 +227,7 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
     _ = json.NewEncoder(w).Encode(result)
 }
 
-// POST /admin/approve - backward compatibility, redirects to review
+// POST /admin/approve - backward compatibility, redirects to review (deprecated path)
 func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil { 
         w.WriteHeader(http.StatusUnauthorized)
@@ -309,7 +299,7 @@ func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 
 // isAdmin verifies admin via OpenSSH CA cert headers
 func (k *Kernel) isAdmin(r *http.Request) bool {
-	if k.cfg != nil && k.cfg.Auth.Enabled && k.cfg.Auth.AdminSSHCA != "" {
+	if k.cfg != nil && k.cfg.Auth.AdminSSHCA != "" {
 		certHeader := r.Header.Get("X-SSH-Cert")
 		principal := r.Header.Get("X-SSH-Principal")
 		if certHeader != "" && principal != "" {
@@ -317,12 +307,11 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
 			if err == nil && caPub != nil {
 				certPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(certHeader))
 				if err == nil {
-                    if cert, ok := certPub.(*ssh.Certificate); ok {
-                        checker := ssh.CertChecker{ IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), caPub.Marshal()) } }
-                        if err := checker.CheckCert(principal, cert); err == nil { return true }
-                        // include explicit deny log only when header present
-                        logging.Warn("admin_cert_check_failed", logging.F("principal", principal))
-                    }
+					if cert, ok := certPub.(*ssh.Certificate); ok {
+						checker := ssh.CertChecker{ IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), caPub.Marshal()) } }
+						if err := checker.CheckCert(principal, cert); err == nil { return true }
+						logging.Warn("admin_cert_check_failed", logging.F("principal", principal))
+					}
 				}
 			}
 		}

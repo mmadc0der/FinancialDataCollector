@@ -4,6 +4,7 @@ import (
     "context"
     "encoding/json"
     "errors"
+    "fmt"
     "io"
     "net"
     "strings"
@@ -11,7 +12,7 @@ import (
 
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
-    // spill removed for lean pipeline
+    "github.com/example/data-kernel/internal/spill"
     "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/metrics"
 )
@@ -19,7 +20,8 @@ import (
 type router struct {
     pg   *data.Postgres
     rd   *data.Redis
-    // spill writer/replayer removed
+    spw  *spill.Writer
+    spr  *spill.Replayer
     ack  func(ids ...string)
     pgCh chan pgMsg
     pgChLean chan pgMsgLean
@@ -38,36 +40,37 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
     // pick defaults from config, may be empty which signals NULL in DB
     r.prodID = cfg.Postgres.DefaultProducerID
     r.schID = ""
-    if cfg.Postgres.Enabled {
-        if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
-            r.pg = pg
-            q := cfg.Postgres.QueueSize
-            if q <= 0 { q = 1024 }
-            r.pgCh = make(chan pgMsg, q)
-            go r.pgWorkerBatch()
-            r.pgChLean = make(chan pgMsgLean, q)
-            go r.pgWorkerBatchLean()
-        } else {
-            logging.Warn("postgres_init_error", logging.Err(err))
-        }
+    if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
+        r.pg = pg
+        q := cfg.Postgres.QueueSize
+        if q <= 0 { q = 1024 }
+        r.pgCh = make(chan pgMsg, q)
+        go r.pgWorkerBatch()
+        r.pgChLean = make(chan pgMsgLean, q)
+        go r.pgWorkerBatchLean()
+        // start replayer
+        r.spr = spill.NewReplayer("./spill", r.pg)
+        r.spr.Start()
+    } else {
+        logging.Error("postgres_init_error", logging.Err(err))
+        return nil, err
     }
-    if cfg.Redis.Enabled {
-        if rd, err := data.NewRedis(cfg.Redis); err == nil {
-            r.rd = rd
-            q := cfg.Redis.QueueSize
-            if q <= 0 { q = 2048 }
-            r.rdCh = make(chan rdMsg, q)
-            go r.rdWorker()
-        } else {
-            logging.Warn("redis_init_error", logging.Err(err))
-        }
+    if rd, err := data.NewRedis(cfg.Redis); err == nil {
+        r.rd = rd
+        q := cfg.Redis.QueueSize
+        if q <= 0 { q = 2048 }
+        r.rdCh = make(chan rdMsg, q)
+        go r.rdWorker()
+    } else {
+        logging.Error("redis_init_error", logging.Err(err))
+        return nil, err
     }
     // spill disabled
     return r, nil
 }
 
 func (r *router) close() {
-    // spill close removed
+    if r.spr != nil { r.spr.Stop() }
     if r.pg != nil { r.pg.Close() }
     if r.rd != nil { _ = r.rd.Close() }
 }
@@ -135,9 +138,28 @@ func (r *router) pgWorkerBatch() {
             }
             if backoff < 5*time.Second { backoff *= 2 }
         }
-        // If this looks like a connectivity error, optionally spill to filesystem (as last resort)
+        // If this looks like a connectivity error, spill to filesystem (as last resort)
         if isConnectivityError(lastErr) {
-            // keep buffer to retry on next cycle (spill disabled)
+            // write spill and ack Redis; router replayer will flush on reconnect
+            if r.spw == nil {
+                if w, e := spill.NewWriter("./spill"); e == nil { r.spw = w } else { logging.Error("spill_init_error", logging.Err(e)) }
+            }
+            if r.spw != nil {
+                // Build events once for spill
+                events := make([]map[string]any, 0, len(buf))
+                redisIDs := make([]string, 0, len(buf))
+                for _, m := range buf {
+                    ev := map[string]any{}
+                    events = append(events, ev)
+                    redisIDs = append(redisIDs, m.RedisID)
+                }
+                if _, _, e := r.spw.Write(events); e == nil {
+                    if r.ack != nil { r.ack(redisIDs...) }
+                    logging.Warn("pg_connectivity_spilled", logging.F("count", len(events)))
+                    buf = buf[:0]
+                    return
+                }
+            }
             logging.Error("pg_connectivity_error_deferred", logging.F("buffer_len", len(buf)), logging.F("err", lastErr.Error()))
             return
         }

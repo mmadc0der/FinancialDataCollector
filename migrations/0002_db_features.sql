@@ -172,31 +172,6 @@ GROUP BY partition_month
 ON CONFLICT (partition_month) DO UPDATE SET event_count = stats_event_month.event_count + EXCLUDED.event_count;
 -- Expose count of inserted events
 SELECT COUNT(*) INTO v_events FROM _inserted_events;
-EXCEPTION
-WHEN OTHERS THEN -- Spill entire batch for later replay if partition creation or insert fails
-INSERT INTO ingest_spill(
-        event_id,
-        ts,
-        subject_id,
-        producer_id,
-        schema_id,
-        payload,
-        tags,
-        error
-    )
-SELECT event_id,
-    ts,
-    subject_id,
-    producer_id,
-    schema_id,
-    payload,
-    tags,
-    SQLERRM
-FROM _stage_events;
-RETURN QUERY
-SELECT 0::bigint,
-    0::bigint;
-RETURN;
 END;
 -- Explode tags
 CREATE TEMP TABLE _stage_tags ON COMMIT DROP AS

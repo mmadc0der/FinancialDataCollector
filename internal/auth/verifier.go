@@ -155,7 +155,7 @@ func (v *Verifier) IssueSubject(ctx context.Context, producerID, subjectID strin
 
 // Verify validates token signature and basic claims; DB must know the JTI and not be revoked.
 func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, string, error) {
-    if !v.cfg.Enabled || !v.cfg.RequireToken || tok == "" {
+    if tok == "" {
         return "", "", "", errors.New("auth_required")
     }
     parts := strings.Split(tok, ".")

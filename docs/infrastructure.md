@@ -94,5 +94,5 @@ redis:
   - `fdc:register` / `fdc:register:resp`
   - `fdc:subject:register` / `fdc:subject:resp`
   - `fdc:token:exchange` / `fdc:token:resp`
-- Use `/admin/approve` to approve keys and bind producers; use `/admin/revoke` to blacklist tokens. Tokens are issued via `fdc:token:exchange` only.
+- Use `POST /auth/review` to approve/deny keys and bind producers; use `POST /auth/revoke` to revoke tokens. Tokens are issued via `fdc:token:exchange` only.
 

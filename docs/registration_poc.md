@@ -18,7 +18,7 @@
   - **Key Rotation**: Unknown fingerprint, WITH `producer_id` → validates existing producer, key status=`pending`
   - **Known Keys**: Returns existing status (approved/pending/denied)
 - **Rate Limiting**: Kernel-side enforcement (default 10 RPM), silent drop on limit exceeded.
-- Admin API is protected by an OpenSSH CA public key with `/admin/review` endpoint for approve/deny actions.
+- Admin API is protected by an OpenSSH CA public key with `/auth/review` endpoint for approve/deny actions.
 
 ### Message Format (registration stream)
 - XADD fields:
@@ -42,13 +42,12 @@
 7. Acknowledge after durable writes and publish a response to `fdc:register:resp:<nonce>` with `{ fingerprint, producer_id, status, reason? }` and set a short TTL on the stream.
 
 ### Admin Workflow (v2)
-- **`/admin/review`** endpoint for approve/deny actions:
+- **`/auth/review`** endpoint for approve/deny actions:
   - **Approve New Producer**: Creates producer and approves key atomically
   - **Approve Key Rotation**: Approves new key and supersedes old key atomically
   - **Deny Registration**: Marks key as revoked with reason
-- **`/admin/pending`**: List pending registrations
-- **`/admin/auth`**: List all producer keys and their statuses
-- Admin can revoke tokens via `/admin/revoke`.
+- Root `GET /auth`: View pending registrations
+- Admin can revoke tokens via `POST /auth/revoke`.
 - Admin requests must be authenticated with OpenSSH certificates signed by a configured CA.
 
 ### Security Audit & Risks (v2)
@@ -74,7 +73,7 @@
 - **Database**: Migration `0007_registration_v2.sql` with enhanced schema, atomic functions, and constraints
 - **Configuration**: Rate limiting and response TTL settings added
 - **Registration Flow**: Complete rewrite with state machine, rate limiting, and enhanced logging
-- **Admin Endpoints**: `/admin/review` for approve/deny actions with atomic key rotation support
+- **Admin Endpoints**: `/auth/review` for approve/deny actions with atomic key rotation support
 - **Token Exchange**: Enhanced validation requiring `approved` key status
 - **Producer Example**: Updated to support optional `producer_id` for key rotation
 - **Testing**: Integration tests updated for new flow

@@ -42,7 +42,7 @@ func (k *Kernel) Start(ctx context.Context) error {
     stopLog := logging.Init(k.cfg.Logging)
     defer stopLog()
     logging.Info("kernel_start", logging.F("listen", k.cfg.Server.Listen))
-    logging.Info("config_redis", logging.F("enabled", k.cfg.Redis.Enabled), logging.F("addr", k.cfg.Redis.Addr), logging.F("prefix", k.cfg.Redis.KeyPrefix), logging.F("stream", k.cfg.Redis.Stream), logging.F("group", k.cfg.Redis.ConsumerGroup))
+    logging.Info("config_redis", logging.F("addr", k.cfg.Redis.Addr), logging.F("prefix", k.cfg.Redis.KeyPrefix), logging.F("stream", k.cfg.Redis.Stream), logging.F("group", k.cfg.Redis.ConsumerGroup))
 
     // Router handles durable persistence (Postgres-first, spill fallback) and optional publish
     r, err := newRouter(k.cfg, func(ids ...string) {
@@ -62,43 +62,35 @@ func (k *Kernel) Start(ctx context.Context) error {
     mux.Handle("/metrics", metrics.Handler())
     mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ok")) })
     mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request){ w.WriteHeader(http.StatusOK); _,_ = w.Write([]byte("ready")) })
-    // Admin: pending/approve/revoke endpoints if enabled
-    if k.cfg.Auth.Enabled {
-        mux.HandleFunc("/admin/pending", k.handleListPending)
-        mux.HandleFunc("/auth", k.handleAuthOverview)
-        mux.HandleFunc("/admin/review", k.handleReview)
-        mux.HandleFunc("/admin/approve", k.handleApprove) // backward compatibility
-        mux.HandleFunc("/admin/revoke", k.handleRevokeToken)
-    }
+    // Auth endpoints (mandatory)
+    mux.HandleFunc("/auth", k.handleListPending)
+    mux.HandleFunc("/auth/review", k.handleReview)
+    mux.HandleFunc("/auth/revoke", k.handleRevokeToken)
     server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux}
 
-    // Auth verifier
-    if k.cfg.Auth.Enabled {
-        v, err := auth.NewVerifier(k.cfg.Auth, k.pg, k.rd)
-        if err != nil { return err }
-        k.au = v
-        logging.Info("auth_verifier_initialized", logging.F("issuer", k.cfg.Auth.Issuer), logging.F("audience", k.cfg.Auth.Audience), logging.F("require_token", k.cfg.Auth.RequireToken))
-    }
+    // Auth verifier (mandatory)
+    v, err := auth.NewVerifier(k.cfg.Auth, k.pg, k.rd)
+    if err != nil { return err }
+    k.au = v
+    logging.Info("auth_verifier_initialized", logging.F("issuer", k.cfg.Auth.Issuer), logging.F("audience", k.cfg.Auth.Audience))
 
-    // Start Redis consumer if enabled
-    if k.cfg.Redis.Enabled && k.cfg.Redis.ConsumerEnabled {
-        if rd, err := data.NewRedis(k.cfg.Redis); err == nil {
-            k.rd = rd
-            // best-effort create group
-            _ = k.rd.EnsureGroup(ctx)
-            logging.Info("redis_consumer_start", logging.F("stream", prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)), logging.F("group", k.cfg.Redis.ConsumerGroup))
-            go k.consumeRedis(ctx)
-            // registration stream consumer (fixed stream)
-            go k.consumeRegister(ctx)
-            // subject registration consumer (fixed stream)
-            go k.consumeSubjectRegister(ctx)
-            // token exchange consumer (fixed stream)
-            go k.consumeTokenExchange(ctx)
-            // schema upgrade consumer (dedicated stream)
-            go k.consumeSchemaUpgrade(ctx)
-        } else {
-            logging.Warn("redis_consumer_init_error", logging.Err(err))
-        }
+    // Start Redis consumer (mandatory)
+    if rd, err := data.NewRedis(k.cfg.Redis); err == nil {
+        k.rd = rd
+        // best-effort create group
+        _ = k.rd.EnsureGroup(ctx)
+        logging.Info("redis_consumer_start", logging.F("stream", prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)), logging.F("group", k.cfg.Redis.ConsumerGroup))
+        go k.consumeRedis(ctx)
+        // registration stream consumer (fixed stream)
+        go k.consumeRegister(ctx)
+        // subject registration consumer (fixed stream)
+        go k.consumeSubjectRegister(ctx)
+        // token exchange consumer (fixed stream)
+        go k.consumeTokenExchange(ctx)
+        // schema upgrade consumer (dedicated stream)
+        go k.consumeSchemaUpgrade(ctx)
+    } else {
+        return err
     }
 
     go func() {
@@ -161,7 +153,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 }
                 // Authenticate and capture producer/subject from token
                 var producerID, subjectIDFromToken, jti string
-                if k.au != nil && k.cfg.Auth.RequireToken {
+                {
                     if pid, sid, j, err := k.au.Verify(ctx, token); err != nil {
                         metrics.AuthDeniedTotal.Inc()
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
@@ -297,7 +289,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     fp := sshFingerprint([]byte(pubkey))
                     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
                     if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
-                    if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
+                if k.cfg.Auth.ProducerSSHCA != "" {
                         caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
                         if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
                     }
@@ -513,7 +505,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 // verify signature as in registration
                 parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
                 if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
-                if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
+                if k.cfg.Auth.ProducerSSHCA != "" {
                     caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
                     if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
                 }
@@ -606,7 +598,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 fp := sshFingerprint([]byte(pubkey))
                 parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
                 if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
-                if k.cfg.Auth.ProducerCertRequired && k.cfg.Auth.ProducerSSHCA != "" {
+                if k.cfg.Auth.ProducerSSHCA != "" {
                     caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
                     if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
                 }

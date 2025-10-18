@@ -5,7 +5,6 @@ server:
   ingest_queue_size: 8192
   
 postgres:
-  enabled: false
   dsn: "postgres://data_kernel:CHANGE_ME_STRONG@127.0.0.1:5432/data_kernel_db?sslmode=disable"
   max_conns: 8
   conn_max_lifetime_ms: 600000
@@ -15,21 +14,15 @@ postgres:
   batch_max_wait_ms: 200
 
 redis:
-  enabled: false
   addr: "127.0.0.1:6379"
   username: "data_kernel"
   password: "CHANGE_ME_STRONG"
   db: 0
   key_prefix: "fdc:"
   stream: "events"
-  register_stream: "register"
-  register_resp_stream: "register:resp"
-  subject_register_stream: "subject:register"
-  subject_resp_stream: "subject:resp"
   maxlen_approx: 1000000
   queue_size: 2048
   publish_enabled: false   # publish to Redis from router (feature flag)
-  consumer_enabled: true   # enable kernel consumer of Redis stream
   consumer_group: "kernel"
   consumer_name: "kernel-1" # optional; kernel will append timestamp
   read_count: 100
@@ -41,15 +34,7 @@ logging:
   buffer: 4096
   output: "stdout"
 
-spill:
-  enabled: true
-  directory: "./spill"
-  rotate_mb: 512
-  compression: "none"
-
 auth:
-  enabled: true
-  require_token: true
   issuer: "fdc-kernel"
   audience: "fdc-events"
   key_id: "kid-1"
@@ -60,7 +45,6 @@ auth:
   private_key_passphrase_file: ""
   admin_ssh_ca: ""
   producer_ssh_ca: ""
-  producer_cert_required: false
   cache_ttl_seconds: 300
   skew_seconds: 60
   registration_response_ttl_seconds: 300  # TTL for registration response streams (5 minutes)
