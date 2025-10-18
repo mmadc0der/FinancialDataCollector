@@ -371,6 +371,44 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     _ = k.rd.Ack(ctx, m.ID)
                     continue 
                 }
+                // Strict op validation before any DB calls
+                switch strings.ToLower(strings.TrimSpace(req.Op)) {
+                case "", "set_current":
+                    // Must provide either schema_id OR (schema_name AND schema_version)
+                    if req.SchemaID == "" && (strings.TrimSpace(req.SchemaName) == "" || req.SchemaVer <= 0) {
+                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "missing_schema_reference"))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "missing_schema", "details": "need schema_id or (schema_name + schema_version)"}) }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                    // If set_current is used, reject presence of schema_body to avoid ambiguity
+                    if len(strings.TrimSpace(string(req.SchemaBody))) > 0 {
+                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "schema_body_not_allowed_for_set_current"))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "schema_body not allowed for set_current"}) }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                case "upgrade_auto":
+                    // Must have schema_name and schema_body; version optional (server assigns next)
+                    if strings.TrimSpace(req.SchemaName) == "" || len(req.SchemaBody) == 0 || strings.TrimSpace(string(req.SchemaBody)) == "" {
+                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "missing_schema_name_or_body"))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "upgrade_auto requires schema_name and schema_body"}) }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                    // Reject explicit schema_id with upgrade_auto
+                    if strings.TrimSpace(req.SchemaID) != "" {
+                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "schema_id_not_allowed_for_upgrade_auto"))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "schema_id not allowed for upgrade_auto"}) }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                default:
+                    logging.Warn("subject_register_unknown_op", logging.F("id", m.ID), logging.F("op", req.Op))
+                    if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "unknown_op", "op": req.Op}) }
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
                 var sid string
                 var schemaID string
                 var schemaName string

@@ -148,7 +148,11 @@ func (p *Postgres) EnsureSchemaSubject(ctx context.Context, name string, version
     cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
     defer cancel()
     var schemaID, subjectID string
-    err := p.pool.QueryRow(cctx, `SELECT (t).schema_id, (t).subject_id FROM public.ensure_schema_subject($1,$2,$3::jsonb,$4,$5::jsonb) AS t`, name, version, string(body), subjectKey, string(attrs)).Scan(&schemaID, &subjectID)
+    var bodyParam any
+    if len(body) > 0 { bodyParam = string(body) } else { bodyParam = nil }
+    var attrsParam any
+    if len(attrs) > 0 { attrsParam = string(attrs) } else { attrsParam = nil }
+    err := p.pool.QueryRow(cctx, `SELECT (t).schema_id, (t).subject_id FROM public.ensure_schema_subject($1,$2,$3::jsonb,$4,$5::jsonb) AS t`, name, version, bodyParam, subjectKey, attrsParam).Scan(&schemaID, &subjectID)
     if err != nil { return "", "", err }
     return schemaID, subjectID, nil
 }
@@ -159,7 +163,9 @@ func (p *Postgres) EnsureSchemaImmutable(ctx context.Context, name string, versi
     cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
     defer cancel()
     var schemaID string
-    err := p.pool.QueryRow(cctx, `SELECT public.ensure_schema_immutable($1,$2,$3::jsonb,$4)`, name, version, string(body), createIfMissing).Scan(&schemaID)
+    var bodyParam any
+    if len(body) > 0 { bodyParam = string(body) } else { bodyParam = nil }
+    err := p.pool.QueryRow(cctx, `SELECT public.ensure_schema_immutable($1,$2,$3::jsonb,$4)`, name, version, bodyParam, createIfMissing).Scan(&schemaID)
     if err != nil { return "", err }
     return schemaID, nil
 }
