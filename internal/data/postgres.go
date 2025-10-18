@@ -141,7 +141,7 @@ func (p *Postgres) EnsureSchemaSubject(ctx context.Context, name string, version
     cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
     defer cancel()
     var schemaID, subjectID string
-    err := p.pool.QueryRow(cctx, `SELECT t.schema_id, t.subject_id FROM public.ensure_schema_subject($1,$2,$3::jsonb,$4,$5::jsonb) AS t(schema_id uuid, subject_id uuid)`, name, version, string(body), subjectKey, string(attrs)).Scan(&schemaID, &subjectID)
+    err := p.pool.QueryRow(cctx, `SELECT t.schema_id, t.subject_id FROM public.ensure_schema_subject($1,$2,$3::jsonb,$4,$5::jsonb) AS t`, name, version, string(body), subjectKey, string(attrs)).Scan(&schemaID, &subjectID)
     if err != nil { return "", "", err }
     return schemaID, subjectID, nil
 }
