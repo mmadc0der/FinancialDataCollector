@@ -132,15 +132,15 @@ BEGIN
     IF _name IS NULL OR _version IS NULL THEN RAISE EXCEPTION 'schema name/version required'; END IF;
     IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required'; END IF;
     -- upsert schema by (name,version)
-    INSERT INTO public.schemas(schema_id, name, version, body)
+    INSERT INTO public.schemas(schema_id, name, version, body) AS sc
     VALUES (gen_random_uuid(), _name, _version, COALESCE(_body, '{}'::jsonb))
     ON CONFLICT (name, version) DO UPDATE SET body = EXCLUDED.body
-    RETURNING schema_id INTO v_schema_id;
+    RETURNING sc.schema_id INTO v_schema_id;
     -- upsert subject by subject_key
-    INSERT INTO public.subjects(subject_id, subject_key, attrs)
+    INSERT INTO public.subjects(subject_id, subject_key, attrs) AS s
     VALUES (gen_random_uuid(), _subject_key, COALESCE(_attrs, '{}'::jsonb))
     ON CONFLICT (subject_key) DO UPDATE SET attrs = COALESCE(EXCLUDED.attrs, subjects.attrs), last_seen_at = now()
-    RETURNING subject_id INTO v_subject_id;
+    RETURNING s.subject_id INTO v_subject_id;
     schema_id := v_schema_id;
     subject_id := v_subject_id;
     RETURN;
