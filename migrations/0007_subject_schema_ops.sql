@@ -135,9 +135,9 @@ BEGIN
     IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required' USING ERRCODE='P0001'; END IF;
     IF _name IS NULL THEN RAISE EXCEPTION 'schema name required' USING ERRCODE='P0001'; END IF;
     PERFORM pg_advisory_xact_lock(hashtext(_name));
-    SELECT MAX(version), (SELECT body FROM public.schemas WHERE name=_name AND version=MAX(version))
+    SELECT MAX(s.version), (SELECT s2.body FROM public.schemas s2 WHERE s2.name=_name AND s2.version=MAX(s.version))
       INTO v_latest, v_latest_body
-      FROM public.schemas WHERE name=_name;
+      FROM public.schemas s WHERE s.name=_name;
     IF v_latest IS NULL THEN
         -- create v1
         v_latest := 1;
@@ -150,7 +150,7 @@ BEGIN
     END IF;
     -- family exists; idempotent only when requested body equals current latest
     IF v_latest_body IS NOT DISTINCT FROM COALESCE(_body, '{}'::jsonb) THEN
-        SELECT schema_id INTO v_schema_id FROM public.schemas WHERE name=_name AND version=v_latest;
+        SELECT s.schema_id INTO v_schema_id FROM public.schemas s WHERE s.name=_name AND s.version=v_latest;
         v_subject_id := public.ensure_subject(_subject_key, _attrs, TRUE);
         PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
         subject_id := v_subject_id; schema_id := v_schema_id; version := v_latest; unchanged := TRUE; RETURN;
