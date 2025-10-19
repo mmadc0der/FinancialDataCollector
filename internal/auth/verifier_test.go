@@ -18,7 +18,7 @@ func b64raw(b []byte) string { return base64.RawStdEncoding.EncodeToString(b) }
 func TestIssue_Success(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil { t.Fatalf("keygen: %v", err) }
-	cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+	cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
 	v, err := NewVerifier(cfg, nil, nil)
 	if err != nil { t.Fatalf("new verifier: %v", err) }
     _, jti, _, err := v.Issue(nil, "producer-1", time.Minute, "test", "fp")
@@ -46,7 +46,7 @@ func (r *fakeRedis) Del(ctx context.Context, keys ...string) error { delete(r.kv
 
 func TestVerify_Success_WithFakes(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     // inject seams via package-level vars
     db := &fakeDB{exists: true, pid: "p1"}
@@ -69,7 +69,7 @@ func TestVerify_Success_WithFakes(t *testing.T) {
 
 func TestVerify_BadSignature_WithFakes(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
     authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
@@ -82,7 +82,7 @@ func TestVerify_BadSignature_WithFakes(t *testing.T) {
 
 func TestVerify_Expired_WithFakes(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 0}
+    cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 0}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
     authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
@@ -93,7 +93,7 @@ func TestVerify_Expired_WithFakes(t *testing.T) {
 
 func TestVerify_IssuerAudienceMismatch_WithFakes(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
     authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
@@ -105,7 +105,7 @@ func TestVerify_IssuerAudienceMismatch_WithFakes(t *testing.T) {
 
 func TestVerify_RevokedViaRedis_WithFakes(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
     authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
@@ -117,11 +117,11 @@ func TestVerify_RevokedViaRedis_WithFakes(t *testing.T) {
 
 func TestVerify_UnknownKid(t *testing.T) {
     pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-    cfg := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
+    cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 60}
     v, _ := NewVerifier(cfg, nil, nil)
     tok, _, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
     // New verifier with no public keys -> unknown kid
-    cfg2 := kernelcfg.AuthConfig{Enabled: true, RequireToken: true, Issuer: "iss", Audience: "aud"}
+    cfg2 := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud"}
     v2, _ := NewVerifier(cfg2, nil, nil)
     if _, _, _, err := v2.Verify(nil, tok); err == nil { t.Fatalf("expected unknown_kid") }
 }

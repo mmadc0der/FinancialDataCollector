@@ -5,8 +5,8 @@ import (
     "testing"
     "time"
 
+    "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
-    "github.com/example/data-kernel/internal/logging"
     "github.com/redis/go-redis/v9"
 )
 
@@ -23,6 +23,17 @@ func TestRateLimit(t *testing.T) {
         t.Skip("Redis not available for testing")
     }
     
+    // Create Redis instance
+    rd, err := data.NewRedis(kernelcfg.RedisConfig{
+        Addr: "127.0.0.1:6379",
+        DB:   1,
+        KeyPrefix: "test:",
+    })
+    if err != nil {
+        t.Fatalf("NewRedis: %v", err)
+    }
+    defer rd.Close()
+    
     // Create test kernel with rate limiting enabled
     cfg := &kernelcfg.Config{
         Auth: kernelcfg.AuthConfig{
@@ -36,7 +47,7 @@ func TestRateLimit(t *testing.T) {
     
     k := &Kernel{
         cfg: cfg,
-        rd: &mockRedis{client: client},
+        rd: rd,
     }
     
     fingerprint := "test-fingerprint-123"
@@ -61,20 +72,4 @@ func TestRateLimit(t *testing.T) {
     if k.checkRateLimit(ctx, fingerprint) {
         t.Error("Fourth request should still be rate limited")
     }
-}
-
-// Mock Redis for testing
-type mockRedis struct {
-    client *redis.Client
-}
-
-func (m *mockRedis) C() *redis.Client {
-    return m.client
-}
-
-func prefixed(prefix, key string) string {
-    if prefix == "" {
-        return key
-    }
-    return prefix + key
 }
