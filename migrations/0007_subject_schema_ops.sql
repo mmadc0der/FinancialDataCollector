@@ -170,14 +170,14 @@ DECLARE v_subject_id UUID; v_current_schema UUID; v_current_body JSONB; v_new_bo
 BEGIN
     IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required' USING ERRCODE='P0001'; END IF;
     IF _name IS NULL THEN RAISE EXCEPTION 'schema name required' USING ERRCODE='P0001'; END IF;
-    SELECT subject_id, current_schema_id INTO v_subject_id, v_current_schema FROM public.subjects WHERE subject_key=_subject_key;
+    SELECT s.subject_id, s.current_schema_id INTO v_subject_id, v_current_schema FROM public.subjects s WHERE s.subject_key=_subject_key;
     IF v_subject_id IS NULL THEN RAISE EXCEPTION 'subject_not_found' USING ERRCODE='P0001'; END IF;
     IF v_current_schema IS NULL THEN RAISE EXCEPTION 'subject_current_schema_missing' USING ERRCODE='P0001'; END IF;
     -- verify current schema belongs to family
     IF NOT EXISTS (SELECT 1 FROM public.schemas s WHERE s.schema_id=v_current_schema AND s.name=_name) THEN
         RAISE EXCEPTION 'schema_family_not_found_for_subject' USING ERRCODE='P0001';
     END IF;
-    SELECT body INTO v_current_body FROM public.schemas WHERE schema_id=v_current_schema;
+    SELECT s.body INTO v_current_body FROM public.schemas s WHERE s.schema_id=v_current_schema;
     v_new_body := public.jsonb_deep_merge(v_current_body, COALESCE(_delta, '{}'::jsonb));
     -- merge attrs
     IF _attrs_delta IS NOT NULL THEN
@@ -192,7 +192,7 @@ BEGIN
     END IF;
     -- create next version atomically
     PERFORM pg_advisory_xact_lock(hashtext(_name));
-    SELECT COALESCE(MAX(version),0)+1 INTO v_next FROM public.schemas WHERE name=_name;
+    SELECT COALESCE(MAX(s.version),0)+1 INTO v_next FROM public.schemas s WHERE s.name=_name;
     INSERT INTO public.schemas(schema_id, name, version, body)
     VALUES (gen_random_uuid(), _name, v_next, v_new_body)
     RETURNING schema_id INTO v_schema_id;
