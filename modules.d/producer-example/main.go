@@ -1,26 +1,26 @@
 package main
 
 import (
-    "context"
-    "crypto/ed25519"
-    "crypto/rand"
-    "encoding/base64"
-    "encoding/json"
-    "flag"
-    "fmt"
-    "bytes"
-    "log"
-    "os"
-    "os/signal"
-    "strings"
-    "syscall"
-    "time"
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
 
-    ssh "golang.org/x/crypto/ssh"
-    "golang.org/x/crypto/sha3"
-    "github.com/redis/go-redis/v9"
-    "github.com/google/uuid"
-    "gopkg.in/yaml.v3"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
+	"gopkg.in/yaml.v3"
 )
 
 // Minimal JWT-like structs for debug logging of tokens
@@ -193,7 +193,7 @@ func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Sign
     baseReq := map[string]any{
         "op": "register", 
         "subject_key": subjectKey, 
-        "attrs": map[string]any{"region":"eu"}
+        "attrs": map[string]any{"region":"eu"},
     }
     
     // Add schema information if provided
