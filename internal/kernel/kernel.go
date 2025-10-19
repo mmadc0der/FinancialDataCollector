@@ -403,7 +403,8 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 var schemaVersion int
                 switch strings.ToLower(strings.TrimSpace(req.Op)) {
                 case "upgrade":
-                    _, _, _, unchanged, err := k.pg.UpgradeSubjectSchemaIncremental(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaDelta)), []byte(coalesceJSON(req.AttrsDelta)))
+                    var unchanged bool
+                    sid, schemaID, schemaVersion, unchanged, err = k.pg.UpgradeSubjectSchemaIncremental(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaDelta)), []byte(coalesceJSON(req.AttrsDelta)))
                     _ = unchanged
                     schemaName = req.SchemaName
                     if err != nil {
@@ -413,7 +414,8 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         continue
                     }
                 case "register":
-                    _, _, _, unchanged, err := k.pg.BootstrapSubjectWithSchema(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)))
+                    var unchanged bool
+                    sid, schemaID, schemaVersion, unchanged, err = k.pg.BootstrapSubjectWithSchema(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)))
                     _ = unchanged
                     schemaName = req.SchemaName
                     if err != nil {
@@ -424,9 +426,11 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                 }
                 // Set current schema and cache
-                _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
-                _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
-                if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
+                if sid != "" && schemaID != "" {
+                    _ = k.pg.SetCurrentSubjectSchema(ctx, sid, schemaID)
+                    _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
+                    if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
+                }
                 // Respond on per-producer stream
                 if producerID != "" {
                     resp := map[string]any{"status":"ok", "producer_id": producerID, "subject_id": sid, "schema_id": schemaID}
