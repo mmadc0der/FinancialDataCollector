@@ -137,8 +137,9 @@ func randNonce() (string, error) {
 }
 
 func signPayloadNonce(signer ssh.Signer, payloadStr, nonce string) (string, error) {
-    sum := sha3.Sum512([]byte(payloadStr + "." + nonce))
-    sshSig, err := signer.Sign(rand.Reader, sum[:])
+    // Ed25519-only: sign raw canonical bytes (no prehash)
+    msg := []byte(payloadStr + "." + nonce)
+    sshSig, err := signer.Sign(rand.Reader, msg)
     if err != nil { return "", err }
     if signer.PublicKey().Type() != ssh.KeyAlgoED25519 || len(sshSig.Blob) != ed25519.SignatureSize {
         return "", fmt.Errorf("sign_error: unsupported signer or signature size")
