@@ -62,8 +62,7 @@ END $$;
 --   "tags": [{"key":"core.symbol","value":"AAPL"}, ...]
 -- }
 CREATE OR REPLACE FUNCTION ingest_events(_events JSONB) RETURNS TABLE(events_inserted BIGINT, tags_linked BIGINT) LANGUAGE plpgsql SECURITY DEFINER
-SET search_path = pg_catalog,
-    public AS $$
+SET search_path = public AS $$
 DECLARE v_events BIGINT := 0;
 v_tags BIGINT := 0;
 v_batch_count INT := 0;
@@ -261,8 +260,7 @@ END IF;
 END $$;
 -- 7) Partition automation helpers
 CREATE OR REPLACE FUNCTION ensure_month_partitions(from_month DATE, months_ahead INT) RETURNS VOID LANGUAGE plpgsql
-SET search_path = pg_catalog,
-    public AS $$
+SET search_path = public AS $$
 DECLARE m DATE;
 part_name TEXT;
 BEGIN FOR m IN
