@@ -315,10 +315,20 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
-                    // replay protection
+                    status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
+                    if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" {
+                        logging.Warn("subject_register_key_not_approved", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("status", status))
+                        if pidPtr != nil && *pidPtr != "" {
+                            k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "key_not_approved", "status": status})
+                        }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                    producerID = *pidPtr
+                    // replay protection - check after we have producer ID
                     if k.rd != nil && k.rd.C() != nil {
-                        // Use per-producer SET to track nonces: key fdc:nonce:<producer_id>
-                        setKey := prefixed(k.cfg.Redis.KeyPrefix, "nonce:"+producerID)
+                        // Use per-producer SET to track nonces: key fdc:subject:nonce:<producer_id>
+                        setKey := prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+producerID)
                         // SADD returns 1 if newly added, 0 if existed → treat 0 as replay
                         added, err := k.rd.C().SAdd(ctx, setKey, nonce).Result()
                         if err != nil {
@@ -333,16 +343,6 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                             _ = k.rd.C().Expire(ctx, setKey, 10*time.Minute).Err()
                         }
                     }
-                    status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
-                    if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" {
-                        logging.Warn("subject_register_key_not_approved", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("status", status))
-                        if pidPtr != nil && *pidPtr != "" {
-                            k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "key_not_approved", "status": status})
-                        }
-                        _ = k.rd.Ack(ctx, m.ID)
-                        continue
-                    }
-                    producerID = *pidPtr
                     if !k.checkRateLimit(ctx, producerID) {
                         // best-effort notify client
                         k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "rate_limited"})
