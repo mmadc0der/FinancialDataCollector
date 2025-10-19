@@ -79,7 +79,7 @@ SELECT (e->>'event_id')::uuid AS event_id,
     (e->>'producer_id')::uuid AS producer_id,
     (e->>'schema_id')::uuid AS schema_id,
     COALESCE(e->'payload', '{}'::jsonb) AS payload,
-    e->'tags' AS tags
+    CASE WHEN jsonb_typeof(e->'tags') = 'array' THEN e->'tags' ELSE '[]'::jsonb END AS tags
 FROM jsonb_array_elements(_events) AS e;
 -- Required fields present
 IF EXISTS (
