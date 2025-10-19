@@ -299,10 +299,11 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
                             var tmp any
                             if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
-                            sum := sha3.Sum512([]byte(payloadStr + "." + nonce))
+                            // Ed25519-only: verify raw signature over canonical bytes without prehash
+                            msg := []byte(payloadStr + "." + nonce)
                             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                             if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
-                            if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) { okSig = true }
+                            if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
                         }
                     }
                     if !okSig {
