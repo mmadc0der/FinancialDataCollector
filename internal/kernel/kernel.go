@@ -349,13 +349,13 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                 }
                 var req struct{
-                    Op         string          `json:"op"`
-                    SubjectKey string          `json:"subject_key"`
-                    SchemaID   string          `json:"schema_id"`
-                    SchemaName string          `json:"schema_name"`
-                    SchemaVer  int             `json:"schema_version"`
-                    SchemaBody json.RawMessage `json:"schema_body"`
-                    Attrs      json.RawMessage `json:"attrs"`
+                    Op           string          `json:"op"`
+                    SubjectKey   string          `json:"subject_key"`
+                    SchemaName   string          `json:"schema_name"`
+                    SchemaBody   json.RawMessage `json:"schema_body"`
+                    SchemaDelta  json.RawMessage `json:"schema_delta"`
+                    Attrs        json.RawMessage `json:"attrs"`
+                    AttrsDelta   json.RawMessage `json:"attrs_delta"`
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
                     logging.Warn("subject_register_invalid_payload", logging.F("id", m.ID), logging.F("payload", payloadStr))
@@ -365,33 +365,27 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 }
                 // Strict op validation before any DB calls
                 switch strings.ToLower(strings.TrimSpace(req.Op)) {
-                case "", "set_current":
-                    // Must provide either schema_id OR (schema_name AND schema_version)
-                    if req.SchemaID == "" && (strings.TrimSpace(req.SchemaName) == "" || req.SchemaVer <= 0) {
-                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "missing_schema_reference"))
-                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "missing_schema", "details": "need schema_id or (schema_name + schema_version)"}) }
-                        _ = k.rd.Ack(ctx, m.ID)
-                        continue
-                    }
-                    // If set_current is used, reject presence of schema_body to avoid ambiguity
-                    if len(strings.TrimSpace(string(req.SchemaBody))) > 0 {
-                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "schema_body_not_allowed_for_set_current"))
-                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "schema_body not allowed for set_current"}) }
-                        _ = k.rd.Ack(ctx, m.ID)
-                        continue
-                    }
-                case "upgrade_auto":
-                    // Must have schema_name and schema_body; version optional (server assigns next)
+                case "register":
                     if strings.TrimSpace(req.SchemaName) == "" || len(req.SchemaBody) == 0 || strings.TrimSpace(string(req.SchemaBody)) == "" {
                         logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "missing_schema_name_or_body"))
-                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "upgrade_auto requires schema_name and schema_body"}) }
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "register requires schema_name and schema_body"}) }
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
-                    // Reject explicit schema_id with upgrade_auto
-                    if strings.TrimSpace(req.SchemaID) != "" {
-                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "schema_id_not_allowed_for_upgrade_auto"))
-                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "schema_id not allowed for upgrade_auto"}) }
+                    if len(strings.TrimSpace(string(req.SchemaDelta))) > 0 || len(strings.TrimSpace(string(req.AttrsDelta))) > 0 {
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "delta fields not allowed for register"}) }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                case "upgrade":
+                    if strings.TrimSpace(req.SchemaName) == "" || len(strings.TrimSpace(string(req.SchemaDelta))) == 0 {
+                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "missing_schema_name_or_delta"))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "upgrade requires schema_name and schema_delta"}) }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                    if len(strings.TrimSpace(string(req.SchemaBody))) > 0 {
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "schema_body not allowed for upgrade"}) }
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
@@ -406,34 +400,23 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 var schemaName string
                 var schemaVersion int
                 switch strings.ToLower(strings.TrimSpace(req.Op)) {
-                case "upgrade_auto":
-                    sid, schemaID, schemaVersion, err = k.pg.UpgradeSubjectSchemaAuto(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)), true)
+                case "upgrade":
+                    sid, schemaID, schemaVersion, unchanged, err := k.pg.UpgradeSubjectSchemaIncremental(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaDelta)), []byte(coalesceJSON(req.AttrsDelta)))
+                    _ = unchanged
                     schemaName = req.SchemaName
-                default: // set_current
-                    if req.SchemaID != "" {
-                        if ok, _ := k.pg.SchemaExists(ctx, req.SchemaID); !ok {
-                            logging.Warn("subject_register_schema_not_found", logging.F("id", m.ID), logging.F("schema_id", req.SchemaID))
-                            if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "schema_not_found", "schema_id": req.SchemaID}) }
-                            _ = k.rd.Ack(ctx, m.ID)
-                            continue
-                        }
-                        sid, err = k.pg.EnsureSubject(ctx, req.SubjectKey, []byte(coalesceJSON(req.Attrs)), true)
-                        schemaID = req.SchemaID
-                    } else if req.SchemaName != "" && req.SchemaVer > 0 {
-                        schemaName = req.SchemaName
-                        schemaVersion = req.SchemaVer
-                        if sID, e := k.pg.EnsureSchemaImmutable(ctx, req.SchemaName, req.SchemaVer, nil, false); e == nil {
-                            schemaID = sID
-                            sid, err = k.pg.EnsureSubject(ctx, req.SubjectKey, []byte(coalesceJSON(req.Attrs)), true)
-                        } else {
-                            logging.Warn("subject_register_schema_version_not_found", logging.F("id", m.ID), logging.Err(e))
-                            if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "schema_version_not_found", "schema_name": req.SchemaName, "schema_version": req.SchemaVer}) }
-                            _ = k.rd.Ack(ctx, m.ID)
-                            continue
-                        }
-                    } else {
-                        logging.Warn("subject_register_missing_schema", logging.F("id", m.ID), logging.F("subject_key", req.SubjectKey))
-                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "missing_schema", "subject_key": req.SubjectKey}) }
+                    if err != nil {
+                        logging.Warn("subject_register_upgrade_error", logging.F("id", m.ID), logging.Err(err))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "upgrade_failed"}) }
+                        _ = k.rd.Ack(ctx, m.ID)
+                        continue
+                    }
+                case "register":
+                    sid, schemaID, schemaVersion, unchanged, err := k.pg.BootstrapSubjectWithSchema(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)))
+                    _ = unchanged
+                    schemaName = req.SchemaName
+                    if err != nil {
+                        logging.Warn("subject_register_register_error", logging.F("id", m.ID), logging.Err(err))
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "register_failed"}) }
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
@@ -444,7 +427,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 if producerID != "" { _ = k.pg.BindProducerSubject(ctx, producerID, sid) }
                 // Respond on per-producer stream
                 if producerID != "" {
-                    resp := map[string]any{"subject_id": sid, "schema_id": schemaID}
+                    resp := map[string]any{"status":"ok", "producer_id": producerID, "subject_id": sid, "schema_id": schemaID}
                     if schemaName != "" { resp["schema_name"] = schemaName }
                     if schemaVersion > 0 { resp["schema_version"] = schemaVersion }
                     k.sendSubjectResponse(ctx, producerID, resp)
@@ -514,11 +497,11 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                     if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
                         var tmp any
                         if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
+                        // Ed25519-only: verify raw signature over canonical bytes without prehash
                         msg := []byte(payloadStr + "." + nonce)
-                        sum := sha3.Sum512(msg)
                         sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                         if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
-                        if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) { okSig = true }
+                        if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
                     }
                 }
                 if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
@@ -607,10 +590,11 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                     if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
                         var tmp any
                         if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
-                        sum := sha3.Sum512([]byte(payloadStr + "." + nonce))
+                        // Ed25519-only: verify raw signature over canonical bytes without prehash
+                        msg := []byte(payloadStr + "." + nonce)
                         sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                         if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
-                        if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) { okSig = true }
+                        if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
                     }
                 }
                 if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }

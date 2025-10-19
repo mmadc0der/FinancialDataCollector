@@ -21,14 +21,19 @@
 
 ### Subject registration
 - Stream: `fdc:subject:register` (fixed). Fields:
-  - `token`: producer token
-  - `payload`: `{ "subject_key": "...", "schema_id": "...", "attrs"?: {...} }`
-- Behavior: ensure subject by key, set `current_schema_id` and append to history, bind producer↔subject.
-- Response: `fdc:subject:resp:<producer_id>` with `{ subject_id }`.
+  - `pubkey`: OpenSSH certificate (text), signed by `producer_ssh_ca`
+  - `payload`: canonical JSON per op (see below)
+  - `nonce`: unique string per request
+  - `sig`: base64-encoded raw Ed25519 signature over `canonical(payload)+"."+nonce`
+- Ops:
+  - `register`: create-or-ensure subject, create-or-ensure schema family v1; if current equals provided body → unchanged success; do not create new versions here
+  - `upgrade`: forward-only evolve by +1 version; deep-merge delta into current schema body; idempotent if no effective change
+- Response: `fdc:subject:resp:<producer_id>` with `{ status, producer_id, subject_id, schema_id, schema_name, schema_version, unchanged }`.
 
 ### Authentication
 - Tokens are EdDSA-signed and include `iss`, `aud`, `exp`, `nbf`, `jti`, `sub` (producer_id), and optional `sid` (subject_id). Kernel validates signature and JTI allowlist/blacklist; Redis cache accelerates checks.
 - If `sid` present, it must match the event’s `subject_id`.
+- All signed admin/registration requests must use raw Ed25519 signatures; base64 is transport encoding only.
 
 ### Producer registration
 - Stream: `fdc:register` (fixed) with fields `{ pubkey, payload, nonce, sig }`.

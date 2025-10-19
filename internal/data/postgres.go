@@ -178,6 +178,40 @@ func (p *Postgres) EnsureSubject(ctx context.Context, subjectKey string, attrs [
     return sid, nil
 }
 
+// BootstrapSubjectWithSchema: create-or-ensure subject and schema family v1; idempotent when body equals current
+func (p *Postgres) BootstrapSubjectWithSchema(ctx context.Context, subjectKey, name string, body []byte, attrs []byte) (string, string, int, bool, error) {
+    if p.pool == nil { return "", "", 0, false, nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    var sid, schID string
+    var ver int
+    var unchanged bool
+    var bodyParam any
+    if len(body) > 0 { bodyParam = string(body) } else { bodyParam = nil }
+    var attrsParam any
+    if len(attrs) > 0 { attrsParam = string(attrs) } else { attrsParam = nil }
+    err := p.pool.QueryRow(cctx, `SELECT (t).subject_id, (t).schema_id, (t).version, (t).unchanged FROM public.bootstrap_subject_with_schema($1,$2,$3::jsonb,$4::jsonb) AS t`, subjectKey, name, bodyParam, attrsParam).Scan(&sid, &schID, &ver, &unchanged)
+    if err != nil { return "", "", 0, false, err }
+    return sid, schID, ver, unchanged, nil
+}
+
+// UpgradeSubjectSchemaIncremental: deep-merge delta; +1 version if changed; idempotent otherwise
+func (p *Postgres) UpgradeSubjectSchemaIncremental(ctx context.Context, subjectKey, name string, delta []byte, attrsDelta []byte) (string, string, int, bool, error) {
+    if p.pool == nil { return "", "", 0, false, nil }
+    cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+    defer cancel()
+    var sid, schID string
+    var ver int
+    var unchanged bool
+    var deltaParam any
+    if len(delta) > 0 { deltaParam = string(delta) } else { deltaParam = nil }
+    var attrsParam any
+    if len(attrsDelta) > 0 { attrsParam = string(attrsDelta) } else { attrsParam = nil }
+    err := p.pool.QueryRow(cctx, `SELECT (t).subject_id, (t).schema_id, (t).version, (t).unchanged FROM public.upgrade_subject_schema_incremental($1,$2,$3::jsonb,$4::jsonb) AS t`, subjectKey, name, deltaParam, attrsParam).Scan(&sid, &schID, &ver, &unchanged)
+    if err != nil { return "", "", 0, false, err }
+    return sid, schID, ver, unchanged, nil
+}
+
 // UpgradeSubjectSchemaAuto atomically creates next version for schema name and sets current.
 func (p *Postgres) UpgradeSubjectSchemaAuto(ctx context.Context, subjectKey, name string, body []byte, attrs []byte, merge bool) (string, string, int, error) {
     if p.pool == nil { return "", "", 0, nil }
