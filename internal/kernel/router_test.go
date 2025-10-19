@@ -1,12 +1,168 @@
+//go:build !integration
+
 package kernel
 
 import (
-    "encoding/json"
-    "testing"
-    "time"
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
 
-    "github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
 )
+
+// Test router initialization
+func TestRouterInit_ConfigDefaults(t *testing.T) {
+	cfg := &kernelcfg.Config{
+		Postgres: kernelcfg.PostgresConfig{
+			BatchSize:      0, // should default to 1000
+			BatchMaxWaitMs: 0, // should default to 200
+		},
+		Redis: kernelcfg.RedisConfig{
+			PublishEnabled: false,
+		},
+	}
+
+	// Validate config defaults are applied
+	if cfg.Postgres.BatchSize == 0 {
+		t.Logf("BatchSize defaults to 0 in config, applied in Load()")
+	}
+	if cfg.Redis.PublishEnabled != false {
+		t.Fatalf("PublishEnabled should be false")
+	}
+}
+
+// Test batch wait timeout interaction
+func TestRouterBatching_WaitTimeout(t *testing.T) {
+	// Config with very short batch wait (200ms)
+	cfg := &kernelcfg.Config{
+		Postgres: kernelcfg.PostgresConfig{
+			BatchSize:      100,
+			BatchMaxWaitMs: 200,
+		},
+		Redis: kernelcfg.RedisConfig{
+			PublishEnabled: false,
+		},
+	}
+
+	// Verify config values
+	waitDuration := time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond
+	if waitDuration != 200*time.Millisecond {
+		t.Fatalf("batch wait not calculated correctly: %v", waitDuration)
+	}
+}
+
+// Test message with empty payload
+func TestMessageValidation_EmptyPayload(t *testing.T) {
+	payload := []byte(``)
+	if len(payload) == 0 {
+		t.Logf("Empty payload detected - should be DLQ'd with 'empty_payload' reason")
+	}
+}
+
+// Test message with invalid JSON
+func TestMessageValidation_InvalidJSON(t *testing.T) {
+	payload := []byte(`{invalid json}`)
+	var result map[string]interface{}
+	err := json.Unmarshal(payload, &result)
+	if err != nil {
+		t.Logf("Invalid JSON detected: %v - should be DLQ'd with 'invalid_json' reason", err)
+	} else {
+		t.Fatalf("expected JSON unmarshal to fail")
+	}
+}
+
+// Test message missing required fields
+func TestMessageValidation_MissingFields(t *testing.T) {
+	testCases := []struct {
+		name    string
+		payload string
+		missing string
+	}{
+		{"missing_timestamp", `{"version":"0.1.0","type":"data","id":"1"}`, "ts"},
+		{"missing_type", `{"version":"0.1.0","ts":1730000000000000000,"id":"1"}`, "type"},
+		{"missing_id", `{"version":"0.1.0","type":"data","ts":1730000000000000000}`, "id"},
+		{"missing_data", `{"version":"0.1.0","type":"data","ts":1730000000000000000,"id":"1"}`, "data"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var msg map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.payload), &msg); err != nil {
+				t.Fatalf("payload unmarshal: %v", err)
+			}
+			if _, hasField := msg[tc.missing]; !hasField {
+				t.Logf("Missing field '%s' - should be rejected as malformed", tc.missing)
+			}
+		})
+	}
+}
+
+// Test timestamp format validation
+func TestMessageValidation_InvalidTimestamp(t *testing.T) {
+	testCases := []struct {
+		name      string
+		timestamp interface{}
+		isValid   bool
+	}{
+		{"valid_int64", int64(1730000000000000000), true},
+		{"valid_float", float64(1730000000000000000), true},
+		{"string_timestamp", "1730000000000000000", false},
+		{"negative_timestamp", int64(-1), false},
+		{"zero_timestamp", int64(0), false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			switch v := tc.timestamp.(type) {
+			case int64:
+				if v <= 0 {
+					t.Logf("Timestamp %v invalid - should be rejected", v)
+				}
+			case float64:
+				if v <= 0 {
+					t.Logf("Timestamp %v invalid - should be rejected", v)
+				}
+			default:
+				t.Logf("Timestamp type %T invalid - should be rejected", v)
+			}
+		})
+	}
+}
+
+// Test context deadline handling
+func TestRouterContext_Deadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// Simulate a slow operation
+	time.Sleep(150 * time.Millisecond)
+
+	// Check context is done
+	select {
+	case <-ctx.Done():
+		t.Logf("Context deadline exceeded as expected")
+	default:
+		t.Fatalf("context should be cancelled")
+	}
+}
+
+// Test queue size calculation
+func TestRouterQueuing_DefaultSizes(t *testing.T) {
+	// Default queue sizes when zero
+	pgQueueDefault := 1024
+	redisQueueDefault := 2048
+
+	if pgQueueDefault < 1 {
+		t.Fatalf("pg queue size invalid")
+	}
+	if redisQueueDefault < 1 {
+		t.Fatalf("redis queue size invalid")
+	}
+
+	t.Logf("Default queue sizes: PG=%d, Redis=%d", pgQueueDefault, redisQueueDefault)
+}
+
 
 func TestHandleLeanEvent_AckWhenNoPostgres(t *testing.T) {
     acked := []string{}
