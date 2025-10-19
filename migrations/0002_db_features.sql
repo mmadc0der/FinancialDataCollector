@@ -179,7 +179,7 @@ SELECT DISTINCT s.event_id,
     (t->>'key') AS key,
     (t->>'value') AS value
 FROM _stage_events s,
-    LATERAL COALESCE(jsonb_array_elements(s.tags), '[]'::jsonb) AS t
+    LATERAL jsonb_array_elements(COALESCE(s.tags, '[]'::jsonb)) AS t
 WHERE (t->>'key') IS NOT NULL
     AND (t->>'value') IS NOT NULL;
 -- Upsert tag dictionary (case-insensitive CITEXT)
