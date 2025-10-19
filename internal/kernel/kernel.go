@@ -316,19 +316,20 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                     // replay protection
                     if k.rd != nil && k.rd.C() != nil {
-                        ok, err := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result()
+                        // Use per-producer SET to track nonces: key fdc:nonce:<producer_id>
+                        setKey := prefixed(k.cfg.Redis.KeyPrefix, "nonce:"+producerID)
+                        // SADD returns 1 if newly added, 0 if existed → treat 0 as replay
+                        added, err := k.rd.C().SAdd(ctx, setKey, nonce).Result()
                         if err != nil {
-                            logging.Warn("subject_register_nonce_guard_error", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce), logging.Err(err))
-                            // allow on error (do not treat as replay)
-                        } else if !ok {
-                            logging.Warn("subject_register_replay", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
-                            // best-effort send error response if producer is known
-                            if status, pidPtr, _ := k.pg.GetKeyStatus(ctx, fp); pidPtr != nil && *pidPtr != "" {
-                                _ = status // status not used here
-                                k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "replay"})
-                            }
+                            logging.Warn("subject_register_nonce_guard_error", logging.F("id", m.ID), logging.F("producer_id", producerID), logging.F("nonce", nonce), logging.Err(err))
+                        } else if added == 0 {
+                            logging.Warn("subject_register_replay", logging.F("id", m.ID), logging.F("producer_id", producerID), logging.F("nonce", nonce))
+                            k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "replay"})
                             _ = k.rd.Ack(ctx, m.ID)
                             continue
+                        } else {
+                            // ensure TTL exists (best-effort)
+                            _ = k.rd.C().Expire(ctx, setKey, 10*time.Minute).Err()
                         }
                     }
                     status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)

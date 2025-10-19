@@ -203,16 +203,13 @@ func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool 
                     payloadStr = string(cb)
                 }
             }
-            
-            // Verify over prehashed canonical bytes (SHA3-512)
+            // Verify raw Ed25519 signature over canonical bytes (no prehash)
             msg := []byte(payloadStr + "." + nonce)
-            sum := sha3.Sum512(msg)
             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
             if decErr != nil {
                 sigBytes, _ = base64.StdEncoding.DecodeString(sigB64)
             }
-            
-            if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, sum[:], sigBytes) {
+            if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) {
                 logging.Info("registration_sig_valid")
                 return true
             } else {
