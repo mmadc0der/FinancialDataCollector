@@ -34,9 +34,9 @@ DECLARE v_existing_body JSONB;
 BEGIN
     IF _name IS NULL OR _version IS NULL THEN RAISE EXCEPTION 'schema name/version required'; END IF;
 
-    SELECT schema_id, body INTO v_schema_id, v_existing_body
-    FROM public.schemas
-    WHERE name=_name AND version=_version;
+    SELECT s.schema_id, s.body INTO v_schema_id, v_existing_body
+    FROM public.schemas s
+    WHERE s.name=_name AND s.version=_version;
 
     IF v_schema_id IS NOT NULL THEN
         -- Immutability: if caller supplies body, it must match exactly
@@ -107,7 +107,7 @@ BEGIN
     -- Serialize per schema name to avoid version collisions
     PERFORM pg_advisory_xact_lock(hashtext(_name));
 
-    SELECT COALESCE(MAX(version), 0) + 1 INTO v_next_version FROM public.schemas WHERE name=_name;
+    SELECT COALESCE(MAX(s.version), 0) + 1 INTO v_next_version FROM public.schemas s WHERE s.name=_name;
     INSERT INTO public.schemas(schema_id, name, version, body)
     VALUES (gen_random_uuid(), _name, v_next_version, COALESCE(_body, '{}'::jsonb))
     RETURNING schema_id INTO v_schema_id;
