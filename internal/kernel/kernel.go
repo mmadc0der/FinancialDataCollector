@@ -19,7 +19,6 @@ import (
 	"github.com/example/data-kernel/internal/logging"
 	"github.com/example/data-kernel/internal/metrics"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/crypto/sha3"
 	ssh "golang.org/x/crypto/ssh"
 )
 
