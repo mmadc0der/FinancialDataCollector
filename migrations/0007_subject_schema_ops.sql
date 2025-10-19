@@ -187,7 +187,7 @@ BEGIN
     END IF;
     IF v_new_body IS NOT DISTINCT FROM v_current_body THEN
         -- unchanged
-        SELECT name, version INTO _name, v_next FROM public.schemas WHERE schema_id=v_current_schema; -- v_next receives current version
+        SELECT s.name, s.version INTO _name, v_next FROM public.schemas s WHERE s.schema_id=v_current_schema; -- v_next receives current version
         subject_id := v_subject_id; schema_id := v_current_schema; version := v_next; unchanged := TRUE; RETURN;
     END IF;
     -- create next version atomically
