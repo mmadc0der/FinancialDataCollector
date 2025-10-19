@@ -135,9 +135,10 @@ BEGIN
     IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required' USING ERRCODE='P0001'; END IF;
     IF _name IS NULL THEN RAISE EXCEPTION 'schema name required' USING ERRCODE='P0001'; END IF;
     PERFORM pg_advisory_xact_lock(hashtext(_name));
-    SELECT MAX(s.version), (SELECT s2.body FROM public.schemas s2 WHERE s2.name=_name AND s2.version=MAX(s.version))
-      INTO v_latest, v_latest_body
-      FROM public.schemas s WHERE s.name=_name;
+    WITH latest_schema AS (
+        SELECT s.version, s.body FROM public.schemas s WHERE s.name=_name ORDER BY s.version DESC LIMIT 1
+    )
+    SELECT ls.version, ls.body INTO v_latest, v_latest_body FROM latest_schema ls;
     IF v_latest IS NULL THEN
         -- create v1
         v_latest := 1;
