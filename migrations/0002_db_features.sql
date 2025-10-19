@@ -326,24 +326,18 @@ END LOOP;
 END;
 $$;
 -- 3) Security roles and grants
-DO $$ BEGIN REVOKE
-INSERT,
-    UPDATE,
-    DELETE ON events,
-    event_tags,
-    event_index
-FROM PUBLIC;
+DO $$ BEGIN 
+REVOKE INSERT, UPDATE, DELETE ON events, event_tags, event_index FROM PUBLIC;
 IF EXISTS (
-    SELECT 1
-    FROM pg_roles
-    WHERE rolname = 'fdc-kernel'
-) THEN REVOKE
-INSERT,
-    UPDATE,
-    DELETE ON events,
-    event_tags,
-    event_index
-FROM "fdc-kernel";
-GRANT EXECUTE ON FUNCTION public.ingest_events(jsonb) TO "fdc-kernel";
+    SELECT 1 FROM pg_roles WHERE rolname = 'fdc-kernel'
+) THEN 
+    -- Grant minimal DML needed by kernel for ingest pipeline
+    GRANT INSERT, SELECT ON public.event_index TO "fdc-kernel";
+    GRANT INSERT ON public.events TO "fdc-kernel";
+    GRANT INSERT ON public.event_tags TO "fdc-kernel";
+    GRANT SELECT, INSERT ON public.tags TO "fdc-kernel";
+    GRANT INSERT, UPDATE ON public.stats_event_month TO "fdc-kernel";
+    GRANT INSERT, UPDATE ON public.stats_tag_month TO "fdc-kernel";
+    GRANT EXECUTE ON FUNCTION public.ingest_events(jsonb) TO "fdc-kernel";
 END IF;
 END $$;
