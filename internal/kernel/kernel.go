@@ -1,25 +1,26 @@
 package kernel
 
 import (
-    "context"
-    "fmt"
-    "net/http"
-    "time"
+	"context"
+	"fmt"
+	"net/http"
+	"time"
 
-    "github.com/example/data-kernel/internal/kernelcfg"
-    "github.com/example/data-kernel/internal/logging"
-    "github.com/example/data-kernel/internal/metrics"
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/auth"
-    "encoding/json"
-    "strings"
-    "errors"
-    "github.com/redis/go-redis/v9"
-    "bytes"
-    "crypto/ed25519"
-    "encoding/base64"
-    ssh "golang.org/x/crypto/ssh"
-    "golang.org/x/crypto/sha3"
+	"bytes"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"strings"
+
+	"github.com/example/data-kernel/internal/auth"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	"github.com/example/data-kernel/internal/logging"
+	"github.com/example/data-kernel/internal/metrics"
+	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 type Kernel struct {
@@ -402,7 +403,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 var schemaVersion int
                 switch strings.ToLower(strings.TrimSpace(req.Op)) {
                 case "upgrade":
-                    sid, schemaID, schemaVersion, unchanged, err := k.pg.UpgradeSubjectSchemaIncremental(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaDelta)), []byte(coalesceJSON(req.AttrsDelta)))
+                    _, _, _, unchanged, err := k.pg.UpgradeSubjectSchemaIncremental(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaDelta)), []byte(coalesceJSON(req.AttrsDelta)))
                     _ = unchanged
                     schemaName = req.SchemaName
                     if err != nil {
@@ -412,7 +413,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         continue
                     }
                 case "register":
-                    sid, schemaID, schemaVersion, unchanged, err := k.pg.BootstrapSubjectWithSchema(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)))
+                    _, _, _, unchanged, err := k.pg.BootstrapSubjectWithSchema(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)))
                     _ = unchanged
                     schemaName = req.SchemaName
                     if err != nil {
