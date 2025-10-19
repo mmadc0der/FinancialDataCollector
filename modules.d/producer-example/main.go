@@ -189,11 +189,17 @@ func readResponseOnce(ctx context.Context, rdb *redis.Client, stream string, las
 func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Signer, pubForRegistration string, cfg Config, producerID string) (string, string, int, error) {
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
-    // Choose op automatically: upgrade if schema body provided with name; otherwise register
-    baseReq := map[string]any{"subject_key": subjectKey, "attrs": map[string]any{"region":"eu"}}
+    // Always use register operation - it's idempotent and will create subject/schema if needed
+    baseReq := map[string]any{
+        "op": "register", 
+        "subject_key": subjectKey, 
+        "attrs": map[string]any{"region":"eu"}
+    }
+    
+    // Add schema information if provided
     if cfg.Producer.SchemaName != "" {
         baseReq["schema_name"] = cfg.Producer.SchemaName
-        // Prefer inline schema_body if provided
+        // Add schema body if provided
         if s := strings.TrimSpace(cfg.Producer.SchemaBody); s != "" {
             var js any
             if json.Unmarshal([]byte(s), &js) == nil { 
@@ -201,15 +207,7 @@ func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Sign
             } else { 
                 baseReq["schema_body"] = s 
             }
-            baseReq["op"] = "register"  // register with initial schema
-        } else {
-            baseReq["op"] = "upgrade"   // upgrade existing schema
-            // For upgrade, we can provide schema_delta and attrs_delta
-            baseReq["schema_delta"] = map[string]any{"version": "1.0.1"}
-            baseReq["attrs_delta"] = map[string]any{"region": "eu-west"}
         }
-    } else {
-        baseReq["op"] = "register"  // register without schema
     }
 
     subjStream := cfg.Redis.KeyPrefix+"subject:register"
