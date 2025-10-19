@@ -115,9 +115,7 @@ BEGIN
     v_subject_id := public.ensure_subject(_subject_key, _attrs, _merge);
     PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
 
-    subject_id := v_subject_id;
-    schema_id := v_schema_id;
-    version := v_next_version;
+    RETURN QUERY SELECT v_subject_id, v_schema_id, v_next_version;
     RETURN;
 END;
 $$;
@@ -147,14 +145,16 @@ BEGIN
         RETURNING public.schemas.schema_id INTO v_schema_id;
         v_subject_id := public.ensure_subject(_subject_key, _attrs, TRUE);
         PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
-        subject_id := v_subject_id; schema_id := v_schema_id; version := v_latest; unchanged := FALSE; RETURN;
+        RETURN QUERY SELECT v_subject_id, v_schema_id, v_latest, FALSE;
+        RETURN;
     END IF;
     -- family exists; idempotent only when requested body equals current latest
     IF v_latest_body IS NOT DISTINCT FROM COALESCE(_body, '{}'::jsonb) THEN
         SELECT s.schema_id INTO v_schema_id FROM public.schemas s WHERE s.name=_name AND s.version=v_latest;
         v_subject_id := public.ensure_subject(_subject_key, _attrs, TRUE);
         PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
-        subject_id := v_subject_id; schema_id := v_schema_id; version := v_latest; unchanged := TRUE; RETURN;
+        RETURN QUERY SELECT v_subject_id, v_schema_id, v_latest, TRUE;
+        RETURN;
     END IF;
     RAISE EXCEPTION 'schema_family_conflict: latest body differs' USING ERRCODE='P0001';
 END; $$;
@@ -198,7 +198,8 @@ BEGIN
     VALUES (gen_random_uuid(), _name, v_next, v_new_body)
     RETURNING public.schemas.schema_id INTO v_schema_id;
     PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
-    subject_id := v_subject_id; schema_id := v_schema_id; version := v_next; unchanged := FALSE; RETURN;
+    RETURN QUERY SELECT v_subject_id, v_schema_id, v_next, FALSE;
+    RETURN;
 END; $$;
 
 
