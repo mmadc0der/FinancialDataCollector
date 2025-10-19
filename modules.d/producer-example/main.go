@@ -190,24 +190,21 @@ func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Sign
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
     // Always use register operation - it's idempotent and will create subject/schema if needed
+    // Register operation requires both schema_name and schema_body
+    schemaName := cfg.Producer.SchemaName
+    if schemaName == "" { schemaName = "demo_schema" }
+    
+    schemaBody := cfg.Producer.SchemaBody
+    if schemaBody == "" { 
+        schemaBody = `{"type":"object","properties":{"value":{"type":"number"},"timestamp":{"type":"string"}},"required":["value","timestamp"]}`
+    }
+    
     baseReq := map[string]any{
         "op": "register", 
         "subject_key": subjectKey, 
         "attrs": map[string]any{"region":"eu"},
-    }
-    
-    // Add schema information if provided
-    if cfg.Producer.SchemaName != "" {
-        baseReq["schema_name"] = cfg.Producer.SchemaName
-        // Add schema body if provided
-        if s := strings.TrimSpace(cfg.Producer.SchemaBody); s != "" {
-            var js any
-            if json.Unmarshal([]byte(s), &js) == nil { 
-                baseReq["schema_body"] = js 
-            } else { 
-                baseReq["schema_body"] = s 
-            }
-        }
+        "schema_name": schemaName,
+        "schema_body": schemaBody,
     }
 
     subjStream := cfg.Redis.KeyPrefix+"subject:register"
