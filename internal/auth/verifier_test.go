@@ -153,8 +153,12 @@ func TestVerify_NBFClaimEdgeCases(t *testing.T) {
     cfg := kernelcfg.AuthConfig{RequireToken: true, Issuer: "iss", Audience: "aud", KeyID: "k", PublicKeys: map[string]string{"k": b64raw(pub)}, PrivateKey: b64raw(priv), CacheTTLSeconds: 60, SkewSeconds: 5}
     v, _ := NewVerifier(cfg, nil, nil)
     db := &fakeDB{exists: true, pid: "p1"}
+    rd := &fakeRedis{kv: map[string]string{}}
     authDbTokenExists = func(_ *data.Postgres, ctx context.Context, jti string) (bool, string) { return db.TokenExists(ctx, jti) }
     authDbIsTokenRevoked = func(_ *data.Postgres, ctx context.Context, jti string) bool { return db.IsTokenRevoked(ctx, jti) }
+    authRedisExists = func(_ *data.Redis, ctx context.Context, key string) (int64, error) { if _,ok:=rd.kv[key]; ok { return 1,nil }; return 0,nil }
+    authRedisGet = func(_ *data.Redis, ctx context.Context, key string) (string, error) { return rd.kv[key], nil }
+    authRedisSet = func(_ *data.Redis, ctx context.Context, key, value string, ttl time.Duration) error { rd.kv[key] = value; return nil }
     
     // Issue token with short TTL (nbf = now - skew)
     tok, _, _, _ := v.Issue(nil, "p1", 1*time.Second, "", "")
@@ -181,15 +185,19 @@ func TestVerify_CacheHitForRevocation(t *testing.T) {
     authRedisGet = func(_ *data.Redis, ctx context.Context, key string) (string, error) { return rd.kv[key], nil }
     authRedisSet = func(_ *data.Redis, ctx context.Context, key, value string, ttl time.Duration) error { rd.kv[key] = value; return nil }
     authRedisDel = func(_ *data.Redis, ctx context.Context, key string) error { delete(rd.kv, key); return nil }
+    authDbRevokeToken = func(_ *data.Postgres, ctx context.Context, jti, reason string) error { return db.RevokeToken(ctx, jti, reason) }
     
     tok, jti, _, _ := v.Issue(nil, "p1", time.Minute, "", "")
     
-    // First verify: should hit DB
+    // After Issue, token is already in cache. Clear cache to test DB lookup
+    rd.kv = map[string]string{}
+    
+    // First verify (no cache): should hit DB
     dbLookups = 0
     if _, _, _, err := v.Verify(nil, tok); err != nil { t.Fatalf("first verify: %v", err) }
     if dbLookups != 1 { t.Fatalf("expected 1 db lookup, got %d", dbLookups) }
     
-    // Second verify: should hit Redis cache (no DB lookup)
+    // Second verify (with cache): should hit Redis cache (no DB lookup)
     dbLookups = 0
     if _, _, _, err := v.Verify(nil, tok); err != nil { t.Fatalf("second verify: %v", err) }
     if dbLookups != 0 { t.Fatalf("expected 0 db lookups on cache hit, got %d", dbLookups) }

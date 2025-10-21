@@ -5,6 +5,8 @@ package data
 import (
 	"testing"
 	"time"
+
+	"github.com/example/data-kernel/internal/kernelcfg"
 )
 
 // Test config defaults
@@ -107,8 +109,8 @@ func TestPostgresConfig_DefaultIDs(t *testing.T) {
 }
 
 // Helper to create test config
-func newTestPostgresConfig() PostgresConfig {
-	return PostgresConfig{
+func newTestPostgresConfig() kernelcfg.PostgresConfig {
+	return kernelcfg.PostgresConfig{
 		DSN:               "postgres://test:test@localhost/testdb",
 		MaxConns:          10,
 		ConnMaxLifetimeMs: 0,

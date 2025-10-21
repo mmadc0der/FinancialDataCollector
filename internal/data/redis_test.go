@@ -5,6 +5,8 @@ package data
 import (
 	"testing"
 	"time"
+
+	"github.com/example/data-kernel/internal/kernelcfg"
 )
 
 // Test Redis config defaults
@@ -161,8 +163,8 @@ func endsWith(s, suffix string) bool {
 }
 
 // Helper to create test config
-func newTestRedisConfig() RedisConfig {
-	return RedisConfig{
+func newTestRedisConfig() kernelcfg.RedisConfig {
+	return kernelcfg.RedisConfig{
 		Addr:         "localhost:6379",
 		Username:     "",
 		Password:     "",
