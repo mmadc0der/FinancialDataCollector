@@ -1,12 +1,12 @@
 package data
 
 import (
-    "context"
-    "encoding/json"
-    "time"
+	"context"
+	"encoding/json"
+	"time"
 
-    "github.com/example/data-kernel/internal/kernelcfg"
-    "github.com/redis/go-redis/v9"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	"github.com/redis/go-redis/v9"
 )
 
 type Redis struct {
@@ -87,7 +87,7 @@ func (r *Redis) Ack(ctx context.Context, ids ...string) error {
     }
 
     // Then delete them from the stream for exact-one consumption and growth control
-    return r.c.XDel(ctx, r.stream, ids...).Err()
+    return r.c.XTrimMaxLenApprox(ctx, r.stream, 32384, 0).Err()
 }
 
 
