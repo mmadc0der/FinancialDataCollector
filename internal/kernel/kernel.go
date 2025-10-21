@@ -123,7 +123,6 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
     // Periodic stream trimming to prevent unlimited growth
     trimTicker := time.NewTicker(5 * time.Minute)
     defer trimTicker.Stop()
-    lastTrimTime := time.Now()
 
     trimStreams := func() {
         if k.rd == nil || k.rd.C() == nil { return }
