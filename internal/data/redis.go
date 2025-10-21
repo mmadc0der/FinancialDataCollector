@@ -86,6 +86,12 @@ func (r *Redis) Ack(ctx context.Context, ids ...string) error {
     return r.c.XAck(ctx, r.stream, r.group, ids...).Err()
 }
 
+// TrimStream trims a stream to maxLen entries using approximate trimming.
+func (r *Redis) TrimStream(ctx context.Context, stream string, maxLen int64) error {
+    if r.c == nil || stream == "" || maxLen <= 0 { return nil }
+    return r.c.XTrimApprox(ctx, stream, maxLen).Err()
+}
+
 // ToDLQ writes a payload to DLQ stream with age-based trimming.
 func (r *Redis) ToDLQ(ctx context.Context, dlqStream string, id string, payload []byte, errMsg string) error {
     if r.c == nil || dlqStream == "" { return nil }

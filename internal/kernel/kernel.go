@@ -119,6 +119,31 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
     block := time.Duration(k.cfg.Redis.BlockMs) * time.Millisecond
     if block <= 0 { block = 5 * time.Second }
     dlq := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.DLQStream)
+
+    // Periodic stream trimming to prevent unlimited growth
+    trimTicker := time.NewTicker(5 * time.Minute)
+    defer trimTicker.Stop()
+    lastTrimTime := time.Now()
+
+    trimStreams := func() {
+        if k.rd == nil || k.rd.C() == nil { return }
+
+        // Trim main events stream to maxlen
+        eventsStream := prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)
+        if err := k.rd.TrimStream(ctx, eventsStream, k.cfg.Redis.MaxLenApprox); err != nil {
+            logging.Warn("redis_trim_error", logging.F("stream", eventsStream), logging.Err(err))
+        } else {
+            logging.Info("redis_stream_trimmed", logging.F("stream", eventsStream), logging.F("max_len", k.cfg.Redis.MaxLenApprox))
+        }
+
+        // Trim DLQ stream to maxlen
+        if err := k.rd.TrimStream(ctx, dlq, k.cfg.Redis.MaxLenApprox); err != nil {
+            logging.Warn("redis_trim_dlq_error", logging.F("stream", dlq), logging.Err(err))
+        } else {
+            logging.Info("redis_dlq_trimmed", logging.F("stream", dlq), logging.F("max_len", k.cfg.Redis.MaxLenApprox))
+        }
+    }
+
     for ctx.Err() == nil {
         t0 := time.Now()
         streams, err := k.rd.ReadBatch(ctx, consumer, count, block)
@@ -139,6 +164,13 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if strings.EqualFold(g.Name, k.cfg.Redis.ConsumerGroup) { metrics.RedisPendingGauge.Set(float64(g.Pending)) }
             }
         }
+        // Check if it's time to trim streams
+        select {
+        case <-trimTicker.C:
+            trimStreams()
+        default:
+        }
+
         for _, s := range streams {
             for _, m := range s.Messages {
                 metrics.RedisReadTotal.Add(1)
