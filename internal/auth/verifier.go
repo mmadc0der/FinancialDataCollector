@@ -214,6 +214,31 @@ func (v *Verifier) Revoke(ctx context.Context, jti, reason string) error {
     return nil
 }
 
+// GetKeyStatusWithCache retrieves key status with Redis caching for better performance
+func (v *Verifier) GetKeyStatusWithCache(ctx context.Context, fingerprint string) (string, *string, error) {
+    // Try cache first
+    if status, producerID, found := authKeyStatusGet(v.rd, ctx, fingerprint); found {
+        return status, producerID, nil
+    }
+
+    // Cache miss - query database
+    status, producerID, err := authDbGetKeyStatus(v.pg, ctx, fingerprint)
+    if err != nil {
+        return "", nil, err
+    }
+
+    // Cache the result for 5 minutes (key status doesn't change often)
+    _ = authKeyStatusSet(v.rd, ctx, fingerprint, status, producerID, 5*time.Minute)
+
+    return status, producerID, nil
+}
+
+// wrapper function for database key status lookup
+var authDbGetKeyStatus = func(pg *data.Postgres, ctx context.Context, fingerprint string) (string, *string, error) {
+    if pg == nil { return "", nil, errors.New("postgres_disabled") }
+    return pg.GetKeyStatus(ctx, fingerprint)
+}
+
 // wrapper functions to allow substitution in tests without changing production behavior
 var (
     authDbInsertToken = func(pg *data.Postgres, ctx context.Context, producerID, jti string, exp time.Time, notes string) error {
@@ -247,6 +272,36 @@ var (
     authRedisDel = func(rd *data.Redis, ctx context.Context, key string) error {
         if rd != nil && rd.C() != nil { return rd.C().Del(ctx, key).Err() }
         return nil
+    }
+    // Key status cache helpers
+    authKeyStatusGet = func(rd *data.Redis, ctx context.Context, fingerprint string) (string, *string, bool) {
+        if rd == nil || rd.C() == nil || fingerprint == "" { return "", nil, false }
+        key := "auth:key:status:" + fingerprint
+        val, err := rd.C().Get(ctx, key).Result()
+        if err == nil && val != "" {
+            // Parse cached value: "status|producer_id"
+            parts := strings.SplitN(val, "|", 2)
+            if len(parts) >= 1 {
+                status := parts[0]
+                var producerID *string
+                if len(parts) > 1 && parts[1] != "" {
+                    producerID = &parts[1]
+                }
+                return status, producerID, true
+            }
+        }
+        return "", nil, false
+    }
+    authKeyStatusSet = func(rd *data.Redis, ctx context.Context, fingerprint, status string, producerID *string, ttl time.Duration) error {
+        if rd == nil || rd.C() == nil || fingerprint == "" { return nil }
+        key := "auth:key:status:" + fingerprint
+        var val string
+        if producerID != nil {
+            val = status + "|" + *producerID
+        } else {
+            val = status + "|"
+        }
+        return rd.C().Set(ctx, key, val, ttl).Err()
     }
 )
 

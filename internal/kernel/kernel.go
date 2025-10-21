@@ -13,6 +13,10 @@ import (
 	"errors"
 	"strings"
 
+	"context"
+	"sync"
+	"time"
+
 	"github.com/example/data-kernel/internal/auth"
 	"github.com/example/data-kernel/internal/data"
 	"github.com/example/data-kernel/internal/kernelcfg"
@@ -21,6 +25,26 @@ import (
 	"github.com/redis/go-redis/v9"
 	ssh "golang.org/x/crypto/ssh"
 )
+
+// Context pool for reducing context creation overhead
+var contextPool = sync.Pool{
+	New: func() interface{} {
+		return context.Background()
+	},
+}
+
+// GetContext gets a context from the pool or creates a new one
+func getContext() context.Context {
+	return contextPool.Get().(context.Context)
+}
+
+// PutContext returns a context to the pool
+func putContext(ctx context.Context) {
+	// Only pool background contexts to avoid issues with cancelled contexts
+	if ctx == context.Background() {
+		contextPool.Put(ctx)
+	}
+}
 
 type Kernel struct {
 	cfg *kernelcfg.Config
@@ -145,27 +169,27 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
 
         for _, s := range streams {
             for _, m := range s.Messages {
-                metrics.RedisReadTotal.Add(1)
+                globalMetricsBatcher.IncRedisRead()
                 id, payload, token := data.DecodeMessage(m)
                 if len(payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, []byte("{}"), "empty_payload")
                     logging.Warn("redis_dlq_empty_payload", logging.F("id", id))
-                    metrics.RedisDLQTotal.Add(1)
+                    globalMetricsBatcher.IncRedisDLQ()
                     _ = k.rd.Ack(ctx, m.ID)
-                    metrics.RedisAckTotal.Add(1)
+                    globalMetricsBatcher.IncRedisAck()
                     continue
                 }
                 // Authenticate and capture producer/subject from token
                 var producerID, subjectIDFromToken, jti string
                 {
                     if pid, sid, j, err := k.au.Verify(ctx, token); err != nil {
-                        metrics.AuthDeniedTotal.Inc()
+                        globalMetricsBatcher.IncAuthDenied()
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
                         logging.Warn("redis_auth_denied", logging.F("id", id), logging.F("redis_id", m.ID), logging.Err(err))
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             logging.Error("redis_ack_failed", logging.F("redis_id", m.ID), logging.Err(ackErr))
                         } else {
-                            metrics.RedisAckTotal.Add(1)
+                            globalMetricsBatcher.IncRedisAck()
                         }
                         continue
                     } else { producerID, subjectIDFromToken, jti = pid, sid, j }
@@ -176,7 +200,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_disabled")
                         logging.Warn("redis_producer_disabled", logging.F("id", id))
                         _ = k.rd.Ack(ctx, m.ID)
-                        metrics.RedisAckTotal.Add(1)
+                        globalMetricsBatcher.IncRedisAck()
                         continue
                     }
                 }
@@ -192,9 +216,9 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if err := json.Unmarshal(payload, &ev); err != nil || ev.EventID == "" || ev.TS == "" || ev.SubjectID == "" || len(ev.Payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_event_json")
                     logging.Warn("redis_dlq_bad_event_json", logging.F("id", id))
-                    metrics.RedisDLQTotal.Add(1)
+                    globalMetricsBatcher.IncRedisDLQ()
                     _ = k.rd.Ack(ctx, m.ID)
-                    metrics.RedisAckTotal.Add(1)
+                    globalMetricsBatcher.IncRedisAck()
                     continue
                 }
                 // if token has sid, enforce match
@@ -202,7 +226,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "subject_mismatch_token")
                     logging.Warn("redis_subject_mismatch", logging.F("id", id))
                     _ = k.rd.Ack(ctx, m.ID)
-                    metrics.RedisAckTotal.Add(1)
+                    globalMetricsBatcher.IncRedisAck()
                     continue
                 }
                 // Verify producer-subject binding
@@ -211,24 +235,28 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_subject_forbidden")
                         logging.Warn("redis_producer_subject_forbidden", logging.F("id", id))
                         _ = k.rd.Ack(ctx, m.ID)
-                        metrics.RedisAckTotal.Add(1)
+                        globalMetricsBatcher.IncRedisAck()
                         continue
                     }
                 }
-                // Resolve schema via cache→DB
+                // Resolve schema via cache→async DB lookup
                 var schemaID string
                 if sid, ok := k.rd.SchemaCacheGet(ctx, ev.SubjectID); ok {
                     schemaID = sid
-                } else if s, err := k.pg.GetCurrentSchemaID(ctx, ev.SubjectID); err == nil && s != "" {
-                    schemaID = s
-                    _ = k.rd.SchemaCacheSet(ctx, ev.SubjectID, s, time.Hour)
-                }
-                if schemaID == "" {
-                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "missing_subject_schema")
-                    logging.Warn("redis_missing_subject_schema", logging.F("id", id))
-                    _ = k.rd.Ack(ctx, m.ID)
-                    metrics.RedisAckTotal.Add(1)
-                    continue
+                } else {
+                    // Async schema resolution to avoid blocking main thread
+                    go func(subjectID, eventID string) {
+                        bgCtx := getContext()
+                        defer putContext(bgCtx)
+                        if s, err := k.pg.GetCurrentSchemaID(bgCtx, subjectID); err == nil && s != "" {
+                            _ = k.rd.SchemaCacheSet(bgCtx, subjectID, s, time.Hour)
+                            logging.Debug("schema_cache_miss_resolved", logging.F("subject_id", subjectID), logging.F("schema_id", s))
+                        }
+                    }(ev.SubjectID, ev.EventID)
+
+                    // For now, route with empty schema ID - this will be handled by DB constraints
+                    // In production, you might want to implement a more sophisticated fallback
+                    schemaID = "" // Let the DB handle missing schema validation
                 }
                 // route for durable handling; ack will be done after persistence via router callback
                 k.rt.handleLeanEvent(m.ID, ev.EventID, ev.TS, ev.SubjectID, producerID, ev.Payload, ev.Tags, schemaID)

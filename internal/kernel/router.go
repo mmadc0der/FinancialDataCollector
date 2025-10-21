@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/example/data-kernel/internal/data"
@@ -15,6 +17,179 @@ import (
 	"github.com/example/data-kernel/internal/metrics"
 	"github.com/example/data-kernel/internal/spill"
 )
+
+// Object pools for reducing GC pressure
+var (
+	// Pool for map[string]any used in JSON unmarshaling
+	jsonMapPool = sync.Pool{
+		New: func() interface{} {
+			return make(map[string]any)
+		},
+	}
+
+	// Pool for []map[string]string used in tags
+	tagsSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]map[string]string, 0, 10)
+		},
+	}
+
+	// Pool for []map[string]any used in events
+	eventsSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]map[string]any, 0, 100)
+		},
+	}
+)
+
+// MetricsBatcher batches metrics updates to reduce overhead
+type MetricsBatcher struct {
+	mu          sync.Mutex
+	redisRead   int64
+	redisAck    int64
+	redisDLQ    int64
+	authDenied  int64
+	lastFlush   time.Time
+	flushTicker *time.Ticker
+}
+
+func newMetricsBatcher() *MetricsBatcher {
+	mb := &MetricsBatcher{
+		flushTicker: time.NewTicker(10 * time.Second),
+		lastFlush:   time.Now(),
+	}
+	go mb.flushLoop()
+	return mb
+}
+
+func (mb *MetricsBatcher) flushLoop() {
+	for range mb.flushTicker.C {
+		mb.Flush()
+	}
+}
+
+func (mb *MetricsBatcher) Flush() {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+
+	if mb.redisRead > 0 {
+		metrics.RedisReadTotal.Add(float64(mb.redisRead))
+		mb.redisRead = 0
+	}
+	if mb.redisAck > 0 {
+		metrics.RedisAckTotal.Add(float64(mb.redisAck))
+		mb.redisAck = 0
+	}
+	if mb.redisDLQ > 0 {
+		metrics.RedisDLQTotal.Add(float64(mb.redisDLQ))
+		mb.redisDLQ = 0
+	}
+	if mb.authDenied > 0 {
+		metrics.AuthDeniedTotal.Add(float64(mb.authDenied))
+		mb.authDenied = 0
+	}
+	mb.lastFlush = time.Now()
+}
+
+func (mb *MetricsBatcher) IncRedisRead() {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	mb.redisRead++
+}
+
+func (mb *MetricsBatcher) IncRedisAck() {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	mb.redisAck++
+}
+
+func (mb *MetricsBatcher) IncRedisDLQ() {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	mb.redisDLQ++
+}
+
+func (mb *MetricsBatcher) IncAuthDenied() {
+	mb.mu.Lock()
+	defer mb.mu.Unlock()
+	mb.authDenied++
+}
+
+var globalMetricsBatcher = newMetricsBatcher()
+
+// CircuitBreaker implements circuit breaker pattern for database operations
+type CircuitBreaker struct {
+    mu           sync.RWMutex
+    failureCount int
+    lastFailTime time.Time
+    state        circuitState
+    threshold    int
+    timeout      time.Duration
+}
+
+type circuitState int
+
+const (
+    circuitClosed circuitState = iota
+    circuitOpen
+    circuitHalfOpen
+)
+
+func newCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
+    return &CircuitBreaker{
+        threshold: threshold,
+        timeout:   timeout,
+        state:     circuitClosed,
+    }
+}
+
+func (cb *CircuitBreaker) canExecute() bool {
+    cb.mu.RLock()
+    defer cb.mu.RUnlock()
+
+    switch cb.state {
+    case circuitClosed:
+        return true
+    case circuitOpen:
+        if time.Since(cb.lastFailTime) > cb.timeout {
+            cb.mu.RUnlock()
+            cb.mu.Lock()
+            if cb.state == circuitOpen && time.Since(cb.lastFailTime) > cb.timeout {
+                cb.state = circuitHalfOpen
+            }
+            cb.mu.Unlock()
+            cb.mu.RLock()
+            return cb.state == circuitHalfOpen
+        }
+        return false
+    case circuitHalfOpen:
+        return true
+    default:
+        return false
+    }
+}
+
+func (cb *CircuitBreaker) onSuccess() {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+
+    cb.failureCount = 0
+    if cb.state == circuitHalfOpen {
+        cb.state = circuitClosed
+    }
+}
+
+func (cb *CircuitBreaker) onFailure() {
+    cb.mu.Lock()
+    defer cb.mu.Unlock()
+
+    cb.failureCount++
+    cb.lastFailTime = time.Now()
+
+    if cb.failureCount >= cb.threshold {
+        cb.state = circuitOpen
+    }
+}
 
 type router struct {
     pg   *data.Postgres
@@ -32,10 +207,18 @@ type router struct {
     // ingest config (producer/schema ids are not defaulted for lean events)
     prodID string
     schID  string
+    // circuit breaker for database operations
+    pgCircuitBreaker *CircuitBreaker
 }
 
 func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) {
-    r := &router{publishEnabled: cfg.Redis.PublishEnabled, pgBatchSize: cfg.Postgres.BatchSize, pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond, ack: ack}
+    r := &router{
+        publishEnabled: cfg.Redis.PublishEnabled,
+        pgBatchSize: cfg.Postgres.BatchSize,
+        pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond,
+        ack: ack,
+        pgCircuitBreaker: newCircuitBreaker(cfg.Postgres.CircuitBreakerThreshold, time.Duration(cfg.Postgres.CircuitBreakerTimeoutSeconds)*time.Second),
+    }
     // pick defaults from config, may be empty which signals NULL in DB
     r.prodID = cfg.Postgres.DefaultProducerID
     r.schID = ""
@@ -110,21 +293,62 @@ func (r *router) pgWorkerBatch() {
         }
         metrics.PGBatchSize.Observe(float64(len(events)))
         t0 := time.Now()
+
+        // Check circuit breaker before executing
+        if !r.pgCircuitBreaker.canExecute() {
+            logging.Warn("pg_circuit_breaker_open", logging.F("batch_size", len(events)))
+            // Fall back to spill immediately when circuit is open
+            if r.spw == nil {
+                if w, e := spill.NewWriter("./spill"); e == nil { r.spw = w } else { logging.Error("spill_init_error", logging.Err(e)) }
+            }
+            if r.spw != nil {
+                // Use async spill write to avoid blocking the main thread
+                go func(events []map[string]any, redisIDs []string) {
+                    if _, _, e := r.spw.Write(events); e == nil {
+                        if r.ack != nil { r.ack(redisIDs...) }
+                        logging.Warn("pg_circuit_spilled", logging.F("count", len(events)))
+                    } else {
+                        logging.Error("spill_write_failed", logging.F("count", len(events)), logging.Err(e))
+                    }
+                }(events, redisIDs)
+                buf = buf[:0]
+                return
+            }
+            logging.Error("pg_circuit_no_fallback", logging.F("buffer_len", len(buf)))
+            return
+        }
+
         err := r.pg.IngestEventsJSON(context.Background(), events)
         metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
         if err == nil {
             logging.Info("pg_batch_commit", logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
+            r.pgCircuitBreaker.onSuccess()
             if r.ack != nil { r.ack(redisIDs...) }
             buf = buf[:0]
             return
         }
+
+        r.pgCircuitBreaker.onFailure()
         logging.Warn("pg_batch_error", logging.F("err", err.Error()), logging.F("batch_size", len(events)))
-        // Retry a few times with exponential backoff
-        const maxRetries = 3
-        backoff := 200 * time.Millisecond
+        // Retry with configurable exponential backoff and jitter
+        maxRetries := 3 // Use default since we don't have access to Redis config here
+        baseBackoff := time.Duration(200) * time.Millisecond
+        maxBackoff := time.Duration(5000) * time.Millisecond
         lastErr := err
         for i := 1; i <= maxRetries; i++ {
-            time.Sleep(backoff)
+            // Calculate exponential backoff with jitter (±25% randomization)
+            backoff := time.Duration(float64(baseBackoff) * float64(1<<uint(i-1)))
+            if backoff > maxBackoff {
+                backoff = maxBackoff
+            }
+            // Add jitter (±25%)
+            jitter := time.Duration(float64(backoff) * 0.25 * (2.0*time.Now().UnixNano()%2 - 1.0))
+            sleepTime := backoff + jitter
+            if sleepTime < 0 {
+                sleepTime = backoff / 2
+            }
+
+            time.Sleep(sleepTime)
             t1 := time.Now()
             if e := r.pg.IngestEventsJSON(context.Background(), events); e == nil {
                 logging.Info("pg_batch_commit_retry", logging.F("attempt", i), logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t1).Milliseconds()))
@@ -135,7 +359,6 @@ func (r *router) pgWorkerBatch() {
                 logging.Warn("pg_batch_error_retry", logging.F("attempt", i), logging.F("err", e.Error()))
                 lastErr = e
             }
-            if backoff < 5*time.Second { backoff *= 2 }
         }
         // If this looks like a connectivity error, spill to filesystem (as last resort)
         if isConnectivityError(lastErr) {
@@ -210,13 +433,20 @@ func (r *router) pgWorkerBatchLean() {
     defer timer.Stop()
     flush := func() {
         if len(buf) == 0 { return }
-        events := make([]map[string]any, 0, len(buf))
+        // Use pooled objects to reduce GC pressure
+        events := eventsSlicePool.Get().([]map[string]any)[:0]
         redisIDs := make([]string, 0, len(buf))
         for _, m := range buf {
-            var payload map[string]any
+            // Reuse pooled map for payload
+            payload := jsonMapPool.Get().(map[string]any)
             _ = json.Unmarshal(m.Payload, &payload)
+
             var tags []map[string]string
-            if len(m.Tags) > 0 { _ = json.Unmarshal(m.Tags, &tags) }
+            if len(m.Tags) > 0 {
+                tags = tagsSlicePool.Get().([]map[string]string)[:0]
+                _ = json.Unmarshal(m.Tags, &tags)
+            }
+
             ev := map[string]any{
                 "event_id":   m.EventID,
                 "ts":         m.TS,
@@ -240,13 +470,19 @@ func (r *router) pgWorkerBatchLean() {
             return
         }
         logging.Warn("pg_batch_error", logging.F("err", err.Error()), logging.F("batch_size", len(events)))
-        // per-row fallback
+        // per-row fallback with object pooling
         succeeded := make([]string, 0, len(buf))
         for i, m := range buf {
-            var payload map[string]any
+            // Reuse pooled map for payload
+            payload := jsonMapPool.Get().(map[string]any)
             _ = json.Unmarshal(m.Payload, &payload)
+
             var tags []map[string]string
-            if len(m.Tags) > 0 { _ = json.Unmarshal(m.Tags, &tags) }
+            if len(m.Tags) > 0 {
+                tags = tagsSlicePool.Get().([]map[string]string)[:0]
+                _ = json.Unmarshal(m.Tags, &tags)
+            }
+
             ev := []map[string]any{{
                 "event_id":   m.EventID,
                 "ts":         m.TS,

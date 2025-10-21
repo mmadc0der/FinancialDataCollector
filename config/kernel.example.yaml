@@ -6,12 +6,15 @@ server:
   
 postgres:
   dsn: "postgres://data_kernel:CHANGE_ME_STRONG@127.0.0.1:5432/data_kernel_db?sslmode=disable"
-  max_conns: 8
+  max_conns: 32              # increased for higher concurrency
   conn_max_lifetime_ms: 600000
   apply_migrations: true
   queue_size: 1024
-  batch_size: 1000
-  batch_max_wait_ms: 200
+  batch_size: 2000           # optimized for throughput vs memory
+  batch_max_wait_ms: 100     # reduced for more responsive processing
+  # Circuit breaker settings
+  circuit_breaker_threshold: 5
+  circuit_breaker_timeout_seconds: 30
 
 redis:
   addr: "127.0.0.1:6379"
@@ -24,9 +27,21 @@ redis:
   publish_enabled: false      # publish to Redis from router (feature flag)
   consumer_group: "kernel"
   consumer_name: "kernel-1"   # optional; kernel will append timestamp
-  read_count: 100
-  block_ms: 5000
+  read_count: 200             # increased for better batching
+  block_ms: 2000             # reduced from 5000ms for faster response
   dlq_stream: "events:dlq"
+  # Connection pool settings for better performance
+  pool_size: 20
+  min_idle_conns: 5
+  # Timeout settings for different operations
+  read_timeout_ms: 1000      # general read operations
+  write_timeout_ms: 1000     # general write operations
+  dial_timeout_ms: 2000      # connection establishment
+  xadd_timeout_ms: 1000      # Redis stream operations
+  # Retry and backoff settings
+  retry_max_attempts: 3
+  retry_base_backoff_ms: 200
+  retry_max_backoff_ms: 5000
 
 logging:
   level: "info"
@@ -49,4 +64,25 @@ auth:
   registration_response_ttl_seconds: 300  # TTL for registration response streams (5 minutes)
   registration_rate_limit_rpm: 10  # requests per minute per fingerprint
   registration_rate_limit_burst: 3  # burst allowance for rapid initial requests
+  # Key status cache settings
+  key_status_cache_ttl_seconds: 300
+  # Token cache settings
+  token_cache_ttl_seconds: 3600
+
+# Performance tuning
+performance:
+  # Schema cache settings
+  schema_cache_ttl_seconds: 3600
+  schema_cache_refresh_seconds: 300
+  # Object pooling settings
+  json_pool_size: 1000
+  event_pool_size: 500
+  # Metrics collection
+  metrics_batch_size: 100
+  metrics_flush_interval_seconds: 10
+  # Spill mechanism settings
+  spill_batch_size: 1000
+  spill_max_file_size_mb: 100
+  # Rate limiting settings
+  rate_limit_lua_enabled: false  # use application-level rate limiting for better performance
 

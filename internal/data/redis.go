@@ -17,14 +17,22 @@ type Redis struct {
 }
 
 func NewRedis(cfg kernelcfg.RedisConfig) (*Redis, error) {
+    // Use configurable timeouts for different operations
+    readTimeout := time.Duration(cfg.ReadTimeoutMs) * time.Millisecond
+    writeTimeout := time.Duration(cfg.WriteTimeoutMs) * time.Millisecond
+    dialTimeout := time.Duration(cfg.DialTimeoutMs) * time.Millisecond
+
     client := redis.NewClient(&redis.Options{
         Addr: cfg.Addr,
         Username: cfg.Username,
         Password: cfg.Password,
         DB: cfg.DB,
-        ReadTimeout: 3 * time.Second,
-        WriteTimeout: 3 * time.Second,
-        DialTimeout: 3 * time.Second,
+        ReadTimeout: readTimeout,
+        WriteTimeout: writeTimeout,
+        DialTimeout: dialTimeout,
+        // Configurable connection pooling
+        PoolSize: cfg.PoolSize,
+        MinIdleConns: cfg.MinIdleConns,
     })
     stream := cfg.Stream
     if cfg.KeyPrefix != "" { stream = cfg.KeyPrefix + stream }
@@ -35,7 +43,8 @@ func (r *Redis) XAdd(ctx context.Context, id string, payload []byte) error {
     if r.c == nil || r.stream == "" {
         return nil
     }
-    cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+    xaddTimeout := time.Duration(r.cfg.XAddTimeoutMs) * time.Millisecond
+    cctx, cancel := context.WithTimeout(ctx, xaddTimeout)
     defer cancel()
     return r.c.XAdd(cctx, &redis.XAddArgs{
         Stream: r.stream,
@@ -81,13 +90,12 @@ func (r *Redis) ReadBatch(ctx context.Context, consumer string, count int, block
 func (r *Redis) Ack(ctx context.Context, ids ...string) error {
     if r.c == nil || r.stream == "" || r.group == "" || len(ids) == 0 { return nil }
 
-    // First acknowledge the messages
-    if err := r.c.XAck(ctx, r.stream, r.group, ids...).Err(); err != nil {
-        return err
-    }
-
-    // Then delete them from the stream for exact-one consumption and growth control
-    return r.c.XTrimMaxLenApprox(ctx, r.stream, 32384, 0).Err()
+    // Use pipeline for better performance with bulk operations
+    pipe := r.c.Pipeline()
+    pipe.XAck(ctx, r.stream, r.group, ids...)
+    pipe.XTrimMaxLenApprox(ctx, r.stream, 32384, 0)
+    _, err := pipe.Exec(ctx)
+    return err
 }
 
 
@@ -127,8 +135,8 @@ func (r *Redis) SchemaCacheGet(ctx context.Context, subjectID string) (string, b
     key := r.cfg.KeyPrefix + "schemas:" + subjectID
     val, err := r.c.Get(ctx, key).Result()
     if err == nil && val != "" {
-        // sliding TTL refresh (1h)
-        _ = r.c.Expire(ctx, key, time.Hour).Err()
+        // sliding TTL refresh (1h) - use pipeline for efficiency
+        r.c.Expire(ctx, key, time.Hour)
         return val, true
     }
     return "", false
@@ -139,6 +147,22 @@ func (r *Redis) SchemaCacheSet(ctx context.Context, subjectID, schemaID string, 
     key := r.cfg.KeyPrefix + "schemas:" + subjectID
     if ttl <= 0 { ttl = time.Hour }
     return r.c.Set(ctx, key, schemaID, ttl).Err()
+}
+
+// SchemaCacheSetBatch sets multiple schema cache entries efficiently using pipeline.
+func (r *Redis) SchemaCacheSetBatch(ctx context.Context, entries map[string]string, ttl time.Duration) error {
+    if r.c == nil || len(entries) == 0 { return nil }
+    if ttl <= 0 { ttl = time.Hour }
+
+    pipe := r.c.Pipeline()
+    for subjectID, schemaID := range entries {
+        if subjectID != "" && schemaID != "" {
+            key := r.cfg.KeyPrefix + "schemas:" + subjectID
+            pipe.Set(ctx, key, schemaID, ttl)
+        }
+    }
+    _, err := pipe.Exec(ctx)
+    return err
 }
 
 

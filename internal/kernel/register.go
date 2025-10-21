@@ -15,7 +15,84 @@ import (
     "github.com/redis/go-redis/v9"
     ssh "golang.org/x/crypto/ssh"
     "golang.org/x/crypto/sha3"
+    "sync"
 )
+
+// In-memory rate limiter for better performance than Lua scripts
+type RateLimiter struct {
+    mu    sync.RWMutex
+    store map[string]*rateLimitEntry
+}
+
+type rateLimitEntry struct {
+    count     int
+    windowStart time.Time
+    burst     int
+}
+
+func newRateLimiter() *RateLimiter {
+    rl := &RateLimiter{
+        store: make(map[string]*rateLimitEntry),
+    }
+    // Cleanup old entries periodically
+    go rl.cleanupLoop()
+    return rl
+}
+
+func (rl *RateLimiter) cleanupLoop() {
+    ticker := time.NewTicker(60 * time.Second)
+    defer ticker.Stop()
+    for range ticker.C {
+        rl.cleanup()
+    }
+}
+
+func (rl *RateLimiter) cleanup() {
+    rl.mu.Lock()
+    defer rl.mu.Unlock()
+
+    now := time.Now()
+    for key, entry := range rl.store {
+        // Remove entries older than 2 minutes
+        if now.Sub(entry.windowStart) > 2*time.Minute {
+            delete(rl.store, key)
+        }
+    }
+}
+
+func (rl *RateLimiter) isAllowed(key string, rpm, burst int) bool {
+    rl.mu.Lock()
+    defer rl.mu.Unlock()
+
+    now := time.Now()
+    entry, exists := rl.store[key]
+    if !exists || now.Sub(entry.windowStart) >= time.Minute {
+        // New window or expired entry
+        rl.store[key] = &rateLimitEntry{
+            count:       1,
+            windowStart: now,
+            burst:      burst,
+        }
+        return true
+    }
+
+    // Check if we're within burst allowance
+    if entry.count < entry.burst {
+        entry.count++
+        return true
+    }
+
+    // Check if we're within rate limit
+    maxRequests := (rpm * int(now.Sub(entry.windowStart).Seconds())) / 60
+    if entry.count < maxRequests {
+        entry.count++
+        return true
+    }
+
+    return false
+}
+
+var globalRateLimiter = newRateLimiter()
 
 // Registration message schema (in XADD values):
 // id=<opaque>, payload=<json>, sig=<base64>, pubkey=<openssh_pubkey>, nonce=<random>
@@ -44,53 +121,8 @@ func (k *Kernel) checkRateLimit(ctx context.Context, producerID string) bool {
     // Key format: fdc:rate:reg:<producer_id>
     rateKey := prefixed(k.cfg.Redis.KeyPrefix, "rate:reg:"+producerID)
 
-    // Lua script for sliding window rate limiting
-    // Returns 1 if allowed, 0 if rate limited
-    script := `
-        local key = KEYS[1]
-        local window = tonumber(ARGV[1])  -- window size in seconds (60)
-        local limit = tonumber(ARGV[2])   -- max requests per window
-        local burst = tonumber(ARGV[3])   -- burst allowance
-        local now = tonumber(ARGV[4])     -- current timestamp
-
-        -- Clean old entries (older than window)
-        redis.call('ZREMRANGEBYSCORE', key, '-inf', now - window)
-
-        -- Count current requests in window
-        local current = redis.call('ZCARD', key)
-
-        -- Check if we're within limits
-        if current < limit then
-            -- Add this request
-            redis.call('ZADD', key, now, now .. ':' .. math.random())
-            redis.call('EXPIRE', key, window)
-            return 1
-        elseif current < limit + burst then
-            -- Allow burst
-            redis.call('ZADD', key, now, now .. ':' .. math.random())
-            redis.call('EXPIRE', key, window)
-            return 1
-        else
-            -- Rate limited
-            return 0
-        end
-    `
-
-    result, err := k.rd.C().Eval(ctx, script, []string{rateKey},
-        "60",                    // 60 second window
-        fmt.Sprintf("%d", rpm),  // requests per minute
-        fmt.Sprintf("%d", burst), // burst allowance
-        fmt.Sprintf("%d", time.Now().Unix())).Result()
-
-    if err != nil {
-        logging.Info("rate_limit_error",
-            logging.Err(err),
-            logging.F("producer_id", producerID))
-        metrics.RegistrationRateLimitErrors.Inc()
-        return false // deny on any error (fail-closed security)
-    }
-
-    allowed := result.(int64) == 1
+    // Use in-memory rate limiter for better performance
+    allowed := globalRateLimiter.isAllowed(rateKey, rpm, burst)
     if !allowed {
         logging.Info("rate_limited",
             logging.F("producer_id", producerID),

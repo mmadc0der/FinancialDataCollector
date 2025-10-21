@@ -14,6 +14,7 @@ type Config struct {
     Redis RedisConfig `yaml:"redis"`
     Logging LoggingConfig `yaml:"logging"`
     Auth   AuthConfig   `yaml:"auth"`
+    Performance PerformanceConfig `yaml:"performance"`
 }
 
 type ServerConfig struct {
@@ -35,6 +36,9 @@ type PostgresConfig struct {
     QueueSize int `yaml:"queue_size"`
     BatchSize int `yaml:"batch_size"`
     BatchMaxWaitMs int `yaml:"batch_max_wait_ms"`
+    // Circuit breaker settings
+    CircuitBreakerThreshold int `yaml:"circuit_breaker_threshold"`
+    CircuitBreakerTimeoutSeconds int `yaml:"circuit_breaker_timeout_seconds"`
     // Defaults used by router when deriving ids at ingest
     DefaultProducerID string `yaml:"default_producer_id"`
     DefaultSchemaID   string `yaml:"default_schema_id"`
@@ -56,6 +60,18 @@ type RedisConfig struct {
     DLQStream       string `yaml:"dlq_stream"`
     // Producer (publisher) feature flag
     PublishEnabled  bool   `yaml:"publish_enabled"`
+    // Connection pool settings
+    PoolSize int `yaml:"pool_size"`
+    MinIdleConns int `yaml:"min_idle_conns"`
+    // Timeout settings for different operations
+    ReadTimeoutMs int `yaml:"read_timeout_ms"`
+    WriteTimeoutMs int `yaml:"write_timeout_ms"`
+    DialTimeoutMs int `yaml:"dial_timeout_ms"`
+    XAddTimeoutMs int `yaml:"xadd_timeout_ms"`
+    // Retry and backoff settings
+    RetryMaxAttempts int `yaml:"retry_max_attempts"`
+    RetryBaseBackoffMs int `yaml:"retry_base_backoff_ms"`
+    RetryMaxBackoffMs int `yaml:"retry_max_backoff_ms"`
     // Note: test-only enable flags removed; rely on production config wiring
 }
 
@@ -89,6 +105,27 @@ type AuthConfig struct {
     // Rate limiting
     RegistrationRateLimitRPM int `yaml:"registration_rate_limit_rpm"` // requests per minute per fingerprint
     RegistrationRateLimitBurst int `yaml:"registration_rate_limit_burst"` // burst allowance
+    // Key status cache settings
+    KeyStatusCacheTTLSeconds int `yaml:"key_status_cache_ttl_seconds"`
+    // Token cache settings
+    TokenCacheTTLSeconds int `yaml:"token_cache_ttl_seconds"`
+}
+
+type PerformanceConfig struct {
+    // Schema cache settings
+    SchemaCacheTTLSeconds int `yaml:"schema_cache_ttl_seconds"`
+    SchemaCacheRefreshSeconds int `yaml:"schema_cache_refresh_seconds"`
+    // Object pooling settings
+    JSONPoolSize int `yaml:"json_pool_size"`
+    EventPoolSize int `yaml:"event_pool_size"`
+    // Metrics collection
+    MetricsBatchSize int `yaml:"metrics_batch_size"`
+    MetricsFlushIntervalSeconds int `yaml:"metrics_flush_interval_seconds"`
+    // Spill mechanism settings
+    SpillBatchSize int `yaml:"spill_batch_size"`
+    SpillMaxFileSizeMB int `yaml:"spill_max_file_size_mb"`
+    // Rate limiting settings
+    RateLimitLuaEnabled bool `yaml:"rate_limit_lua_enabled"`
 }
 
 func Load(path string) (*Config, error) {
@@ -128,15 +165,44 @@ func Load(path string) (*Config, error) {
     if cfg.Redis.ReadCount <= 0 { cfg.Redis.ReadCount = 100 }
     if cfg.Redis.BlockMs <= 0 { cfg.Redis.BlockMs = 5000 }
     if cfg.Redis.DLQStream == "" && cfg.Redis.Stream != "" { cfg.Redis.DLQStream = cfg.Redis.Stream + ":dlq" }
+    // Connection pool defaults
+    if cfg.Redis.PoolSize <= 0 { cfg.Redis.PoolSize = 10 }
+    if cfg.Redis.MinIdleConns <= 0 { cfg.Redis.MinIdleConns = 2 }
+    // Timeout defaults
+    if cfg.Redis.ReadTimeoutMs <= 0 { cfg.Redis.ReadTimeoutMs = 1000 }
+    if cfg.Redis.WriteTimeoutMs <= 0 { cfg.Redis.WriteTimeoutMs = 1000 }
+    if cfg.Redis.DialTimeoutMs <= 0 { cfg.Redis.DialTimeoutMs = 2000 }
+    if cfg.Redis.XAddTimeoutMs <= 0 { cfg.Redis.XAddTimeoutMs = 1000 }
+    // Retry defaults
+    if cfg.Redis.RetryMaxAttempts <= 0 { cfg.Redis.RetryMaxAttempts = 3 }
+    if cfg.Redis.RetryBaseBackoffMs <= 0 { cfg.Redis.RetryBaseBackoffMs = 200 }
+    if cfg.Redis.RetryMaxBackoffMs <= 0 { cfg.Redis.RetryMaxBackoffMs = 5000 }
+
     // Defaults for Postgres batching
     if cfg.Postgres.BatchSize <= 0 { cfg.Postgres.BatchSize = 1000 }
     if cfg.Postgres.BatchMaxWaitMs <= 0 { cfg.Postgres.BatchMaxWaitMs = 200 }
+    // Circuit breaker defaults
+    if cfg.Postgres.CircuitBreakerThreshold <= 0 { cfg.Postgres.CircuitBreakerThreshold = 5 }
+    if cfg.Postgres.CircuitBreakerTimeoutSeconds <= 0 { cfg.Postgres.CircuitBreakerTimeoutSeconds = 30 }
+
     // Defaults for auth (mandatory)
     if cfg.Auth.CacheTTLSeconds <= 0 { cfg.Auth.CacheTTLSeconds = 300 }
     if cfg.Auth.SkewSeconds <= 0 { cfg.Auth.SkewSeconds = 60 }
     if cfg.Auth.RegistrationResponseTTLSeconds <= 0 { cfg.Auth.RegistrationResponseTTLSeconds = 300 }
     if cfg.Auth.RegistrationRateLimitRPM <= 0 { cfg.Auth.RegistrationRateLimitRPM = 10 }
     if cfg.Auth.RegistrationRateLimitBurst <= 0 { cfg.Auth.RegistrationRateLimitBurst = 3 }
+    if cfg.Auth.KeyStatusCacheTTLSeconds <= 0 { cfg.Auth.KeyStatusCacheTTLSeconds = 300 }
+    if cfg.Auth.TokenCacheTTLSeconds <= 0 { cfg.Auth.TokenCacheTTLSeconds = 3600 }
+
+    // Defaults for performance tuning
+    if cfg.Performance.SchemaCacheTTLSeconds <= 0 { cfg.Performance.SchemaCacheTTLSeconds = 3600 }
+    if cfg.Performance.SchemaCacheRefreshSeconds <= 0 { cfg.Performance.SchemaCacheRefreshSeconds = 300 }
+    if cfg.Performance.JSONPoolSize <= 0 { cfg.Performance.JSONPoolSize = 1000 }
+    if cfg.Performance.EventPoolSize <= 0 { cfg.Performance.EventPoolSize = 500 }
+    if cfg.Performance.MetricsBatchSize <= 0 { cfg.Performance.MetricsBatchSize = 100 }
+    if cfg.Performance.MetricsFlushIntervalSeconds <= 0 { cfg.Performance.MetricsFlushIntervalSeconds = 10 }
+    if cfg.Performance.SpillBatchSize <= 0 { cfg.Performance.SpillBatchSize = 1000 }
+    if cfg.Performance.SpillMaxFileSizeMB <= 0 { cfg.Performance.SpillMaxFileSizeMB = 100 }
     // Validate mandatory settings
     if cfg.Postgres.DSN == "" { return nil, fmt.Errorf("postgres.dsn is required") }
     if cfg.Redis.Addr == "" || cfg.Redis.Stream == "" || cfg.Redis.KeyPrefix == "" { return nil, fmt.Errorf("redis.addr, redis.stream, and redis.key_prefix are required") }
