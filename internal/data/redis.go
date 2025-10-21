@@ -89,7 +89,7 @@ func (r *Redis) Ack(ctx context.Context, ids ...string) error {
 // TrimStream trims a stream to maxLen entries using approximate trimming.
 func (r *Redis) TrimStream(ctx context.Context, stream string, maxLen int64) error {
     if r.c == nil || stream == "" || maxLen <= 0 { return nil }
-    return r.c.XTrimApprox(ctx, stream, maxLen).Err()
+    return r.c.XTrimMaxLenApprox(ctx, stream, maxLen, 0).Err()
 }
 
 // ToDLQ writes a payload to DLQ stream with age-based trimming.
