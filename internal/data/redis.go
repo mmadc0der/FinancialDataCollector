@@ -86,10 +86,11 @@ func (r *Redis) Ack(ctx context.Context, ids ...string) error {
     return r.c.XAck(ctx, r.stream, r.group, ids...).Err()
 }
 
-// ToDLQ writes a payload to DLQ stream.
+// ToDLQ writes a payload to DLQ stream with age-based trimming.
 func (r *Redis) ToDLQ(ctx context.Context, dlqStream string, id string, payload []byte, errMsg string) error {
     if r.c == nil || dlqStream == "" { return nil }
-    return r.c.XAdd(ctx, &redis.XAddArgs{Stream: dlqStream, MaxLen: r.maxLenApprox, Approx: true, Values: map[string]any{"id": id, "payload": payload, "error": errMsg}}).Err()
+    err := r.c.XAdd(ctx, &redis.XAddArgs{Stream: dlqStream, MaxLen: r.maxLenApprox, Approx: true, Values: map[string]any{"id": id, "payload": payload, "error": errMsg}}).Err()
+    return err
 }
 
 // DecodeMessage extracts json payload and token from XMessage values.

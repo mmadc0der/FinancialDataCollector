@@ -20,11 +20,11 @@ redis:
   db: 0
   key_prefix: "fdc:"
   stream: "events"
-  maxlen_approx: 1000000
+  maxlen_approx: 1000000      # Auto-trim streams to ~1M messages via MAXLEN
   queue_size: 2048
-  publish_enabled: false   # publish to Redis from router (feature flag)
+  publish_enabled: false      # publish to Redis from router (feature flag)
   consumer_group: "kernel"
-  consumer_name: "kernel-1" # optional; kernel will append timestamp
+  consumer_name: "kernel-1"   # optional; kernel will append timestamp
   read_count: 100
   block_ms: 5000
   dlq_stream: "events:dlq"

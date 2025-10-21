@@ -114,7 +114,6 @@ func (r *router) pgWorkerBatch() {
         metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
         if err == nil {
             logging.Info("pg_batch_commit", logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
-            if r.ack != nil { r.ack(redisIDs...) }
             buf = buf[:0]
             return
         }
@@ -128,7 +127,6 @@ func (r *router) pgWorkerBatch() {
             t1 := time.Now()
             if e := r.pg.IngestEventsJSON(context.Background(), events); e == nil {
                 logging.Info("pg_batch_commit_retry", logging.F("attempt", i), logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t1).Milliseconds()))
-                if r.ack != nil { r.ack(redisIDs...) }
                 buf = buf[:0]
                 return
             } else {
@@ -153,7 +151,6 @@ func (r *router) pgWorkerBatch() {
                     redisIDs = append(redisIDs, m.RedisID)
                 }
                 if _, _, e := r.spw.Write(events); e == nil {
-                    if r.ack != nil { r.ack(redisIDs...) }
                     logging.Warn("pg_connectivity_spilled", logging.F("count", len(events)))
                     buf = buf[:0]
                     return
@@ -174,7 +171,6 @@ func (r *router) pgWorkerBatch() {
                 succeededIDs = append(succeededIDs, redisIDs[i])
             }
         }
-        if len(succeededIDs) > 0 && r.ack != nil { r.ack(succeededIDs...) }
         if len(failed) > 0 { logging.Warn("pg_fallback_failed_count", logging.F("count", len(failed))) }
         if len(failed) == 0 { buf = buf[:0]; return }
         // Could not persist; rely on DB-level spill (ingest_spill) and retry next cycle; log as error
@@ -198,7 +194,12 @@ func (r *router) handleLeanEvent(redisID, eventID, ts, subjectID, producerID str
     if r.pgChLean != nil {
         select {
         case r.pgChLean <- pgMsgLean{RedisID: redisID, EventID: eventID, TS: ts, SubjectID: subjectID, ProducerID: producerID, SchemaID: schemaID, Payload: payloadJSON, Tags: tagsJSON}:
+            // Acknowledge immediately when successfully enqueued for processing
+            // This prevents Redis stream from growing indefinitely if DB writes fail
+            if r.ack != nil { r.ack(redisID) }
         default:
+            // Channel is full, acknowledge to prevent blocking Redis reads
+            if r.ack != nil { r.ack(redisID) }
         }
     } else {
         if r.ack != nil { r.ack(redisID) }
@@ -236,7 +237,6 @@ func (r *router) pgWorkerBatchLean() {
         metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
         if err == nil {
             logging.Info("pg_batch_commit", logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
-            if r.ack != nil { r.ack(redisIDs...) }
             buf = buf[:0]
             return
         }
@@ -261,7 +261,6 @@ func (r *router) pgWorkerBatchLean() {
                 succeeded = append(succeeded, redisIDs[i])
             }
         }
-        if len(succeeded) > 0 && r.ack != nil { r.ack(succeeded...) }
         buf = buf[:0]
     }
     for {

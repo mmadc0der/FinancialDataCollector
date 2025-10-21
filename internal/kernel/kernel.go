@@ -157,9 +157,12 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     if pid, sid, j, err := k.au.Verify(ctx, token); err != nil {
                         metrics.AuthDeniedTotal.Inc()
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
-                        logging.Warn("redis_auth_denied", logging.F("id", id), logging.Err(err))
-                        _ = k.rd.Ack(ctx, m.ID)
-                        metrics.RedisAckTotal.Add(1)
+                        logging.Warn("redis_auth_denied", logging.F("id", id), logging.F("redis_id", m.ID), logging.Err(err))
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            logging.Error("redis_ack_failed", logging.F("redis_id", m.ID), logging.Err(ackErr))
+                        } else {
+                            metrics.RedisAckTotal.Add(1)
+                        }
                         continue
                     } else { producerID, subjectIDFromToken, jti = pid, sid, j }
                 }
