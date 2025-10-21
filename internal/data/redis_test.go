@@ -59,16 +59,6 @@ func TestRedisConfig_ReadSettings(t *testing.T) {
 	}
 }
 
-// Test stream size limits
-func TestRedisConfig_StreamMaxLen(t *testing.T) {
-	cfg := newTestRedisConfig()
-
-	if cfg.MaxLenApprox > 0 {
-		t.Logf("Stream max length (approximate): %d entries", cfg.MaxLenApprox)
-	} else {
-		t.Logf("MaxLenApprox not set - stream can grow unbounded")
-	}
-}
 
 // Test DLQ stream configuration
 func TestRedisConfig_DLQStream(t *testing.T) {
@@ -171,7 +161,6 @@ func newTestRedisConfig() kernelcfg.RedisConfig {
 		DB:           1, // Use test DB
 		KeyPrefix:    "fdc:",
 		Stream:       "events",
-		MaxLenApprox: 100000,
 		QueueSize:    2048,
 		ConsumerGroup: "kernel",
 		ConsumerName:  "",

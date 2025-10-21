@@ -220,8 +220,6 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
                     }
                     k.rd.C().XAdd(r.Context(), &redis.XAddArgs{
                         Stream: respStream,
-                        MaxLen: k.cfg.Redis.MaxLenApprox,
-                        Approx: true,
                         Values: map[string]any{
                             "fingerprint": req.Fingerprint,
                             "producer_id": req.ProducerID,

@@ -83,7 +83,7 @@ redis:
 
 ### Observability
 - Postgres: enable `log_min_duration_statement` for slow queries.
-- Redis: monitor memory and stream trimming.
+- Redis: monitor memory usage.
 - Prometheus: scrape `/metrics` on the kernel (add job in Prometheus config).
 - Grafana: import the dashboard JSON in `docs/grafana/kernel.json`.
 

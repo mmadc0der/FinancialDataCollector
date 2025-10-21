@@ -13,7 +13,6 @@ type Redis struct {
     cfg kernelcfg.RedisConfig
     c   *redis.Client
     stream string
-    maxLenApprox int64
     group string
 }
 
@@ -29,7 +28,7 @@ func NewRedis(cfg kernelcfg.RedisConfig) (*Redis, error) {
     })
     stream := cfg.Stream
     if cfg.KeyPrefix != "" { stream = cfg.KeyPrefix + stream }
-    return &Redis{cfg: cfg, c: client, stream: stream, maxLenApprox: cfg.MaxLenApprox, group: cfg.ConsumerGroup}, nil
+    return &Redis{cfg: cfg, c: client, stream: stream, group: cfg.ConsumerGroup}, nil
 }
 
 func (r *Redis) XAdd(ctx context.Context, id string, payload []byte) error {
@@ -40,8 +39,6 @@ func (r *Redis) XAdd(ctx context.Context, id string, payload []byte) error {
     defer cancel()
     return r.c.XAdd(cctx, &redis.XAddArgs{
         Stream: r.stream,
-        MaxLen: r.maxLenApprox,
-        Approx: true,
         Values: map[string]any{"id": id, "payload": payload},
     }).Err()
 }
@@ -86,16 +83,11 @@ func (r *Redis) Ack(ctx context.Context, ids ...string) error {
     return r.c.XAck(ctx, r.stream, r.group, ids...).Err()
 }
 
-// TrimStream trims a stream to maxLen entries using approximate trimming.
-func (r *Redis) TrimStream(ctx context.Context, stream string, maxLen int64) error {
-    if r.c == nil || stream == "" || maxLen <= 0 { return nil }
-    return r.c.XTrimMaxLenApprox(ctx, stream, maxLen, 0).Err()
-}
 
-// ToDLQ writes a payload to DLQ stream with age-based trimming.
+// ToDLQ writes a payload to DLQ stream.
 func (r *Redis) ToDLQ(ctx context.Context, dlqStream string, id string, payload []byte, errMsg string) error {
     if r.c == nil || dlqStream == "" { return nil }
-    err := r.c.XAdd(ctx, &redis.XAddArgs{Stream: dlqStream, MaxLen: r.maxLenApprox, Approx: true, Values: map[string]any{"id": id, "payload": payload, "error": errMsg}}).Err()
+    err := r.c.XAdd(ctx, &redis.XAddArgs{Stream: dlqStream, Values: map[string]any{"id": id, "payload": payload, "error": errMsg}}).Err()
     return err
 }
 

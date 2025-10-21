@@ -47,7 +47,6 @@ type RedisConfig struct {
     DB int `yaml:"db"`
     KeyPrefix string `yaml:"key_prefix"`
     Stream string `yaml:"stream"`
-    MaxLenApprox int64 `yaml:"maxlen_approx"`
     QueueSize int `yaml:"queue_size"`
     // Ingest (consumer) settings
     ConsumerGroup   string `yaml:"consumer_group"`

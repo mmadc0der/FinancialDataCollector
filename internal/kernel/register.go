@@ -244,8 +244,6 @@ func (k *Kernel) sendRegistrationResponse(ctx context.Context, nonce string, res
 
     err := k.rd.C().XAdd(ctx, &redis.XAddArgs{
         Stream: respStream,
-        MaxLen: k.cfg.Redis.MaxLenApprox,
-        Approx: true,
         Values: response,
     }).Err()
 
