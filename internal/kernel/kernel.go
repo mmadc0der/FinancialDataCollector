@@ -125,9 +125,6 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
     defer trimTicker.Stop()
     lastTrimTime := time.Now()
 
-    // Initial trim when consumer starts
-    trimStreams()
-
     trimStreams := func() {
         if k.rd == nil || k.rd.C() == nil { return }
 
@@ -146,6 +143,9 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
             logging.Info("redis_dlq_trimmed", logging.F("stream", dlq), logging.F("max_len", k.cfg.Redis.MaxLenApprox))
         }
     }
+
+    // Initial trim when consumer starts
+    trimStreams()
 
     for ctx.Err() == nil {
         // Check if it's time to trim streams (always check, even if no messages)
