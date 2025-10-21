@@ -77,11 +77,19 @@ func (r *Redis) ReadBatch(ctx context.Context, consumer string, count int, block
     }).Result()
 }
 
-// Ack acknowledges processed IDs.
+// Ack acknowledges processed IDs and deletes them from the stream for exact-one consumption.
 func (r *Redis) Ack(ctx context.Context, ids ...string) error {
     if r.c == nil || r.stream == "" || r.group == "" || len(ids) == 0 { return nil }
-    return r.c.XAck(ctx, r.stream, r.group, ids...).Err()
+
+    // First acknowledge the messages
+    if err := r.c.XAck(ctx, r.stream, r.group, ids...).Err(); err != nil {
+        return err
+    }
+
+    // Then delete them from the stream for exact-one consumption and growth control
+    return r.c.XDel(ctx, r.stream, ids...).Err()
 }
+
 
 
 // ToDLQ writes a payload to DLQ stream.
