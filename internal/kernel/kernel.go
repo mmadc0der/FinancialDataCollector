@@ -125,6 +125,9 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
     defer trimTicker.Stop()
     lastTrimTime := time.Now()
 
+    // Initial trim when consumer starts
+    trimStreams()
+
     trimStreams := func() {
         if k.rd == nil || k.rd.C() == nil { return }
 
@@ -145,6 +148,13 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
     }
 
     for ctx.Err() == nil {
+        // Check if it's time to trim streams (always check, even if no messages)
+        select {
+        case <-trimTicker.C:
+            trimStreams()
+        default:
+        }
+
         t0 := time.Now()
         streams, err := k.rd.ReadBatch(ctx, consumer, count, block)
         if err != nil {
@@ -163,12 +173,6 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
             for _, g := range groups {
                 if strings.EqualFold(g.Name, k.cfg.Redis.ConsumerGroup) { metrics.RedisPendingGauge.Set(float64(g.Pending)) }
             }
-        }
-        // Check if it's time to trim streams
-        select {
-        case <-trimTicker.C:
-            trimStreams()
-        default:
         }
 
         for _, s := range streams {
