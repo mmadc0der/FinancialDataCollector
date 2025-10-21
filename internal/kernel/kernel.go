@@ -1,10 +1,8 @@
 package kernel
 
 import (
-	"context"
 	"fmt"
 	"net/http"
-	"time"
 
 	"bytes"
 	"crypto/ed25519"

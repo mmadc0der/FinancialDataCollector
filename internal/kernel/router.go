@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -337,12 +336,12 @@ func (r *router) pgWorkerBatch() {
         lastErr := err
         for i := 1; i <= maxRetries; i++ {
             // Calculate exponential backoff with jitter (±25% randomization)
-            backoff := time.Duration(float64(baseBackoff) * float64(1<<uint(i-1)))
+            backoff := time.Duration(float64(baseBackoff) * float64(uint(1)<<uint(i-1)))
             if backoff > maxBackoff {
                 backoff = maxBackoff
             }
             // Add jitter (±25%)
-            jitter := time.Duration(float64(backoff) * 0.25 * (2.0*time.Now().UnixNano()%2 - 1.0))
+            jitter := time.Duration(float64(backoff) * 0.25 * float64(2.0*time.Now().UnixNano()%2 - 1.0))
             sleepTime := backoff + jitter
             if sleepTime < 0 {
                 sleepTime = backoff / 2

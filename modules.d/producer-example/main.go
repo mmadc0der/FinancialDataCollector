@@ -407,7 +407,7 @@ func main() {
                 eventsSent++
                 if eventsSent == 1 {
                     log.Printf("event_sending_started events_total=1 id=%s", id)
-                } else if eventsSent % 100 == 0 {
+                } else if eventsSent % 1000 == 0 {
                     log.Printf("event_sent_progress events_total=%d id=%s", eventsSent, id)
                 }
             }
