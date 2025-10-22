@@ -34,6 +34,7 @@ type approveRequest struct {
 // Query parameters:
 // - all=true: return all producers, not just pending (default: false)
 // - long=true: include additional info like active key and access token (default: false)
+// Note: long=true implies all=true since detailed info only makes sense for approved producers
 func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
 
@@ -41,6 +42,11 @@ func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
     query := r.URL.Query()
     showAll := query.Get("all") == "true"
     showLong := query.Get("long") == "true"
+
+    // If long=true is specified, also set all=true since long info only makes sense for approved producers
+    if showLong {
+        showAll = true
+    }
 
     // log admin access
     logging.Info("admin_pending_list", logging.F("all", showAll), logging.F("long", showLong))
@@ -93,7 +99,7 @@ func (k *Kernel) handleListAllProducers(w http.ResponseWriter, r *http.Request, 
         ProducerID   string     `json:"producer_id"`
         Name         *string    `json:"name"`
         Description  *string    `json:"description,omitempty"`
-        Status       string     `json:"status"`       // pending|approved|revoked|superseded
+        Status       string     `json:"status"`       // pending|approved|revoked|superseded|unknown
         CreatedAt    time.Time  `json:"created_at"`
         // Fields available when long=true
         ActiveKey       *string    `json:"active_key,omitempty"`        // only the single active key fingerprint
@@ -104,15 +110,24 @@ func (k *Kernel) handleListAllProducers(w http.ResponseWriter, r *http.Request, 
     producers := []producerInfo{}
 
     if !showLong {
-        // Simple view - just producer info without keys/tokens
+        // Simple view - show each producer once with their current/most relevant status
         q := `
-SELECT DISTINCT p.producer_id,
+SELECT p.producer_id,
        p.name,
        p.description,
-       COALESCE(pk.status, 'unknown') as status,
-       p.created_at
+       p.created_at,
+       COALESCE(
+         (SELECT pk.status FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id ORDER BY
+          CASE pk.status
+            WHEN 'approved' THEN 1
+            WHEN 'pending' THEN 2
+            WHEN 'superseded' THEN 3
+            WHEN 'revoked' THEN 4
+            ELSE 5
+          END, pk.created_at DESC LIMIT 1),
+         'unknown'
+       ) as current_status
 FROM public.producers p
-LEFT JOIN public.producer_keys pk ON pk.producer_id = p.producer_id
 ORDER BY p.created_at DESC`
 
         if k.pg.Pool() != nil {
@@ -122,8 +137,8 @@ ORDER BY p.created_at DESC`
                 rowscan, err := conn.Query(cctx, q)
                 if err == nil {
                     for rowscan.Next() {
-                        var pid string; var name, desc *string; var status string; var createdAt time.Time
-                        _ = rowscan.Scan(&pid, &name, &desc, &status, &createdAt)
+                        var pid string; var name, desc *string; var createdAt time.Time; var status string
+                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status)
                         producers = append(producers, producerInfo{
                             ProducerID:  pid,
                             Name:        name,
@@ -136,8 +151,7 @@ ORDER BY p.created_at DESC`
             }
         }
     } else {
-        // Long view - include active key and access token JTI info
-        // First get producers with their active key
+        // Long view - include active key and access token JTI info for approved producers only
         q := `
 SELECT p.producer_id,
        p.name,
@@ -147,7 +161,7 @@ SELECT p.producer_id,
        pt.jti as access_token_jti,
        pt.expires_at as token_expires
 FROM public.producers p
-LEFT JOIN public.producer_keys pk_active ON pk_active.producer_id = p.producer_id AND pk_active.status = 'approved'
+INNER JOIN public.producer_keys pk_active ON pk_active.producer_id = p.producer_id AND pk_active.status = 'approved'
 LEFT JOIN LATERAL (
     SELECT jti, expires_at
     FROM public.producer_tokens
@@ -174,7 +188,7 @@ ORDER BY p.created_at DESC`
                             ProducerID:     pid,
                             Name:           name,
                             Description:    desc,
-                            Status:         "active", // Since we're only showing producers with approved keys
+                            Status:         "approved", // Since we only join with approved keys
                             CreatedAt:      createdAt,
                             ActiveKey:      activeKey,
                             AccessTokenJTI: accessTokenJTI,
