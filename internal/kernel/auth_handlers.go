@@ -271,8 +271,9 @@ func (k *Kernel) handleActiveProducers(w http.ResponseWriter, r *http.Request, c
 
     producers := []producerInfo{}
 
+    var q string
     if !showLong {
-        q := `
+        q = `
 SELECT DISTINCT p.producer_id,
        p.name,
        p.description,
@@ -283,7 +284,7 @@ INNER JOIN public.producer_tokens pt ON pt.producer_id = p.producer_id
 WHERE pt.revoked_at IS NULL AND pt.expires_at > NOW()
 ORDER BY p.created_at DESC`
     } else {
-        q := `
+        q = `
 SELECT p.producer_id,
        p.name,
        p.description,
@@ -362,8 +363,9 @@ func (k *Kernel) handleRegisteredProducers(w http.ResponseWriter, r *http.Reques
 
     producers := []producerInfo{}
 
+    var q string
     if !showLong {
-        q := `
+        q = `
 SELECT DISTINCT p.producer_id,
        p.name,
        p.description,
@@ -383,7 +385,7 @@ FROM public.producers p
 INNER JOIN public.producer_keys pk ON pk.producer_id = p.producer_id
 ORDER BY p.created_at DESC`
     } else {
-        q := `
+        q = `
 SELECT p.producer_id,
        p.name,
        p.description,
