@@ -4,7 +4,6 @@ package itutil
 
 import (
     "context"
-    "encoding/json"
     "fmt"
     "net"
     "net/http"
@@ -15,6 +14,7 @@ import (
 
     redismod "github.com/testcontainers/testcontainers-go/modules/redis"
     psqlmod "github.com/testcontainers/testcontainers-go/modules/postgres"
+    "gopkg.in/yaml.v3"
 
     "github.com/redis/go-redis/v9"
 
@@ -58,8 +58,8 @@ func FreePort(t *testing.T) int {
 // WriteKernelConfig writes a kernel config to a temp file and returns its path.
 func WriteKernelConfig(t *testing.T, cfg kernelcfg.Config) string {
     t.Helper()
-    b, _ := json.Marshal(cfg)
-    p := filepath.Join(t.TempDir(), "kernel.json")
+    b, _ := yaml.Marshal(cfg)
+    p := filepath.Join(t.TempDir(), "kernel.yaml")
     if err := os.WriteFile(p, b, 0o644); err != nil { t.Fatalf("write cfg: %v", err) }
     return p
 }
