@@ -291,6 +291,7 @@ func (k *Kernel) handleActiveProducers(w http.ResponseWriter, r *http.Request, c
         ActiveKey       *string    `json:"active_key,omitempty"`
         AccessTokenJTI  *string    `json:"access_token_jti,omitempty"`
         TokenExpires    *time.Time `json:"token_expires,omitempty"`
+        TokenStatus     *string    `json:"token_status,omitempty"`
     }
 
     producers := []producerInfo{}
@@ -395,6 +396,7 @@ func (k *Kernel) handleRegisteredProducers(w http.ResponseWriter, r *http.Reques
         ActiveKey       *string    `json:"active_key,omitempty"`
         AccessTokenJTI  *string    `json:"access_token_jti,omitempty"`
         TokenExpires    *time.Time `json:"token_expires,omitempty"`
+        TokenStatus     *string    `json:"token_status,omitempty"`
     }
 
     producers := []producerInfo{}
