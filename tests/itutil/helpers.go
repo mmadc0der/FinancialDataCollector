@@ -20,6 +20,7 @@ import (
 
     "github.com/example/data-kernel/internal/kernel"
     "github.com/example/data-kernel/internal/kernelcfg"
+    "github.com/example/data-kernel/internal/data"
 )
 
 // StartPostgres launches a Postgres container and returns the container handle and DSN.
