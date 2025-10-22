@@ -172,12 +172,12 @@ SELECT p.producer_id,
 FROM public.producers p
 INNER JOIN public.producer_keys pk_active ON pk_active.producer_id = p.producer_id AND pk_active.status = 'approved'
 LEFT JOIN LATERAL (
-    SELECT jti, expires_at
+    SELECT jti, expires_at, issued_at
     FROM public.producer_tokens
     WHERE producer_id = p.producer_id
       AND revoked_at IS NULL
       AND expires_at > NOW()
-    ORDER BY created_at DESC
+    ORDER BY issued_at DESC
     LIMIT 1
 ) pt ON true
 ORDER BY p.created_at DESC`
