@@ -31,14 +31,32 @@ type approveRequest struct {
 }
 
 // GET /auth returns pending registrations (fingerprint + ts + producer_id + name)
+// Query parameters:
+// - all=true: return all producers, not just pending (default: false)
+// - long=true: include additional info like active key and access token (default: false)
 func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
     if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
+
+    // Parse query parameters
+    query := r.URL.Query()
+    showAll := query.Get("all") == "true"
+    showLong := query.Get("long") == "true"
+
     // log admin access
-    logging.Info("admin_pending_list")
-    type row struct{ Fingerprint string `json:"fingerprint"`; TS time.Time `json:"ts"`; ProducerID *string `json:"producer_id"`; Name *string `json:"name"` }
-    rows := []row{}
-    // include producer_id and name by joining keys and producers
-    q := `
+    logging.Info("admin_pending_list", logging.F("all", showAll), logging.F("long", showLong))
+
+    cctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+    defer cancel()
+
+    if showAll {
+        // Return all producers with their status
+        k.handleListAllProducers(w, r, cctx, showLong)
+    } else {
+        // Original behavior - return only pending registrations
+        type row struct{ Fingerprint string `json:"fingerprint"`; TS time.Time `json:"ts"`; ProducerID *string `json:"producer_id"`; Name *string `json:"name"` }
+        rows := []row{}
+        // include producer_id and name by joining keys and producers
+        q := `
 SELECT pr.fingerprint,
        MAX(pr.ts) AS ts,
        pk.producer_id,
@@ -50,23 +68,125 @@ WHERE pr.status = 'pending'
 GROUP BY pr.fingerprint, pk.producer_id, p.name
 ORDER BY ts DESC
 LIMIT 100`
-	cctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	if k.pg.Pool() != nil {
-		conn, err := k.pg.Pool().Acquire(cctx)
-		if err == nil {
-			defer conn.Release()
-            rowscan, err := conn.Query(cctx, q)
-			if err == nil {
-				for rowscan.Next() {
-                    var f string; var ts time.Time; var pid *string; var name *string
-                    _ = rowscan.Scan(&f, &ts, &pid, &name)
-                    rows = append(rows, row{Fingerprint: f, TS: ts, ProducerID: pid, Name: name})
-				}
-			}
-		}
-	}
-    _ = json.NewEncoder(w).Encode(rows)
+
+        if k.pg.Pool() != nil {
+            conn, err := k.pg.Pool().Acquire(cctx)
+            if err == nil {
+                defer conn.Release()
+                rowscan, err := conn.Query(cctx, q)
+                if err == nil {
+                    for rowscan.Next() {
+                        var f string; var ts time.Time; var pid *string; var name *string
+                        _ = rowscan.Scan(&f, &ts, &pid, &name)
+                        rows = append(rows, row{Fingerprint: f, TS: ts, ProducerID: pid, Name: name})
+                    }
+                }
+            }
+        }
+        _ = json.NewEncoder(w).Encode(rows)
+    }
+}
+
+// handleListAllProducers handles the "all producers" case with optional detailed information
+func (k *Kernel) handleListAllProducers(w http.ResponseWriter, r *http.Request, cctx context.Context, showLong bool) {
+    type producerInfo struct {
+        ProducerID   string     `json:"producer_id"`
+        Name         *string    `json:"name"`
+        Description  *string    `json:"description,omitempty"`
+        Status       string     `json:"status"`       // pending|approved|revoked|superseded
+        CreatedAt    time.Time  `json:"created_at"`
+        // Fields available when long=true
+        ActiveKey       *string    `json:"active_key,omitempty"`        // only the single active key fingerprint
+        AccessTokenJTI  *string    `json:"access_token_jti,omitempty"`  // JTI of the single active access token
+        TokenExpires    *time.Time `json:"token_expires,omitempty"`     // when the active token expires
+    }
+
+    producers := []producerInfo{}
+
+    if !showLong {
+        // Simple view - just producer info without keys/tokens
+        q := `
+SELECT DISTINCT p.producer_id,
+       p.name,
+       p.description,
+       COALESCE(pk.status, 'unknown') as status,
+       p.created_at
+FROM public.producers p
+LEFT JOIN public.producer_keys pk ON pk.producer_id = p.producer_id
+ORDER BY p.created_at DESC`
+
+        if k.pg.Pool() != nil {
+            conn, err := k.pg.Pool().Acquire(cctx)
+            if err == nil {
+                defer conn.Release()
+                rowscan, err := conn.Query(cctx, q)
+                if err == nil {
+                    for rowscan.Next() {
+                        var pid string; var name, desc *string; var status string; var createdAt time.Time
+                        _ = rowscan.Scan(&pid, &name, &desc, &status, &createdAt)
+                        producers = append(producers, producerInfo{
+                            ProducerID:  pid,
+                            Name:        name,
+                            Description: desc,
+                            Status:      status,
+                            CreatedAt:   createdAt,
+                        })
+                    }
+                }
+            }
+        }
+    } else {
+        // Long view - include active key and access token JTI info
+        // First get producers with their active key
+        q := `
+SELECT p.producer_id,
+       p.name,
+       p.description,
+       p.created_at,
+       pk_active.fingerprint as active_key,
+       pt.jti as access_token_jti,
+       pt.expires_at as token_expires
+FROM public.producers p
+LEFT JOIN public.producer_keys pk_active ON pk_active.producer_id = p.producer_id AND pk_active.status = 'approved'
+LEFT JOIN LATERAL (
+    SELECT jti, expires_at
+    FROM public.producer_tokens
+    WHERE producer_id = p.producer_id
+      AND revoked_at IS NULL
+      AND expires_at > NOW()
+    ORDER BY created_at DESC
+    LIMIT 1
+) pt ON true
+ORDER BY p.created_at DESC`
+
+        if k.pg.Pool() != nil {
+            conn, err := k.pg.Pool().Acquire(cctx)
+            if err == nil {
+                defer conn.Release()
+                rowscan, err := conn.Query(cctx, q)
+                if err == nil {
+                    for rowscan.Next() {
+                        var pid string; var name, desc *string; var createdAt time.Time
+                        var activeKey, accessTokenJTI *string; var tokenExpires *time.Time
+
+                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &activeKey, &accessTokenJTI, &tokenExpires)
+                        producers = append(producers, producerInfo{
+                            ProducerID:     pid,
+                            Name:           name,
+                            Description:    desc,
+                            Status:         "active", // Since we're only showing producers with approved keys
+                            CreatedAt:      createdAt,
+                            ActiveKey:      activeKey,
+                            AccessTokenJTI: accessTokenJTI,
+                            TokenExpires:   tokenExpires,
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    _ = json.NewEncoder(w).Encode(producers)
 }
 
 // Removed handleAuthOverview; /auth returns pending list in this revision.
