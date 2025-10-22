@@ -142,8 +142,9 @@ func (k *Kernel) handleAllProducers(w http.ResponseWriter, r *http.Request, cctx
         CreatedAt    time.Time  `json:"created_at"`
         // Fields available when long=true
         ActiveKey       *string    `json:"active_key,omitempty"`        // only the single active key fingerprint
-        AccessTokenJTI  *string    `json:"access_token_jti,omitempty"`  // JTI of the single active access token (null if no active token)
-        TokenExpires    *time.Time `json:"token_expires,omitempty"`     // when the active token expires (null if no active token)
+        AccessTokenJTI  *string    `json:"access_token_jti,omitempty"`  // JTI of the most recent access token
+        TokenExpires    *time.Time `json:"token_expires,omitempty"`     // when the token expires
+        TokenStatus     *string    `json:"token_status,omitempty"`      // status of the token: active|expired|revoked|unknown
     }
 
     producers := []producerInfo{}
@@ -217,14 +218,18 @@ SELECT DISTINCT p.producer_id,
        ) as current_status,
        (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' ORDER BY pk.created_at DESC LIMIT 1) as active_key,
        pt.jti as access_token_jti,
-       pt.expires_at as token_expires
+       pt.expires_at as token_expires,
+       CASE
+         WHEN pt.revoked_at IS NOT NULL THEN 'revoked'
+         WHEN pt.expires_at < NOW() THEN 'expired'
+         WHEN pt.revoked_at IS NULL AND pt.expires_at >= NOW() THEN 'active'
+         ELSE 'unknown'
+       END as token_status
 FROM public.producers p
 LEFT JOIN LATERAL (
-    SELECT jti, expires_at, issued_at
+    SELECT jti, expires_at, issued_at, revoked_at
     FROM public.producer_tokens
     WHERE producer_id = p.producer_id
-      AND revoked_at IS NULL
-      AND expires_at > NOW()
     ORDER BY issued_at DESC
     LIMIT 1
 ) pt ON true
@@ -242,9 +247,17 @@ ORDER BY p.created_at DESC`
                 } else {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time; var status string
-                        var activeKey, accessTokenJTI *string; var tokenExpires *time.Time
+                        var activeKey, accessTokenJTI *string; var tokenExpires *time.Time; var tokenStatus *string
 
-                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status, &activeKey, &accessTokenJTI, &tokenExpires)
+                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status, &activeKey, &accessTokenJTI, &tokenExpires, &tokenStatus)
+                        logging.Debug("admin_all_long_producer_data",
+                            logging.F("producer_id", pid),
+                            logging.F("name", name),
+                            logging.F("status", status),
+                            logging.F("active_key", activeKey),
+                            logging.F("token_jti", accessTokenJTI),
+                            logging.F("token_expires", tokenExpires),
+                            logging.F("token_status", tokenStatus))
                         producers = append(producers, producerInfo{
                             ProducerID:     pid,
                             Name:           name,
@@ -254,6 +267,7 @@ ORDER BY p.created_at DESC`
                             ActiveKey:      activeKey,
                             AccessTokenJTI: accessTokenJTI,
                             TokenExpires:   tokenExpires,
+                            TokenStatus:    tokenStatus,
                         })
                     }
                     logging.Info("admin_all_long_rows_found", logging.F("count", len(producers)))
@@ -302,7 +316,12 @@ SELECT DISTINCT p.producer_id,
        'active' as status,
        (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' ORDER BY pk.created_at DESC LIMIT 1) as active_key,
        pt.jti as access_token_jti,
-       pt.expires_at as token_expires
+       pt.expires_at as token_expires,
+       CASE
+         WHEN pt.revoked_at IS NOT NULL THEN 'revoked'
+         WHEN pt.expires_at < NOW() THEN 'expired'
+         ELSE 'active'
+       END as token_status
 FROM public.producers p
 INNER JOIN public.producer_tokens pt ON pt.producer_id = p.producer_id
 WHERE pt.revoked_at IS NULL AND pt.expires_at > NOW()
@@ -322,9 +341,16 @@ ORDER BY p.created_at DESC`
                 if showLong {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time
-                        var activeKey, accessTokenJTI *string; var tokenExpires *time.Time
+                        var activeKey, accessTokenJTI *string; var tokenExpires *time.Time; var tokenStatus *string
 
-                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &activeKey, &accessTokenJTI, &tokenExpires)
+                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &activeKey, &accessTokenJTI, &tokenExpires, &tokenStatus)
+                        logging.Debug("admin_active_long_producer_data",
+                            logging.F("producer_id", pid),
+                            logging.F("name", name),
+                            logging.F("active_key", activeKey),
+                            logging.F("token_jti", accessTokenJTI),
+                            logging.F("token_expires", tokenExpires),
+                            logging.F("token_status", tokenStatus))
                         producers = append(producers, producerInfo{
                             ProducerID:     pid,
                             Name:           name,
@@ -413,14 +439,18 @@ SELECT DISTINCT p.producer_id,
        ) as current_status,
        (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' ORDER BY pk.created_at DESC LIMIT 1) as active_key,
        pt.jti as access_token_jti,
-       pt.expires_at as token_expires
+       pt.expires_at as token_expires,
+       CASE
+         WHEN pt.revoked_at IS NOT NULL THEN 'revoked'
+         WHEN pt.expires_at < NOW() THEN 'expired'
+         WHEN pt.revoked_at IS NULL AND pt.expires_at >= NOW() THEN 'active'
+         ELSE 'unknown'
+       END as token_status
 FROM public.producers p
 LEFT JOIN LATERAL (
-    SELECT jti, expires_at, issued_at
+    SELECT jti, expires_at, issued_at, revoked_at
     FROM public.producer_tokens
     WHERE producer_id = p.producer_id
-      AND revoked_at IS NULL
-      AND expires_at > NOW()
     ORDER BY issued_at DESC
     LIMIT 1
 ) pt ON true
@@ -441,9 +471,17 @@ ORDER BY p.created_at DESC`
                 if showLong {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time; var status string
-                        var activeKey, accessTokenJTI *string; var tokenExpires *time.Time
+                        var activeKey, accessTokenJTI *string; var tokenExpires *time.Time; var tokenStatus *string
 
-                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status, &activeKey, &accessTokenJTI, &tokenExpires)
+                        _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status, &activeKey, &accessTokenJTI, &tokenExpires, &tokenStatus)
+                        logging.Debug("admin_registered_long_producer_data",
+                            logging.F("producer_id", pid),
+                            logging.F("name", name),
+                            logging.F("status", status),
+                            logging.F("active_key", activeKey),
+                            logging.F("token_jti", accessTokenJTI),
+                            logging.F("token_expires", tokenExpires),
+                            logging.F("token_status", tokenStatus))
                         producers = append(producers, producerInfo{
                             ProducerID:     pid,
                             Name:           name,
@@ -453,6 +491,7 @@ ORDER BY p.created_at DESC`
                             ActiveKey:      activeKey,
                             AccessTokenJTI: accessTokenJTI,
                             TokenExpires:   tokenExpires,
+                            TokenStatus:    tokenStatus,
                         })
                     }
                 } else {
