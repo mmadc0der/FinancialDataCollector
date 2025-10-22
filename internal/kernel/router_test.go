@@ -201,11 +201,14 @@ func TestRDWorker_Smoke(t *testing.T) {
 
 func TestPgWorkerBatch_FlushOnSize_Acks(t *testing.T) {
     ackCh := make(chan []string, 2)
-    r := &router{ack: func(ids ...string) { // send a copy to avoid sharing backing array
-        cp := make([]string, len(ids))
-        copy(cp, ids)
-        ackCh <- cp
-    }}
+    r := &router{
+        ack: func(ids ...string) { // send a copy to avoid sharing backing array
+            cp := make([]string, len(ids))
+            copy(cp, ids)
+            ackCh <- cp
+        },
+        pgCircuitBreaker: newCircuitBreaker(5, 30*time.Second), // Initialize circuit breaker
+    }
 	r.pgBatchSize = 2
 	r.pgBatchWait = 200 * time.Millisecond
 	r.pgCh = make(chan pgMsg, 2)

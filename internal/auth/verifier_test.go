@@ -166,8 +166,8 @@ func TestVerify_NBFClaimEdgeCases(t *testing.T) {
     // Should verify immediately (nbf is in the past by skew amount)
     if _, _, _, err := v.Verify(nil, tok); err != nil { t.Fatalf("should verify: %v", err) }
     
-    // Wait until token expires past skew
-    time.Sleep(2 * time.Second)
+    // Wait until token expires past skew (TTL + skew = 1 + 5 = 6 seconds)
+    time.Sleep(7 * time.Second)
     if _, _, _, err := v.Verify(nil, tok); err == nil { t.Fatalf("should be expired") }
 }
 
