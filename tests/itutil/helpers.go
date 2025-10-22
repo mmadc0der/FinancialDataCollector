@@ -115,4 +115,21 @@ func WaitReadStream(t *testing.T, r *redis.Client, stream string, deadline time.
     return redis.XMessage{}
 }
 
+// WaitForMigrations waits for database migrations to complete by checking for required tables
+func WaitForMigrations(t *testing.T, pg *data.Postgres, deadline time.Duration) {
+    t.Helper()
+    end := time.Now().Add(deadline)
+    for time.Now().Before(end) {
+        // Check if core tables exist
+        var exists bool
+        err := pg.Pool().QueryRow(context.Background(), 
+            `SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'schemas')`).Scan(&exists)
+        if err == nil && exists {
+            return
+        }
+        time.Sleep(100 * time.Millisecond)
+    }
+    t.Fatalf("migrations did not complete within %v", deadline)
+}
+
 

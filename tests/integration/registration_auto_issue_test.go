@@ -29,10 +29,14 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
+    // Wait for containers to be stable
+    time.Sleep(500 * time.Millisecond)
+
     // Prepare DB & approve key fingerprint
     pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
+    itutil.WaitForMigrations(t, pg, 10*time.Second)
     _ = pg.Pool()
 
     // generate ed25519 key and encode OpenSSH public key line
@@ -73,8 +77,14 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
 
+    // Wait for kernel to be ready
+    time.Sleep(1 * time.Second)
+
     // wait for ready
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+
+    // Wait before test operations
+    time.Sleep(1 * time.Second)
 
     // publish registration message
     rcli := redis.NewClient(&redis.Options{Addr: addr})

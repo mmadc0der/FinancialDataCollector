@@ -26,10 +26,14 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
+    // Wait for containers to be stable
+    time.Sleep(500 * time.Millisecond)
+
     // Prepare DB: apply migrations and create default entities
     pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
+    itutil.WaitForMigrations(t, pg, 10*time.Second)
     pool := pg.Pool()
     var schemaID, producerID, subjectID string
     if err := pool.QueryRow(context.Background(), `INSERT INTO public.schemas(schema_id,name,version,body) VALUES (gen_random_uuid(),'e2e',1,'{}'::jsonb) RETURNING schema_id`).Scan(&schemaID); err != nil {
@@ -59,8 +63,14 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
 
+    // Wait for kernel to be ready
+    time.Sleep(1 * time.Second)
+
     // wait for readyz
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+
+    // Wait before test operations
+    time.Sleep(1 * time.Second)
 
     // publish a message into Redis
     rcli := redis.NewClient(&redis.Options{Addr: addr})
@@ -89,12 +99,16 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
+	// Wait for containers to be stable
+	time.Sleep(500 * time.Millisecond)
+
 	// Prepare DB
 	pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
 	if err != nil {
 		t.Fatalf("pg: %v", err)
 	}
 	defer pg.Close()
+	itutil.WaitForMigrations(t, pg, 10*time.Second)
 	pool := pg.Pool()
 	var schemaID, producerID, subjectID string
 	if err := pool.QueryRow(context.Background(), `INSERT INTO public.schemas(schema_id,name,version,body) VALUES (gen_random_uuid(),'batch_test',1,'{}'::jsonb) RETURNING schema_id`).Scan(&schemaID); err != nil {
@@ -132,7 +146,13 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
+	// Wait for kernel to be ready
+	time.Sleep(1 * time.Second)
+
 	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+
+	// Wait before test operations
+	time.Sleep(1 * time.Second)
 
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
@@ -224,12 +244,16 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
+	// Wait for containers to be stable
+	time.Sleep(500 * time.Millisecond)
+
 	// Prepare DB
 	pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
 	if err != nil {
 		t.Fatalf("pg: %v", err)
 	}
 	defer pg.Close()
+	itutil.WaitForMigrations(t, pg, 10*time.Second)
 	pool := pg.Pool()
 	var schemaID, producerID, subjectID string
 	if err := pool.QueryRow(context.Background(), `INSERT INTO public.schemas(schema_id,name,version,body) VALUES (gen_random_uuid(),'partition_test',1,'{}'::jsonb) RETURNING schema_id`).Scan(&schemaID); err != nil {
@@ -267,7 +291,13 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
+	// Wait for kernel to be ready
+	time.Sleep(1 * time.Second)
+
 	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+
+	// Wait before test operations
+	time.Sleep(1 * time.Second)
 
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()

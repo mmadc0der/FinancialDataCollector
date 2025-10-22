@@ -32,10 +32,14 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
+    // Wait for containers to be stable
+    time.Sleep(500 * time.Millisecond)
+
     // Prepare DB & approve key fingerprint and create schema
     pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
+    itutil.WaitForMigrations(t, pg, 10*time.Second)
     pool := pg.Pool()
 
     // keypair for registration/token issuance verification
@@ -76,8 +80,14 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
 
+    // Wait for kernel to be ready
+    time.Sleep(1 * time.Second)
+
     // wait ready
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+
+    // Wait before test operations
+    time.Sleep(1 * time.Second)
 
     rcli := redis.NewClient(&redis.Options{Addr: addr})
     // 1) Registration: send and wait on per-nonce response
