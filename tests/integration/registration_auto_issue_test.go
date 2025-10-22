@@ -30,7 +30,7 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     defer rc.Terminate(context.Background())
 
     // Prepare DB & approve key fingerprint
-    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{Enabled: true, DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     _ = pg.Pool()
@@ -46,8 +46,8 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
 
     // Upsert key row and approve + bind to a producer
     var producerID string
-    if err := pool.QueryRow(context.Background(), `INSERT INTO public.producers(producer_id,name) VALUES (gen_random_uuid(),'auto') RETURNING producer_id`).Scan(&producerID); err != nil { t.Fatalf("producer: %v", err) }
-    if _, err := pool.Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ($1,$2,'approved',$3) ON CONFLICT (fingerprint) DO UPDATE SET status='approved', producer_id=EXCLUDED.producer_id, pubkey=EXCLUDED.pubkey`, fp, pubLine, producerID); err != nil {
+    if err := pg.Pool().QueryRow(context.Background(), `INSERT INTO public.producers(producer_id,name) VALUES (gen_random_uuid(),'auto') RETURNING producer_id`).Scan(&producerID); err != nil { t.Fatalf("producer: %v", err) }
+    if _, err := pg.Pool().Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ($1,$2,'approved',$3) ON CONFLICT (fingerprint) DO UPDATE SET status='approved', producer_id=EXCLUDED.producer_id, pubkey=EXCLUDED.pubkey`, fp, pubLine, producerID); err != nil {
         t.Fatalf("upsert key: %v", err)
     }
 
