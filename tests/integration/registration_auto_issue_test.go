@@ -59,7 +59,16 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
         Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 50},
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
-        Auth: kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: privB64, PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}},
+        Auth: kernelcfg.AuthConfig{
+            RequireToken: true,
+            Issuer: "it",
+            Audience: "it",
+            KeyID: "k",
+            PrivateKey: privB64,
+            PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)},
+            ProducerSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+            AdminSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
+        },
     }
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()

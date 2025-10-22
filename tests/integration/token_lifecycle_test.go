@@ -39,6 +39,8 @@ func TestTokenLifecycle_IssuanceAndVerification(t *testing.T) {
 			SkewSeconds:                5,
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -74,6 +76,8 @@ func TestTokenLifecycle_RateLimit_WindowSliding(t *testing.T) {
 			KeyID:                      "test-key",
 			RegistrationRateLimitRPM:   2, // 2 per minute
 			RegistrationRateLimitBurst: 1, // +1 burst
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -109,6 +113,8 @@ func TestMessageValidation_NoToken_Goes_To_DLQ(t *testing.T) {
 			KeyID:                      "test-key",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)

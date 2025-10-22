@@ -125,6 +125,8 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 			KeyID:                      "k",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -181,6 +183,8 @@ func TestIngestE2E_DLQFallback_InvalidMessage(t *testing.T) {
 			KeyID:                      "k",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -256,6 +260,8 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 			KeyID:                      "k",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)

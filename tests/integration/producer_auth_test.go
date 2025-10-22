@@ -38,6 +38,8 @@ func TestProducerAuth_ValidToken_PublishAccepted(t *testing.T) {
 			KeyID:                      "test-key",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -90,6 +92,8 @@ func TestProducerAuth_BadTokenFormat(t *testing.T) {
 			KeyID:                      "test-key",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -144,6 +148,8 @@ func TestProducerAuth_InvalidPayload_JSON(t *testing.T) {
 			KeyID:                      "k",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -195,6 +201,8 @@ func TestProducerAuth_PayloadTooLarge(t *testing.T) {
 			KeyID:                      "k",
 			RegistrationRateLimitRPM:   10,
 			RegistrationRateLimitBurst: 3,
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -247,6 +255,8 @@ func TestProducerAuth_RateLimiting_Fingerprint(t *testing.T) {
 			KeyID:                      "k",
 			RegistrationRateLimitRPM:   1,        // 1 per minute
 			RegistrationRateLimitBurst: 0,        // No burst
+			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)

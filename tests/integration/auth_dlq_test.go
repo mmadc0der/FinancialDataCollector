@@ -30,7 +30,14 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
         Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
-        Auth: kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k"},
+        Auth: kernelcfg.AuthConfig{
+            RequireToken: true,
+            Issuer: "it",
+            Audience: "it",
+            KeyID: "k",
+            ProducerSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+            AdminSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
+        },
     }
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
