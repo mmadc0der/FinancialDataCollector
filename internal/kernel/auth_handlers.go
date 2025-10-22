@@ -64,28 +64,32 @@ func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
         // include producer_id and name by joining keys and producers
         q := `
 SELECT pr.fingerprint,
-       MAX(pr.ts) AS ts,
+       pr.ts,
        pk.producer_id,
        p.name
 FROM public.producer_registrations pr
 JOIN public.producer_keys pk ON pk.fingerprint = pr.fingerprint
 LEFT JOIN public.producers p ON p.producer_id = pk.producer_id
 WHERE pr.status = 'pending'
-GROUP BY pr.fingerprint, pk.producer_id, p.name
-ORDER BY ts DESC
+ORDER BY pr.ts DESC
 LIMIT 100`
 
         if k.pg.Pool() != nil {
             conn, err := k.pg.Pool().Acquire(cctx)
-            if err == nil {
+            if err != nil {
+                logging.Error("admin_pending_db_connect_error", logging.Err(err))
+            } else {
                 defer conn.Release()
                 rowscan, err := conn.Query(cctx, q)
-                if err == nil {
+                if err != nil {
+                    logging.Error("admin_pending_query_error", logging.Err(err))
+                } else {
                     for rowscan.Next() {
                         var f string; var ts time.Time; var pid *string; var name *string
                         _ = rowscan.Scan(&f, &ts, &pid, &name)
                         rows = append(rows, row{Fingerprint: f, TS: ts, ProducerID: pid, Name: name})
                     }
+                    logging.Info("admin_pending_rows_found", logging.F("count", len(rows)))
                 }
             }
         }
@@ -132,10 +136,14 @@ ORDER BY p.created_at DESC`
 
         if k.pg.Pool() != nil {
             conn, err := k.pg.Pool().Acquire(cctx)
-            if err == nil {
+            if err != nil {
+                logging.Error("admin_all_producers_db_connect_error", logging.Err(err))
+            } else {
                 defer conn.Release()
                 rowscan, err := conn.Query(cctx, q)
-                if err == nil {
+                if err != nil {
+                    logging.Error("admin_all_producers_query_error", logging.Err(err))
+                } else {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time; var status string
                         _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status)
@@ -147,6 +155,7 @@ ORDER BY p.created_at DESC`
                             CreatedAt:   createdAt,
                         })
                     }
+                    logging.Info("admin_all_producers_rows_found", logging.F("count", len(producers)))
                 }
             }
         }
@@ -175,10 +184,14 @@ ORDER BY p.created_at DESC`
 
         if k.pg.Pool() != nil {
             conn, err := k.pg.Pool().Acquire(cctx)
-            if err == nil {
+            if err != nil {
+                logging.Error("admin_long_producers_db_connect_error", logging.Err(err))
+            } else {
                 defer conn.Release()
                 rowscan, err := conn.Query(cctx, q)
-                if err == nil {
+                if err != nil {
+                    logging.Error("admin_long_producers_query_error", logging.Err(err))
+                } else {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time
                         var activeKey, accessTokenJTI *string; var tokenExpires *time.Time
@@ -195,6 +208,7 @@ ORDER BY p.created_at DESC`
                             TokenExpires:   tokenExpires,
                         })
                     }
+                    logging.Info("admin_long_producers_rows_found", logging.F("count", len(producers)))
                 }
             }
         }
