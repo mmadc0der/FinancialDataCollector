@@ -47,7 +47,11 @@ func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
 
     // Set default filter if not specified
     if filter == "" {
-        filter = "pending"
+        if showLong {
+            filter = "registered"  // Default to registered when long=true for better UX
+        } else {
+            filter = "pending"
+        }
     }
 
     // Validate filter parameter
@@ -160,6 +164,7 @@ SELECT p.producer_id,
          'unknown'
        ) as current_status
 FROM public.producers p
+GROUP BY p.producer_id, p.name, p.description, p.created_at
 ORDER BY p.created_at DESC`
 
         if k.pg.Pool() != nil {
@@ -205,7 +210,7 @@ SELECT p.producer_id,
           END, pk.created_at DESC LIMIT 1),
          'unknown'
        ) as current_status,
-       (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' LIMIT 1) as active_key,
+       (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' ORDER BY pk.created_at DESC LIMIT 1) as active_key,
        pt.jti as access_token_jti,
        pt.expires_at as token_expires
 FROM public.producers p
@@ -218,6 +223,7 @@ LEFT JOIN LATERAL (
     ORDER BY issued_at DESC
     LIMIT 1
 ) pt ON true
+GROUP BY p.producer_id, p.name, p.description, p.created_at
 ORDER BY p.created_at DESC`
 
         if k.pg.Pool() != nil {
@@ -369,6 +375,7 @@ func (k *Kernel) handleRegisteredProducers(w http.ResponseWriter, r *http.Reques
 SELECT DISTINCT p.producer_id,
        p.name,
        p.description,
+       p.created_at,
        COALESCE(
          (SELECT pk.status FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id ORDER BY
           CASE pk.status
@@ -379,10 +386,9 @@ SELECT DISTINCT p.producer_id,
             ELSE 5
           END, pk.created_at DESC LIMIT 1),
          'unknown'
-       ) as current_status,
-       p.created_at
+       ) as current_status
 FROM public.producers p
-INNER JOIN public.producer_keys pk ON pk.producer_id = p.producer_id
+WHERE EXISTS (SELECT 1 FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id)
 ORDER BY p.created_at DESC`
     } else {
         q = `
@@ -401,11 +407,11 @@ SELECT p.producer_id,
           END, pk.created_at DESC LIMIT 1),
          'unknown'
        ) as current_status,
-       (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' LIMIT 1) as active_key,
+       (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' ORDER BY pk.created_at DESC LIMIT 1) as active_key,
        pt.jti as access_token_jti,
        pt.expires_at as token_expires
 FROM public.producers p
-INNER JOIN public.producer_keys pk ON pk.producer_id = p.producer_id
+LEFT JOIN public.producer_keys pk ON pk.producer_id = p.producer_id
 LEFT JOIN LATERAL (
     SELECT jti, expires_at, issued_at
     FROM public.producer_tokens
@@ -415,6 +421,8 @@ LEFT JOIN LATERAL (
     ORDER BY issued_at DESC
     LIMIT 1
 ) pt ON true
+WHERE EXISTS (SELECT 1 FROM public.producer_keys pk2 WHERE pk2.producer_id = p.producer_id)
+GROUP BY p.producer_id, p.name, p.description, p.created_at
 ORDER BY p.created_at DESC`
     }
 
