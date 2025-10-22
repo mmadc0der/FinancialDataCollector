@@ -116,6 +116,7 @@ LIMIT 100`
             rowscan, err := conn.Query(cctx, q)
             if err != nil {
                 logging.Error("admin_pending_query_error", logging.Err(err))
+                logging.Error("admin_pending_query_details", logging.F("query", q))
             } else {
                 for rowscan.Next() {
                     var f string; var ts time.Time; var pid *string; var name *string
@@ -125,6 +126,8 @@ LIMIT 100`
                 logging.Info("admin_pending_rows_found", logging.F("count", len(rows)))
             }
         }
+    } else {
+        logging.Error("admin_pending_no_db_pool", logging.F("message", "Database pool is nil"))
     }
     _ = json.NewEncoder(w).Encode(rows)
 }
@@ -148,7 +151,7 @@ func (k *Kernel) handleAllProducers(w http.ResponseWriter, r *http.Request, cctx
     if !showLong {
         // Simple view - show each producer once with their current/most relevant status
         q := `
-SELECT p.producer_id,
+SELECT DISTINCT p.producer_id,
        p.name,
        p.description,
        p.created_at,
@@ -164,7 +167,6 @@ SELECT p.producer_id,
          'unknown'
        ) as current_status
 FROM public.producers p
-GROUP BY p.producer_id, p.name, p.description, p.created_at
 ORDER BY p.created_at DESC`
 
         if k.pg.Pool() != nil {
@@ -176,6 +178,7 @@ ORDER BY p.created_at DESC`
                 rowscan, err := conn.Query(cctx, q)
                 if err != nil {
                     logging.Error("admin_all_producers_query_error", logging.Err(err))
+                    logging.Error("admin_all_producers_query_details", logging.F("query", q))
                 } else {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time; var status string
@@ -191,11 +194,13 @@ ORDER BY p.created_at DESC`
                     logging.Info("admin_all_producers_rows_found", logging.F("count", len(producers)))
                 }
             }
+        } else {
+            logging.Error("admin_all_producers_no_db_pool", logging.F("message", "Database pool is nil"))
         }
     } else {
         // Long view - include key and token info for all producers (can be null)
         q := `
-SELECT p.producer_id,
+SELECT DISTINCT p.producer_id,
        p.name,
        p.description,
        p.created_at,
@@ -223,7 +228,6 @@ LEFT JOIN LATERAL (
     ORDER BY issued_at DESC
     LIMIT 1
 ) pt ON true
-GROUP BY p.producer_id, p.name, p.description, p.created_at
 ORDER BY p.created_at DESC`
 
         if k.pg.Pool() != nil {
@@ -291,12 +295,12 @@ WHERE pt.revoked_at IS NULL AND pt.expires_at > NOW()
 ORDER BY p.created_at DESC`
     } else {
         q = `
-SELECT p.producer_id,
+SELECT DISTINCT p.producer_id,
        p.name,
        p.description,
        p.created_at,
        'active' as status,
-       (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' LIMIT 1) as active_key,
+       (SELECT pk.fingerprint FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id AND pk.status = 'approved' ORDER BY pk.created_at DESC LIMIT 1) as active_key,
        pt.jti as access_token_jti,
        pt.expires_at as token_expires
 FROM public.producers p
@@ -392,7 +396,7 @@ WHERE EXISTS (SELECT 1 FROM public.producer_keys pk WHERE pk.producer_id = p.pro
 ORDER BY p.created_at DESC`
     } else {
         q = `
-SELECT p.producer_id,
+SELECT DISTINCT p.producer_id,
        p.name,
        p.description,
        p.created_at,
@@ -411,7 +415,6 @@ SELECT p.producer_id,
        pt.jti as access_token_jti,
        pt.expires_at as token_expires
 FROM public.producers p
-LEFT JOIN public.producer_keys pk ON pk.producer_id = p.producer_id
 LEFT JOIN LATERAL (
     SELECT jti, expires_at, issued_at
     FROM public.producer_tokens
@@ -421,8 +424,7 @@ LEFT JOIN LATERAL (
     ORDER BY issued_at DESC
     LIMIT 1
 ) pt ON true
-WHERE EXISTS (SELECT 1 FROM public.producer_keys pk2 WHERE pk2.producer_id = p.producer_id)
-GROUP BY p.producer_id, p.name, p.description, p.created_at
+WHERE EXISTS (SELECT 1 FROM public.producer_keys pk WHERE pk.producer_id = p.producer_id)
 ORDER BY p.created_at DESC`
     }
 
