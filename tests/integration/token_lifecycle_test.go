@@ -12,6 +12,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	itutil "github.com/example/data-kernel/tests/itutil"
+	"github.com/example/data-kernel/internal/data"
 	"github.com/example/data-kernel/internal/kernelcfg"
 )
 
@@ -27,10 +28,18 @@ func TestTokenLifecycle_IssuanceAndVerification(t *testing.T) {
 	// Ensure Postgres is accepting connections before kernel start
 	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
+	// Pre-apply migrations to avoid kernel contention
+	{
+		pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
+		if err != nil { t.Fatalf("pg: %v", err) }
+		itutil.WaitForMigrations(t, pg, 10*time.Second)
+		pg.Close()
+	}
+
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
+		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -72,7 +81,7 @@ func TestTokenLifecycle_RateLimit_WindowSliding(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
+		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{

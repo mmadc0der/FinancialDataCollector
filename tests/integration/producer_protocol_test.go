@@ -35,7 +35,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     // Wait for containers to be stable
     time.Sleep(500 * time.Millisecond)
 
-    // Ensure Postgres is accepting connections before DB init
+    // Ensure Postgres is accepting connections and pre-apply migrations
     itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
     // Prepare DB & approve key fingerprint and create schema
@@ -66,7 +66,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: itutil.NewPostgresConfigWithBatch(dsn, 50, 50),
+        Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 50, 50, ""),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: true},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{

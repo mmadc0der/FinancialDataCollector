@@ -29,8 +29,8 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
-    // Wait for containers to be stable
-    time.Sleep(500 * time.Millisecond)
+    // Ensure Postgres is accepting connections and pre-apply migrations
+    itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
     // Prepare DB & approve key fingerprint
     pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
@@ -60,7 +60,7 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 50},
+        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, MigrationsDir: "../../migrations", BatchSize: 10, BatchMaxWaitMs: 50},
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{

@@ -12,6 +12,7 @@ import (
     "github.com/redis/go-redis/v9"
 
     itutil "github.com/example/data-kernel/tests/itutil"
+    "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
 )
 
@@ -26,11 +27,19 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
     // Wait for Postgres to be ready before starting kernel
     itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
+    // Pre-apply migrations explicitly to avoid kernel doing it under race with container networking
+    {
+        pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
+        if err != nil { t.Fatalf("pg: %v", err) }
+        itutil.WaitForMigrations(t, pg, 10*time.Second)
+        pg.Close()
+    }
+
     // config with auth enabled and require_token
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: itutil.NewPostgresConfig(dsn),
+        Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{
