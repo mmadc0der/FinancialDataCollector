@@ -62,6 +62,13 @@ func NewFromPool(pool *pgxpool.Pool) *Postgres {
 	return &Postgres{pool: pool}
 }
 
+// NewTestPostgres creates a Postgres instance with nil pool for unit tests.
+// This bypasses ensurePool() checks and allows tests to verify batching/routing logic
+// without requiring a database connection.
+func NewTestPostgres() *Postgres {
+	return NewFromPool(nil)
+}
+
 // Close closes the internal pool.
 func (p *Postgres) Close() {
 	if p.pool != nil {

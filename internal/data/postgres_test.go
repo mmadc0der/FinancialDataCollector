@@ -3,7 +3,6 @@
 package data
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -107,13 +106,6 @@ func TestPostgresConfig_DefaultIDs(t *testing.T) {
 	if cfg.DefaultProducerID != "" && cfg.DefaultSchemaID != "" {
 		t.Logf("Both defaults set - messages will use these if not overridden")
 	}
-}
-
-// NewTestPostgres creates a Postgres instance with nil pool for unit tests.
-// This bypasses ensurePool() checks and allows tests to verify batching/routing logic
-// without requiring a database connection.
-func NewTestPostgres() *Postgres {
-	return NewFromPool(nil)
 }
 
 // Helper to create test config
