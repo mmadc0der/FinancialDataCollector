@@ -10,7 +10,6 @@ import (
     "testing"
     "time"
 
-    "github.com/jackc/pgx/v5/pgxpool"
     "github.com/redis/go-redis/v9"
 
     itutil "github.com/example/data-kernel/tests/itutil"
@@ -82,10 +81,8 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     // assert persisted in DB
     waitFor[int](t, 10*time.Second, func() (int, bool) {
         var cnt int
-        // new pool to avoid stale conn
-        p, _ := pgxpool.New(context.Background(), dsn)
-        defer p.Close()
-        _ = p.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.events`).Scan(&cnt)
+        // reuse existing pool from test setup
+        _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.events`).Scan(&cnt)
         return cnt, cnt >= 1
     })
 }
