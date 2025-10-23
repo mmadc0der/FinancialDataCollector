@@ -3,6 +3,7 @@
 package data
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -108,22 +109,11 @@ func TestPostgresConfig_DefaultIDs(t *testing.T) {
 	}
 }
 
-// testPostgres wraps Postgres to override methods for testing
-type testPostgres struct {
-	*Postgres
-}
-
-// IngestEventsJSON overrides the original method to always succeed for tests
-func (tp *testPostgres) IngestEventsJSON(ctx context.Context, batch any) error {
-	// Always succeed for test instances (no-op)
-	return nil
-}
-
 // NewTestPostgres creates a Postgres instance with nil pool for unit tests.
 // This bypasses ensurePool() checks and allows tests to verify batching/routing logic
 // without requiring a database connection.
 func NewTestPostgres() *Postgres {
-	return &testPostgres{Postgres: NewFromPool(nil)}
+	return NewFromPool(nil)
 }
 
 // Helper to create test config
