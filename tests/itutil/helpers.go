@@ -127,14 +127,15 @@ func NewPostgresConfig(dsn string) kernelcfg.PostgresConfig {
 	}
 }
 
-// NewPostgresConfigWithBatch creates a PostgresConfig with custom batch settings
-func NewPostgresConfigWithBatch(dsn string, batchSize int, batchWaitMs int) kernelcfg.PostgresConfig {
+// NewPostgresConfigNoMigrations creates a PostgresConfig without applying migrations but with correct directory
+func NewPostgresConfigNoMigrations(dsn string, batchSize int, batchWaitMs int, defaultProducerID string) kernelcfg.PostgresConfig {
 	return kernelcfg.PostgresConfig{
-		DSN:             dsn,
-		ApplyMigrations: true,
-		MigrationsDir:   "../../migrations", // Point to project root migrations
-		BatchSize:       batchSize,
-		BatchMaxWaitMs:  batchWaitMs,
+		DSN:               dsn,
+		ApplyMigrations:   false,
+		MigrationsDir:     "../../migrations", // Point to project root migrations
+		BatchSize:         batchSize,
+		BatchMaxWaitMs:    batchWaitMs,
+		DefaultProducerID: defaultProducerID,
 	}
 }
 
