@@ -116,6 +116,28 @@ func WaitReadStream(t *testing.T, r *redis.Client, stream string, deadline time.
     return redis.XMessage{}
 }
 
+// NewPostgresConfig creates a PostgresConfig with the correct migrations directory for integration tests
+func NewPostgresConfig(dsn string) kernelcfg.PostgresConfig {
+	return kernelcfg.PostgresConfig{
+		DSN:             dsn,
+		ApplyMigrations: true,
+		MigrationsDir:   "../../migrations", // Point to project root migrations
+		BatchSize:       10,
+		BatchMaxWaitMs:  50,
+	}
+}
+
+// NewPostgresConfigWithBatch creates a PostgresConfig with custom batch settings
+func NewPostgresConfigWithBatch(dsn string, batchSize int, batchWaitMs int) kernelcfg.PostgresConfig {
+	return kernelcfg.PostgresConfig{
+		DSN:             dsn,
+		ApplyMigrations: true,
+		MigrationsDir:   "../../migrations", // Point to project root migrations
+		BatchSize:       batchSize,
+		BatchMaxWaitMs:  batchWaitMs,
+	}
+}
+
 // WaitForMigrations waits for database migrations to complete by checking for required tables
 func WaitForMigrations(t *testing.T, pg *data.Postgres, deadline time.Duration) {
     t.Helper()

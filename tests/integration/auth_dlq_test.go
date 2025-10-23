@@ -27,7 +27,7 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+        Postgres: itutil.NewPostgresConfig(dsn),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{
