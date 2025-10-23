@@ -36,7 +36,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     time.Sleep(500 * time.Millisecond)
 
     // Prepare DB & approve key fingerprint and create schema
-    pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     itutil.WaitForMigrations(t, pg, 10*time.Second)
@@ -63,7 +63,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 50, BatchMaxWaitMs: 50},
+        Postgres: itutil.NewPostgresConfigWithBatch(dsn, 50, 50),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: true},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{

@@ -27,7 +27,7 @@ func TestTokenLifecycle_IssuanceAndVerification(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -66,7 +66,7 @@ func TestTokenLifecycle_RateLimit_WindowSliding(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -103,7 +103,7 @@ func TestMessageValidation_NoToken_Goes_To_DLQ(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{

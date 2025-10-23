@@ -56,7 +56,7 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 100, DefaultProducerID: producerID},
+        Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 100, producerID),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
     }
@@ -130,7 +130,7 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 5, BatchMaxWaitMs: 300}, // Short batch window
+		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 5, 300, ""), // Short batch window
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -194,7 +194,7 @@ func TestIngestE2E_DLQFallback_InvalidMessage(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -275,7 +275,7 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{

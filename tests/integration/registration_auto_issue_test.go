@@ -33,7 +33,7 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     time.Sleep(500 * time.Millisecond)
 
     // Prepare DB & approve key fingerprint
-    pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     itutil.WaitForMigrations(t, pg, 10*time.Second)

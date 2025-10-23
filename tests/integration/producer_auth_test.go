@@ -28,7 +28,7 @@ func TestProducerAuth_ValidToken_PublishAccepted(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -82,7 +82,7 @@ func TestProducerAuth_BadTokenFormat(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -139,7 +139,7 @@ func TestProducerAuth_InvalidPayload_JSON(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -192,7 +192,7 @@ func TestProducerAuth_PayloadTooLarge(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port), MaxMessageBytes: 100}, // Only 100 bytes
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
@@ -246,7 +246,7 @@ func TestProducerAuth_RateLimiting_Fingerprint(t *testing.T) {
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-		Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true, BatchSize: 10, BatchMaxWaitMs: 50},
+		Postgres: itutil.NewPostgresConfigWithBatch(dsn, 10, 50),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
