@@ -372,4 +372,308 @@ func (p *Postgres) CheckProducerSubject(ctx context.Context, producerID, subject
 
 // EnsureSubjectByKey creates or updates a subject by key and returns subject_id
 func (p *Postgres) EnsureSubjectByKey(ctx context.Context, subjectKey string, attrs []byte) (string, error) {
-	if err := p.ensurePool(); err !
+	if err := p.ensurePool(); err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var sid string
+	// attrs may be empty; coalesce to '{}'::jsonb
+	var a sql.NullString
+	if len(attrs) > 0 {
+		a = sql.NullString{String: string(attrs), Valid: true}
+	}
+	err := p.pool.QueryRow(cctx,
+		`WITH up AS (
+			INSERT INTO public.subjects(subject_id, subject_key, attrs)
+			VALUES (gen_random_uuid(), $1, COALESCE($2::jsonb, '{}'::jsonb))
+			ON CONFLICT (subject_key)
+			DO UPDATE SET attrs = COALESCE($2::jsonb, public.subjects.attrs), last_seen_at = now()
+			RETURNING subject_id
+		) SELECT subject_id FROM up
+		UNION ALL
+		SELECT subject_id FROM public.subjects WHERE subject_key=$1 LIMIT 1`, subjectKey, a).Scan(&sid)
+	if err != nil {
+		return "", err
+	}
+	return sid, nil
+}
+
+// BindProducerSubject inserts producer_subjects link (idempotent)
+func (p *Postgres) BindProducerSubject(ctx context.Context, producerID, subjectID string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx, `INSERT INTO public.producer_subjects(producer_id, subject_id) VALUES ($1,$2) ON CONFLICT (producer_id, subject_id) DO NOTHING`, producerID, subjectID)
+	return err
+}
+
+// Auth helpers
+func (p *Postgres) InsertProducerToken(ctx context.Context, producerID, jti string, exp time.Time, notes string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx, `INSERT INTO public.producer_tokens(token_id, producer_id, jti, expires_at, notes) VALUES (gen_random_uuid(), $1, $2, $3, $4) ON CONFLICT (jti) DO NOTHING`, producerID, jti, exp, notes)
+	return err
+}
+
+// TokenExists returns (exists, producerID).
+// On DB error it returns (false, "") and logs the error.
+// It treats not-found as (false,"").
+func (p *Postgres) TokenExists(ctx context.Context, jti string) (bool, string) {
+	if err := p.ensurePool(); err != nil {
+		logging.Error("pg_token_exists_no_pool", logging.F("err", err.Error()))
+		return false, ""
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var producerID string
+	var revokedAt *time.Time
+	var expiresAt time.Time
+	err := p.pool.QueryRow(cctx, `SELECT producer_id, revoked_at, expires_at FROM public.producer_tokens WHERE jti=$1`, jti).Scan(&producerID, &revokedAt, &expiresAt)
+	if err != nil {
+		if isNoRows(err) {
+			return false, ""
+		}
+		logging.Error("pg_token_exists_query_error", logging.F("err", err.Error()))
+		return false, ""
+	}
+	if revokedAt != nil {
+		return false, ""
+	}
+	if time.Now().After(expiresAt) {
+		return false, ""
+	}
+	return true, producerID
+}
+
+func (p *Postgres) RevokeToken(ctx context.Context, jti, reason string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx, `INSERT INTO public.revoked_tokens(jti, reason) VALUES ($1,$2) ON CONFLICT (jti) DO UPDATE SET reason=EXCLUDED.reason, revoked_at=now(); UPDATE public.producer_tokens SET revoked_at=now() WHERE jti=$1`, jti, reason)
+	return err
+}
+
+// IsTokenRevoked returns true if token is revoked. If DB is unavailable we conservatively return true and log.
+func (p *Postgres) IsTokenRevoked(ctx context.Context, jti string) bool {
+	if err := p.ensurePool(); err != nil {
+		logging.Error("pg_is_token_revoked_no_pool", logging.F("err", err.Error()))
+		// conservative: treat unknown as revoked
+		return true
+	}
+	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var exists bool
+	if err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.revoked_tokens WHERE jti=$1)`, jti).Scan(&exists); err != nil {
+		logging.Error("pg_is_token_revoked_query_error", logging.F("err", err.Error()))
+		// conservative
+		return true
+	}
+	return exists
+}
+
+// Registration helpers
+func (p *Postgres) UpsertProducerKey(ctx context.Context, fingerprint, pubkey string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx,
+		`INSERT INTO public.producer_keys(fingerprint, pubkey, status)
+         VALUES ($1, $2, 'pending')
+         ON CONFLICT (fingerprint) DO UPDATE SET pubkey = EXCLUDED.pubkey WHERE public.producer_keys.pubkey <> EXCLUDED.pubkey`,
+		fingerprint, pubkey,
+	)
+	return err
+}
+
+func (p *Postgres) GetProducerKey(ctx context.Context, fingerprint string) (exists bool, status string, producerID *string) {
+	if err := p.ensurePool(); err != nil {
+		return false, "", nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var pid *string
+	var st string
+	err := p.pool.QueryRow(cctx, `SELECT status, producer_id FROM public.producer_keys WHERE fingerprint=$1`, fingerprint).Scan(&st, &pid)
+	if err != nil {
+		if isNoRows(err) {
+			return false, "", nil
+		}
+		return false, "", nil
+	}
+	return true, st, pid
+}
+
+func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload, sig, nonce, status, reason, reviewer string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx,
+		`INSERT INTO public.producer_registrations(reg_id, fingerprint, payload, sig, nonce, status, reason, reviewed_at, reviewer)
+         VALUES (gen_random_uuid(), $1, $2::jsonb, $3, $4, $5, NULLIF($6,''), CASE WHEN $7<>'' THEN now() ELSE NULL END, NULLIF($7,''))`,
+		fingerprint, payload, sig, nonce, status, reason, reviewer,
+	)
+	return err
+}
+
+// ApproveNewProducerKey approves a new producer key (case 1: new producer)
+func (p *Postgres) ApproveNewProducerKey(ctx context.Context, fingerprint, name, reviewer, notes string) (string, error) {
+	if err := p.ensurePool(); err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var pid string
+	err := p.pool.QueryRow(cctx, `SELECT public.approve_producer_key_new($1,$2,$3,$4)`, fingerprint, name, reviewer, notes).Scan(&pid)
+	if err != nil {
+		return "", err
+	}
+	return pid, nil
+}
+
+// ApproveKeyRotation approves a key rotation for existing producer (case 2: key rotation)
+func (p *Postgres) ApproveKeyRotation(ctx context.Context, fingerprint, producerID, reviewer, notes string) (string, error) {
+	if err := p.ensurePool(); err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var pid string
+	err := p.pool.QueryRow(cctx, `SELECT public.approve_key_rotation($1,$2,$3,$4)`, fingerprint, producerID, reviewer, notes).Scan(&pid)
+	if err != nil {
+		return "", err
+	}
+	return pid, nil
+}
+
+func (p *Postgres) RejectProducerKey(ctx context.Context, fingerprint, reviewer, reason string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx, `SELECT public.reject_producer_key($1,$2,$3)`, fingerprint, reviewer, reason)
+	return err
+}
+
+// GetKeyStatus returns the current status and producer_id for a fingerprint.
+func (p *Postgres) GetKeyStatus(ctx context.Context, fingerprint string) (status string, producerID *string, err error) {
+	if err := p.ensurePool(); err != nil {
+		return "", nil, err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var pid *string
+	var st string
+	err = p.pool.QueryRow(cctx, `SELECT status, producer_id FROM public.get_key_status($1)`, fingerprint).Scan(&st, &pid)
+	if err != nil {
+		if isNoRows(err) {
+			// Fingerprint not found - expected for new registrations
+			return "", nil, nil
+		}
+		return "", nil, err
+	}
+	return st, pid, nil
+}
+
+// Producer enable/disable flags
+func (p *Postgres) DisableProducer(ctx context.Context, producerID string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx, `UPDATE public.producers SET disabled_at = now() WHERE producer_id=$1`, producerID)
+	return err
+}
+
+func (p *Postgres) EnableProducer(ctx context.Context, producerID string) error {
+	if err := p.ensurePool(); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	_, err := p.pool.Exec(cctx, `UPDATE public.producers SET disabled_at = NULL WHERE producer_id=$1`, producerID)
+	return err
+}
+
+func (p *Postgres) IsProducerDisabled(ctx context.Context, producerID string) (bool, error) {
+	if err := p.ensurePool(); err != nil {
+		return false, err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var disabled *time.Time
+	if err := p.pool.QueryRow(cctx, `SELECT disabled_at FROM public.producers WHERE producer_id=$1`, producerID).Scan(&disabled); err != nil {
+		return false, err
+	}
+	return disabled != nil, nil
+}
+
+// EnsureProducerForFingerprint creates or finds a producer and binds the fingerprint without changing approval status.
+// Returns the resolved producer_id.
+func (p *Postgres) EnsureProducerForFingerprint(ctx context.Context, fingerprint, preferredName string) (string, error) {
+	if err := p.ensurePool(); err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	// First, see if the fingerprint already has a producer bound
+	var existingPID *string
+	err := p.pool.QueryRow(cctx, `SELECT producer_id FROM public.producer_keys WHERE fingerprint=$1`, fingerprint).Scan(&existingPID)
+	if err == nil && existingPID != nil && *existingPID != "" {
+		return *existingPID, nil
+	}
+	if err != nil && !isNoRows(err) {
+		return "", err
+	}
+
+	// Create or get producer by name
+	name := preferredName
+	if name == "" {
+		// fallback deterministic alias from fingerprint
+		if len(fingerprint) > 12 {
+			name = "auto_" + fingerprint[:12]
+		} else {
+			name = "auto_" + fingerprint
+		}
+	}
+	var pid string
+	if err := p.pool.QueryRow(cctx, `INSERT INTO public.producers(producer_id, name) VALUES (gen_random_uuid(), $1)
+                                      ON CONFLICT (name) DO UPDATE SET name=EXCLUDED.name RETURNING producer_id`, name).Scan(&pid); err != nil {
+		return "", err
+	}
+	// Bind fingerprint to producer if not already bound; keep status as is (default pending on upsert)
+	if _, err := p.pool.Exec(cctx, `UPDATE public.producer_keys SET producer_id=$2 WHERE fingerprint=$1 AND producer_id IS NULL`, fingerprint, pid); err != nil {
+		return "", err
+	}
+	return pid, nil
+}
+
+// RegisterProducerKey atomically creates a producer and binds a fingerprint in a single Postgres transaction.
+// Returns the new producer_id.
+func (p *Postgres) RegisterProducerKey(ctx context.Context, fingerprint, pubkey, producerHint, contact string, meta map[string]string) (string, error) {
+	if err := p.ensurePool(); err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var producerID string
+	metaJSON, _ := json.Marshal(meta)
+	err := p.pool.QueryRow(cctx, `SELECT public.register_producer_key($1, $2, $3, $4, $5)`, fingerprint, pubkey, producerHint, contact, metaJSON).Scan(&producerID)
+	if err != nil {
+		return "", err
+	}
+	return producerID, nil
+}

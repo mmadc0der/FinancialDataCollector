@@ -212,8 +212,8 @@ func TestPgWorkerBatch_FlushOnSize_Acks(t *testing.T) {
 	r.pgBatchSize = 2
 	r.pgBatchWait = 200 * time.Millisecond
 	r.pgCh = make(chan pgMsg, 2)
-	// Use Postgres with nil pool so IngestEventsJSON returns nil (success)
-	r.pg = &data.Postgres{}
+	// Use test Postgres that bypasses pool checks
+	r.pg = data.NewTestPostgres()
 	go r.pgWorkerBatch()
     env1 := struct{}{}
     env2 := struct{}{}
@@ -244,8 +244,8 @@ func TestPgWorkerBatchLean_FlushOnSize_Acks(t *testing.T) {
     r.pgBatchSize = 2
     r.pgBatchWait = 200 * time.Millisecond
     r.pgChLean = make(chan pgMsgLean, 2)
-    // Use Postgres with nil pool so IngestEventsJSON returns nil (success)
-    r.pg = &data.Postgres{}
+    // Use test Postgres that bypasses pool checks
+    r.pg = data.NewTestPostgres()
     go r.pgWorkerBatchLean()
     r.pgChLean <- pgMsgLean{RedisID: "r1", EventID: "e1", TS: time.Now().Format(time.RFC3339Nano), SubjectID: "s1", ProducerID: "p1", SchemaID: "sch1", Payload: json.RawMessage(`{"x":1}`)}
     r.pgChLean <- pgMsgLean{RedisID: "r2", EventID: "e2", TS: time.Now().Format(time.RFC3339Nano), SubjectID: "s2", ProducerID: "p2", SchemaID: "sch2", Payload: json.RawMessage(`{"x":2}`)}

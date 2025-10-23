@@ -4,14 +4,17 @@ import (
     "testing"
     "encoding/json"
     "time"
+    "context"
 
     "github.com/example/data-kernel/internal/data"
+    "github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestPrefixed(t *testing.T) {
     if prefixed("", "k") != "k" { t.Fatalf("no prefix case failed") }
     if prefixed("fdc:", "events") != "fdc:events" { t.Fatalf("prefix case failed") }
 }
+
 
 // Removed redundant envelope adapter tests and helpers
 
@@ -27,8 +30,8 @@ func TestHandleLeanEvent_BuildsExpectedRowAndAcks(t *testing.T) {
     r.pgBatchSize = 10
     r.pgBatchWait = 50 * time.Millisecond
     r.pgChLean = make(chan pgMsgLean, 1)
-    // Use Postgres with nil pool so IngestEventsJSON returns nil (success)
-    r.pg = &data.Postgres{}
+    // Use test Postgres that bypasses pool checks
+    r.pg = data.NewTestPostgres()
     go r.pgWorkerBatchLean()
 
     ts := time.Now().UTC().Format(time.RFC3339Nano)
