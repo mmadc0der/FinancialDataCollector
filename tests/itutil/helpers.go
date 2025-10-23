@@ -23,6 +23,25 @@ import (
     "github.com/example/data-kernel/internal/kernelcfg"
 )
 
+// WaitForPostgresReady waits for the Postgres container to be ready by attempting a connection
+func WaitForPostgresReady(t *testing.T, dsn string, deadline time.Duration) {
+	t.Helper()
+	end := time.Now().Add(deadline)
+	for time.Now().Before(end) {
+		// Try to connect to Postgres
+		pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{
+			DSN:             dsn,
+			ApplyMigrations: false, // Don't apply migrations, just test connection
+		})
+		if err == nil {
+			pg.Close() // Close the test connection
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("Postgres container not ready within %v", deadline)
+}
+
 // StartPostgres launches a Postgres container and returns the container handle and DSN.
 func StartPostgres(t *testing.T) (*psqlmod.PostgresContainer, string) {
     t.Helper()

@@ -23,6 +23,9 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
     rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
+    // Wait for Postgres to be ready before starting kernel
+    itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
     // config with auth enabled and require_token
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
