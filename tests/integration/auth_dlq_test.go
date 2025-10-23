@@ -49,8 +49,8 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
 
     rcli := redis.NewClient(&redis.Options{Addr: addr})
-    // publish without token
-    payload := []byte(`{"version":"0.1.0","type":"data","id":"01NOAUTH","ts":1730000000000000000,"data":{"source":"t","symbol":"X"}}`)
+    // publish without token (lean protocol)
+    payload := `{"event_id":"01NOAUTH","ts":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","subject_id":"00000000-0000-0000-0000-000000000000","payload":{"source":"t","symbol":"X"}}`
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id":"01NOAUTH","payload": payload}}).Err(); err != nil {
         t.Fatalf("xadd: %v", err)
     }

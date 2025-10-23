@@ -25,6 +25,9 @@ func TestProducerAuth_ValidToken_PublishAccepted(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
@@ -78,6 +81,9 @@ func TestProducerAuth_BadTokenFormat(t *testing.T) {
 	defer pgc.Terminate(context.Background())
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
+
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
@@ -136,6 +142,9 @@ func TestProducerAuth_InvalidPayload_JSON(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
@@ -187,6 +196,9 @@ func TestProducerAuth_PayloadTooLarge(t *testing.T) {
 	defer pgc.Terminate(context.Background())
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
+
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
 	// Configure small max message size
 	port := itutil.FreePort(t)
@@ -242,6 +254,9 @@ func TestProducerAuth_RateLimiting_Fingerprint(t *testing.T) {
 	defer pgc.Terminate(context.Background())
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
+
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{

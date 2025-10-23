@@ -4,6 +4,10 @@ package it
 
 import (
     "context"
+    "crypto/ed25519"
+    "crypto/rand"
+    "encoding/base64"
+    "encoding/json"
     "fmt"
     "os"
     "strconv"
@@ -13,6 +17,7 @@ import (
     "github.com/redis/go-redis/v9"
 
     itutil "github.com/example/data-kernel/tests/itutil"
+    "github.com/example/data-kernel/internal/auth"
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
 )
@@ -50,14 +55,30 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     if _, err := pool.Exec(context.Background(), `UPDATE public.subjects SET current_schema_id=$1 WHERE subject_id=$2`, schemaID, subjectID); err != nil {
         t.Fatalf("set current schema: %v", err)
     }
+    // Bind producer to subject for authorization checks
+    if _, err := pool.Exec(context.Background(), `INSERT INTO public.producer_subjects(producer_id,subject_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, producerID, subjectID); err != nil {
+        t.Fatalf("bind producer_subject: %v", err)
+    }
 
     // dynamic port
     port := itutil.FreePort(t)
+    // Generate issuer keys for tokens
+    pub, priv, err := ed25519.GenerateKey(rand.Reader)
+    if err != nil { t.Fatalf("keygen: %v", err) }
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 100, producerID),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
+        Auth: kernelcfg.AuthConfig{
+            Issuer:   "it",
+            Audience: "it",
+            KeyID:    "k",
+            PrivateKey: base64.RawStdEncoding.EncodeToString(priv),
+            PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)},
+            ProducerSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+            AdminSSHCA:    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
+        },
     }
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
@@ -71,10 +92,19 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     // Wait before test operations
     time.Sleep(1 * time.Second)
 
-    // publish a message into Redis
+    // Prepare token and schema cache
+    ver, vErr := auth.NewVerifier(cfg.Auth, pg, nil)
+    if vErr != nil { t.Fatalf("ver: %v", vErr) }
+    tok, _, _, tErr := ver.IssueSubject(context.Background(), producerID, subjectID, time.Hour, "it", "")
+    if tErr != nil { t.Fatalf("issue token: %v", tErr) }
     rcli := redis.NewClient(&redis.Options{Addr: addr})
-    payload := []byte(`{"event_id":"01TEST","ts":"2024-10-01T00:00:00Z","subject_id":"` + subjectID + `","payload":{"source":"test","symbol":"T"}}`)
-    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id":"01TEST","payload": payload}}).Err(); err != nil {
+    // Pre-populate schema cache so first event has schema_id
+    _ = rcli.Set(context.Background(), cfg.Redis.KeyPrefix+"schemas:"+subjectID, schemaID, time.Hour).Err()
+
+    // publish a message into Redis (lean protocol)
+    ev := map[string]any{"event_id":"01TEST","ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"source":"test","symbol":"T"}}
+    evb, _ := json.Marshal(ev)
+    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id":"01TEST","payload": string(evb), "token": tok}}).Err(); err != nil {
         t.Fatalf("xadd: %v", err)
     }
 
@@ -99,7 +129,7 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	// Wait for containers to be stable
 	time.Sleep(500 * time.Millisecond)
 
-	// Prepare DB
+    // Prepare DB
 	pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
 	if err != nil {
 		t.Fatalf("pg: %v", err)
@@ -123,9 +153,15 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `UPDATE public.subjects SET current_schema_id=$1 WHERE subject_id=$2`, schemaID, subjectID); err != nil {
 		t.Fatalf("set current schema: %v", err)
 	}
+    if _, err := pool.Exec(context.Background(), `INSERT INTO public.producer_subjects(producer_id,subject_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, producerID, subjectID); err != nil {
+        t.Fatalf("bind producer_subject: %v", err)
+    }
 
 	port := itutil.FreePort(t)
-	cfg := kernelcfg.Config{
+    // Generate issuer keys for tokens
+    pub, priv, err := ed25519.GenerateKey(rand.Reader)
+    if err != nil { t.Fatalf("keygen: %v", err) }
+    cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
 		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 5, 300, ""), // Short batch window
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
@@ -138,6 +174,8 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 			RegistrationRateLimitBurst: 3,
 			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
 			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
+            PrivateKey:                 base64.RawStdEncoding.EncodeToString(priv),
+            PublicKeys:                 map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)},
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -151,16 +189,24 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	// Wait before test operations
 	time.Sleep(1 * time.Second)
 
-	rcli := redis.NewClient(&redis.Options{Addr: addr})
+    rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
+
+    // Prepare token and schema cache
+    ver, vErr := auth.NewVerifier(cfg.Auth, pg, nil)
+    if vErr != nil { t.Fatalf("ver: %v", vErr) }
+    tok, _, _, tErr := ver.IssueSubject(context.Background(), producerID, subjectID, time.Hour, "it", "")
+    if tErr != nil { t.Fatalf("issue token: %v", tErr) }
+    _ = rcli.Set(context.Background(), cfg.Redis.KeyPrefix+"schemas:"+subjectID, schemaID, time.Hour).Err()
 
 	// Send 3 messages (less than batch size of 5)
 	for i := 0; i < 3; i++ {
-		payload := []byte(fmt.Sprintf(`{"version":"0.1.0","type":"data","id":"batch-%d","ts":%d,"subject_id":"%s","producer_id":"%s","data":{"value":%d}}`, i, time.Now().UnixNano(), subjectID, producerID, i))
-		if err := rcli.XAdd(context.Background(), &redis.XAddArgs{
-			Stream: "fdc:events",
-			Values: map[string]any{"id": fmt.Sprintf("batch-%d", i), "payload": payload},
-		}).Err(); err != nil {
+        ev := map[string]any{"event_id": fmt.Sprintf("batch-%d", i), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"value": i}}
+        evb, _ := json.Marshal(ev)
+        if err := rcli.XAdd(context.Background(), &redis.XAddArgs{
+            Stream: "fdc:events",
+            Values: map[string]any{"id": fmt.Sprintf("batch-%d", i), "payload": string(evb), "token": tok},
+        }).Err(); err != nil {
 			t.Fatalf("xadd: %v", err)
 		}
 	}
@@ -168,9 +214,9 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	// Wait for batch timeout to flush
 	time.Sleep(500 * time.Millisecond)
 
-	// Verify messages are in DB (batch timeout should have flushed them)
+    // Verify messages are in DB (batch timeout should have flushed them)
 	var count int64
-	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.events WHERE subject_id = $1`, subjectID).Scan(&count); err != nil {
+    if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE subject_id = $1`, subjectID).Scan(&count); err != nil {
 		t.Fatalf("count query: %v", err)
 	}
 	if count < 3 {
@@ -244,7 +290,7 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	// Wait for containers to be stable
 	time.Sleep(500 * time.Millisecond)
 
-	// Prepare DB
+    // Prepare DB
 	pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
 	if err != nil {
 		t.Fatalf("pg: %v", err)
@@ -268,9 +314,15 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `UPDATE public.subjects SET current_schema_id=$1 WHERE subject_id=$2`, schemaID, subjectID); err != nil {
 		t.Fatalf("set schema: %v", err)
 	}
+    if _, err := pool.Exec(context.Background(), `INSERT INTO public.producer_subjects(producer_id,subject_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, producerID, subjectID); err != nil {
+        t.Fatalf("bind producer_subject: %v", err)
+    }
 
 	port := itutil.FreePort(t)
-	cfg := kernelcfg.Config{
+    // Generate issuer keys for tokens
+    pub, priv, err := ed25519.GenerateKey(rand.Reader)
+    if err != nil { t.Fatalf("keygen: %v", err) }
+    cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
 		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
 		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
@@ -283,6 +335,8 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 			RegistrationRateLimitBurst: 3,
 			ProducerSSHCA:              "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
 			AdminSSHCA:                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
+            PrivateKey:                 base64.RawStdEncoding.EncodeToString(priv),
+            PublicKeys:                 map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)},
 		},
 	}
 	cancel := itutil.StartKernel(t, cfg)
@@ -296,18 +350,26 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	// Wait before test operations
 	time.Sleep(1 * time.Second)
 
-	rcli := redis.NewClient(&redis.Options{Addr: addr})
+    rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
 
-	// Send messages with different timestamps to test partition routing
+    // Prepare token and schema cache
+    ver, vErr := auth.NewVerifier(cfg.Auth, pg, nil)
+    if vErr != nil { t.Fatalf("ver: %v", vErr) }
+    tok, _, _, tErr := ver.IssueSubject(context.Background(), producerID, subjectID, time.Hour, "it", "")
+    if tErr != nil { t.Fatalf("issue token: %v", tErr) }
+    _ = rcli.Set(context.Background(), cfg.Redis.KeyPrefix+"schemas:"+subjectID, schemaID, time.Hour).Err()
+
+    // Send messages with different timestamps to test partition routing
 	now := time.Now().UnixNano()
 	for i := 0; i < 2; i++ {
-		ts := now + int64(i*1000)
-		payload := []byte(fmt.Sprintf(`{"version":"0.1.0","type":"data","id":"part-%d","ts":%d,"subject_id":"%s","producer_id":"%s","data":{"seq":%d}}`, i, ts, subjectID, producerID, i))
-		if err := rcli.XAdd(context.Background(), &redis.XAddArgs{
-			Stream: "fdc:events",
-			Values: map[string]any{"id": fmt.Sprintf("part-%d", i), "payload": payload},
-		}).Err(); err != nil {
+        _ = now // keep variable for potential future use
+        ev := map[string]any{"event_id": fmt.Sprintf("part-%d", i), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"seq": i}}
+        evb, _ := json.Marshal(ev)
+        if err := rcli.XAdd(context.Background(), &redis.XAddArgs{
+            Stream: "fdc:events",
+            Values: map[string]any{"id": fmt.Sprintf("part-%d", i), "payload": string(evb), "token": tok},
+        }).Err(); err != nil {
 			t.Fatalf("xadd: %v", err)
 		}
 	}
@@ -315,9 +377,9 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	// Wait for processing
 	time.Sleep(1 * time.Second)
 
-	// Verify messages are in DB
+    // Verify messages are in DB
 	var count int64
-	if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.events WHERE subject_id = $1`, subjectID).Scan(&count); err != nil {
+    if err := pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE subject_id = $1`, subjectID).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count < 2 {

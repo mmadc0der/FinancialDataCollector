@@ -24,6 +24,9 @@ func TestTokenLifecycle_IssuanceAndVerification(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
@@ -63,6 +66,9 @@ func TestTokenLifecycle_RateLimit_WindowSliding(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
@@ -100,6 +106,9 @@ func TestMessageValidation_NoToken_Goes_To_DLQ(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
+	// Ensure Postgres is accepting connections before kernel start
+	itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
 	port := itutil.FreePort(t)
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
@@ -125,8 +134,8 @@ func TestMessageValidation_NoToken_Goes_To_DLQ(t *testing.T) {
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
 
-	// publish message without auth token
-	payload := []byte(`{"version":"0.1.0","type":"data","id":"notoken","ts":1730000000000000000,"data":{"source":"t","symbol":"X"}}`)
+	// publish message without auth token (lean protocol)
+	payload := `{"event_id":"notoken","ts":"` + time.Now().UTC().Format(time.RFC3339Nano) + `","subject_id":"00000000-0000-0000-0000-000000000000","payload":{"source":"t","symbol":"X"}}`
 	if err := rcli.XAdd(context.Background(), &redis.XAddArgs{
 		Stream: "fdc:events",
 		Values: map[string]any{"id": "notoken", "payload": payload},

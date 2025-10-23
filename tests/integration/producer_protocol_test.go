@@ -35,6 +35,9 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     // Wait for containers to be stable
     time.Sleep(500 * time.Millisecond)
 
+    // Ensure Postgres is accepting connections before DB init
+    itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
     // Prepare DB & approve key fingerprint and create schema
     pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
     if err != nil { t.Fatalf("pg: %v", err) }
@@ -139,7 +142,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     })
     if sid == "" { t.Fatalf("empty subject_id") }
 
-    // 4) Publish event accepted
+    // 4) Publish event accepted (lean protocol)
     ev := map[string]any{"event_id":"it-evt-1", "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": sid, "payload": map[string]any{"kind":"test"}}
     evb, _ := json.Marshal(ev)
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": ev["event_id"], "payload": string(evb), "token": tok}}).Err(); err != nil { t.Fatalf("event xadd: %v", err) }
