@@ -4,10 +4,8 @@ import (
     "testing"
     "encoding/json"
     "time"
-    "context"
 
     "github.com/example/data-kernel/internal/data"
-    "github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestPrefixed(t *testing.T) {
