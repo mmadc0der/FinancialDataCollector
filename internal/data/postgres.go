@@ -143,6 +143,7 @@ func (p *Postgres) Pool() *pgxpool.Pool { return p.pool }
 
 // IngestEventsJSON calls the database ingest function with a JSON array payload.
 func (p *Postgres) IngestEventsJSON(ctx context.Context, batch any) error {
+    if p.pool == nil { return nil }
 	if err := p.ensurePool(); err != nil {
 		return err
 	}
