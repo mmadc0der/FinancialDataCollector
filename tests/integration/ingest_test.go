@@ -30,7 +30,7 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     time.Sleep(500 * time.Millisecond)
 
     // Prepare DB: apply migrations and create default entities
-    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     itutil.WaitForMigrations(t, pg, 10*time.Second)
@@ -103,7 +103,7 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Prepare DB
-	pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
+	pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
 	if err != nil {
 		t.Fatalf("pg: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Prepare DB
-	pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
+	pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
 	if err != nil {
 		t.Fatalf("pg: %v", err)
 	}

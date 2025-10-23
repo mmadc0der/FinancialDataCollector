@@ -36,7 +36,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     time.Sleep(500 * time.Millisecond)
 
     // Prepare DB & approve key fingerprint and create schema
-    pg, err := data.NewPostgres(kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     itutil.WaitForMigrations(t, pg, 10*time.Second)

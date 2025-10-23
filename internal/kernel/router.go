@@ -221,7 +221,7 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
     // pick defaults from config, may be empty which signals NULL in DB
     r.prodID = cfg.Postgres.DefaultProducerID
     r.schID = ""
-    if pg, err := data.NewPostgres(cfg.Postgres); err == nil {
+    if pg, err := data.NewPostgres(context.Background(), cfg.Postgres); err == nil {
         r.pg = pg
         q := cfg.Postgres.QueueSize
         if q <= 0 { q = 1024 }

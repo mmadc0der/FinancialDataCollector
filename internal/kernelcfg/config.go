@@ -33,6 +33,7 @@ type PostgresConfig struct {
     MaxConns int `yaml:"max_conns"`
     ConnMaxLifetimeMs int `yaml:"conn_max_lifetime_ms"`
     ApplyMigrations bool `yaml:"apply_migrations"`
+    MigrationsDir string `yaml:"migrations_dir"`
     QueueSize int `yaml:"queue_size"`
     BatchSize int `yaml:"batch_size"`
     BatchMaxWaitMs int `yaml:"batch_max_wait_ms"`
