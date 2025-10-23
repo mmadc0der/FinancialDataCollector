@@ -18,6 +18,7 @@ import (
 
     "github.com/redis/go-redis/v9"
 
+    "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernel"
     "github.com/example/data-kernel/internal/kernelcfg"
 )
