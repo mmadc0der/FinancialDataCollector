@@ -74,5 +74,3 @@ func TestDuplicateEventID_SecondInsertIgnored(t *testing.T) {
     _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE event_id=$1`, evID).Scan(&cnt)
     if cnt != 1 { t.Fatalf("expected 1 row for duplicate event_id, got %d", cnt) }
 }
-
-

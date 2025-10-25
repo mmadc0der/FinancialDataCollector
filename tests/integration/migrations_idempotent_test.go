@@ -25,5 +25,3 @@ func TestMigrations_Idempotent(t *testing.T) {
     if err := pg.ApplyMigrations(context.Background()); err != nil { t.Fatalf("apply again: %v", err) }
     pg.Close()
 }
-
-

@@ -230,5 +230,3 @@ func WaitForMigrations(t *testing.T, pg *data.Postgres, deadline time.Duration) 
     }
     t.Fatalf("migrations did not complete within %v", deadline)
 }
-
-

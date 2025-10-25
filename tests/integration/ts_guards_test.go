@@ -73,5 +73,3 @@ func TestTimestampGuards_RejectedToDLQ(t *testing.T) {
     // Expect DLQ entries present
     itutil.WaitStreamLen(t, rcli, "fdc:events:dlq", 2, 10*time.Second)
 }
-
-
