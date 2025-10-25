@@ -39,11 +39,11 @@ type event struct {
 }
 
 var (
-	logLevel atomic.Int32
-	logCh    chan event
-	dropped  atomic.Int64
-	stopCh   chan struct{}
-	writer   io.Writer = os.Stdout
+    logLevel atomic.Int32
+    logCh    chan event
+    dropped  atomic.Int64
+    stopCh   chan struct{}
+    writer   io.Writer = os.Stdout
 )
 
 func parseLevel(s string) Level {
@@ -61,44 +61,48 @@ func parseLevel(s string) Level {
 }
 
 func Init(cfg kernelcfg.LoggingConfig) func() {
-	if cfg.Buffer <= 0 {
-		cfg.Buffer = 4096
-	}
-	logCh = make(chan event, cfg.Buffer)
-	logLevel.Store(int32(parseLevel(cfg.Level)))
-	stopCh = make(chan struct{})
-	// output
-	switch cfg.Output {
-	case "stderr":
-		writer = os.Stderr
-	case "stdout", "":
-		writer = os.Stdout
-	default:
-		f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-		if err == nil {
-			writer = f
-		}
-	}
-	go drain()
-	return func() { close(stopCh) }
+    if cfg.Buffer <= 0 {
+        cfg.Buffer = 4096
+    }
+    // Create per-init channels, but keep exporting logCh globally for callers.
+    localLogCh := make(chan event, cfg.Buffer)
+    logCh = localLogCh
+    logLevel.Store(int32(parseLevel(cfg.Level)))
+    localStop := make(chan struct{})
+    stopCh = localStop // retained for diagnostics if needed, not used by drain
+    // Select output writer and capture it for this drain instance
+    switch cfg.Output {
+    case "stderr":
+        writer = os.Stderr
+    case "stdout", "":
+        writer = os.Stdout
+    default:
+        f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+        if err == nil {
+            writer = f
+        }
+    }
+    localWriter := writer
+    go drain(localLogCh, localStop, localWriter)
+    return func() { close(localStop) }
 }
 
-func drain() {
-	flushTicker := time.NewTicker(10 * time.Second)
-	defer flushTicker.Stop()
-	enc := json.NewEncoder(writer)
-	for {
-		select {
-		case ev := <-logCh:
-			_ = enc.Encode(ev)
-		case <-flushTicker.C:
-			if n := dropped.Swap(0); n > 0 {
-				_ = enc.Encode(event{TS: time.Now().UnixNano(), Level: "warn", Msg: "logs_dropped", Fields: map[string]any{"count": n}})
-			}
-		case <-stopCh:
-			return
-		}
-	}
+func drain(ch <-chan event, stop <-chan struct{}, w io.Writer) {
+    flushTicker := time.NewTicker(10 * time.Second)
+    defer flushTicker.Stop()
+    enc := json.NewEncoder(w)
+    for {
+        select {
+        case ev := <-ch:
+            _ = enc.Encode(ev)
+        case <-flushTicker.C:
+            if n := dropped.Swap(0); n > 0 {
+                _ = enc.Encode(event{TS: time.Now().UnixNano(), Level: "warn", Msg: "logs_dropped", Fields: map[string]any{"count": n}})
+            }
+        case <-stop:
+            return
+        }
+    }
 }
 
 func allowed(l Level) bool { return l >= Level(logLevel.Load()) }
