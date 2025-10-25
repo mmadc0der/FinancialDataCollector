@@ -18,6 +18,7 @@ import (
     "github.com/google/uuid"
 
     itutil "github.com/example/data-kernel/tests/itutil"
+    "github.com/example/data-kernel/internal/auth"
     "github.com/example/data-kernel/internal/data"
     "github.com/example/data-kernel/internal/kernelcfg"
 )
