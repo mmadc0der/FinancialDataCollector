@@ -224,6 +224,141 @@ SELECT v_events,
     v_tags;
 END;
 $$;
+-- Restrict EXECUTE permissions explicitly
+REVOKE ALL ON FUNCTION public.ingest_events(jsonb) FROM PUBLIC;
+
+-- Immutable schema helpers and subject upgrade (compacted from previous migration)
+
+-- Deep-merge two JSONB values (objects only; arrays replaced; scalars overridden)
+CREATE OR REPLACE FUNCTION public.jsonb_deep_merge(a JSONB, b JSONB)
+RETURNS JSONB LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE k TEXT; v JSONB; result JSONB := COALESCE(a, '{}'::jsonb);
+BEGIN
+    IF b IS NULL THEN RETURN result; END IF;
+    IF jsonb_typeof(result) <> 'object' OR jsonb_typeof(b) <> 'object' THEN
+        RETURN COALESCE(b, result);
+    END IF;
+    FOR k, v IN SELECT key, value FROM jsonb_each(b) LOOP
+        IF jsonb_typeof(v) = 'object' AND jsonb_typeof(result->k) = 'object' THEN
+            result := result || jsonb_build_object(k, public.jsonb_deep_merge(result->k, v));
+        ELSE
+            result := result || jsonb_build_object(k, v);
+        END IF;
+    END LOOP;
+    RETURN result;
+END; $$;
+
+-- Ensure immutable schema by (name, version)
+CREATE OR REPLACE FUNCTION public.ensure_schema_immutable(
+    _name TEXT,
+    _version INT,
+    _body JSONB,
+    _create_if_missing BOOLEAN DEFAULT FALSE
+) RETURNS UUID LANGUAGE plpgsql AS $$
+DECLARE v_schema_id UUID;
+DECLARE v_existing_body JSONB;
+BEGIN
+    IF _name IS NULL OR _version IS NULL THEN RAISE EXCEPTION 'schema name/version required'; END IF;
+    SELECT s.schema_id, s.body INTO v_schema_id, v_existing_body FROM public.schemas s WHERE s.name=_name AND s.version=_version;
+    IF v_schema_id IS NOT NULL THEN
+        IF _body IS NOT NULL AND v_existing_body IS DISTINCT FROM _body THEN
+            RAISE EXCEPTION 'immutable violation: schema % v% body differs from existing', _name, _version;
+        END IF;
+        RETURN v_schema_id;
+    END IF;
+    IF NOT _create_if_missing THEN
+        RAISE EXCEPTION 'schema not found and create_if_missing=false: % v%', _name, _version;
+    END IF;
+    INSERT INTO public.schemas(schema_id, name, version, body)
+    VALUES (gen_random_uuid(), _name, _version, COALESCE(_body, '{}'::jsonb))
+    RETURNING public.schemas.schema_id INTO v_schema_id;
+    RETURN v_schema_id;
+END;
+$$;
+
+-- Ensure subject row exists and update attrs per merge policy; bump last_seen_at
+CREATE OR REPLACE FUNCTION public.ensure_subject(
+    _subject_key TEXT,
+    _attrs JSONB DEFAULT NULL,
+    _merge BOOLEAN DEFAULT TRUE
+) RETURNS UUID LANGUAGE plpgsql AS $$
+DECLARE v_subject_id UUID;
+BEGIN
+    IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required'; END IF;
+    INSERT INTO public.subjects(subject_id, subject_key, attrs)
+    VALUES (gen_random_uuid(), _subject_key, COALESCE(_attrs, '{}'::jsonb))
+    ON CONFLICT (subject_key) DO NOTHING;
+    SELECT subject_id INTO v_subject_id FROM public.subjects WHERE subject_key=_subject_key;
+    IF _attrs IS NOT NULL THEN
+        IF _merge THEN
+            UPDATE public.subjects SET attrs = public.subjects.attrs || _attrs, last_seen_at = now() WHERE subject_id = v_subject_id;
+        ELSE
+            UPDATE public.subjects SET attrs = _attrs, last_seen_at = now() WHERE subject_id = v_subject_id;
+        END IF;
+    ELSE
+        UPDATE public.subjects SET last_seen_at = now() WHERE subject_id = v_subject_id;
+    END IF;
+    RETURN v_subject_id;
+END;
+$$;
+
+-- Atomic schema upgrade helpers
+CREATE OR REPLACE FUNCTION public.upgrade_subject_schema_auto(
+    _subject_key TEXT,
+    _name TEXT,
+    _body JSONB,
+    _attrs JSONB DEFAULT NULL,
+    _merge BOOLEAN DEFAULT TRUE
+) RETURNS TABLE(subject_id UUID, schema_id UUID, version INT) LANGUAGE plpgsql AS $$
+DECLARE v_subject_id UUID; DECLARE v_schema_id UUID; DECLARE v_next_version INT;
+BEGIN
+    IF _name IS NULL THEN RAISE EXCEPTION 'schema name required'; END IF;
+    PERFORM pg_advisory_xact_lock(hashtext(_name));
+    SELECT COALESCE(MAX(s.version), 0) + 1 INTO v_next_version FROM public.schemas s WHERE s.name=_name;
+    INSERT INTO public.schemas(schema_id, name, version, body)
+    VALUES (gen_random_uuid(), _name, v_next_version, COALESCE(_body, '{}'::jsonb))
+    RETURNING public.schemas.schema_id INTO v_schema_id;
+    v_subject_id := public.ensure_subject(_subject_key, _attrs, _merge);
+    PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
+    RETURN QUERY SELECT v_subject_id, v_schema_id, v_next_version;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.upgrade_subject_schema_incremental(
+    _subject_key TEXT,
+    _name TEXT,
+    _delta JSONB,
+    _attrs_delta JSONB DEFAULT NULL
+) RETURNS TABLE(subject_id UUID, schema_id UUID, version INT, unchanged BOOLEAN) LANGUAGE plpgsql AS $$
+DECLARE v_subject_id UUID; DECLARE v_current_schema UUID; DECLARE v_current_body JSONB; DECLARE v_new_body JSONB; DECLARE v_next INT; DECLARE v_schema_id UUID;
+BEGIN
+    IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required'; END IF;
+    IF _name IS NULL THEN RAISE EXCEPTION 'schema name required'; END IF;
+    SELECT s.subject_id, s.current_schema_id INTO v_subject_id, v_current_schema FROM public.subjects s WHERE s.subject_key=_subject_key;
+    IF v_subject_id IS NULL THEN RAISE EXCEPTION 'subject_not_found'; END IF;
+    IF v_current_schema IS NULL THEN RAISE EXCEPTION 'subject_current_schema_missing'; END IF;
+    IF NOT EXISTS (SELECT 1 FROM public.schemas s WHERE s.schema_id=v_current_schema AND s.name=_name) THEN
+        RAISE EXCEPTION 'schema_family_not_found_for_subject';
+    END IF;
+    SELECT s.body INTO v_current_body FROM public.schemas s WHERE s.schema_id=v_current_schema;
+    v_new_body := public.jsonb_deep_merge(v_current_body, COALESCE(_delta, '{}'::jsonb));
+    IF _attrs_delta IS NOT NULL THEN
+        UPDATE public.subjects SET attrs = public.jsonb_deep_merge(public.subjects.attrs, _attrs_delta), last_seen_at = now() WHERE subject_id=v_subject_id;
+    ELSE
+        UPDATE public.subjects SET last_seen_at = now() WHERE subject_id=v_subject_id;
+    END IF;
+    IF v_new_body IS NOT DISTINCT FROM v_current_body THEN
+        SELECT s.version INTO v_next FROM public.schemas s WHERE s.schema_id=v_current_schema;
+        subject_id := v_subject_id; schema_id := v_current_schema; version := v_next; unchanged := TRUE; RETURN;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtext(_name));
+    SELECT COALESCE(MAX(s.version),0)+1 INTO v_next FROM public.schemas s WHERE s.name=_name;
+    INSERT INTO public.schemas(schema_id, name, version, body)
+    VALUES (gen_random_uuid(), _name, v_next, v_new_body)
+    RETURNING public.schemas.schema_id INTO v_schema_id;
+    PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
+    RETURN QUERY SELECT v_subject_id, v_schema_id, v_next, FALSE;
+END; $$;
 -- 6) Prevent changes to identity fields post-insert
 CREATE OR REPLACE FUNCTION prevent_events_identity_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.event_id <> OLD.event_id
     OR NEW.partition_month <> OLD.partition_month THEN RAISE EXCEPTION 'events identity (event_id, partition_month) cannot be changed once set';

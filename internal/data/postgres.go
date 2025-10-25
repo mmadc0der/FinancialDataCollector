@@ -1,22 +1,24 @@
 package data
 
 import (
-	"context"
-	"database/sql"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
-	"time"
+    "context"
+    "database/sql"
+    "encoding/json"
+    "encoding/hex"
+    "errors"
+    "fmt"
+    "os"
+    "path/filepath"
+    "sort"
+    "time"
 
-	"github.com/example/data-kernel/internal/kernelcfg"
-	"github.com/example/data-kernel/internal/logging"
-	"github.com/example/data-kernel/internal/metrics"
+    "github.com/example/data-kernel/internal/kernelcfg"
+    "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/metrics"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+    "github.com/jackc/pgx/v5"
+    "github.com/jackc/pgx/v5/pgxpool"
+    "golang.org/x/crypto/sha3"
 )
 
 // Postgres is a thin wrapper around a pgxpool.Pool with helpers for our SQL helpers.
@@ -114,21 +116,45 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
 	}
 	sort.Strings(names)
 
-	for _, name := range names {
-		path := filepath.Join(dir, name)
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", path, err)
-		}
+    // Ensure schema_migrations tracking table exists (idempotent)
+    if _, err := p.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS public.schema_migrations (
+        filename TEXT PRIMARY KEY,
+        checksum TEXT NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`); err != nil {
+        return fmt.Errorf("ensure schema_migrations: %w", err)
+    }
 
-		logging.Info("pg_apply_migration", logging.F("file", name))
-		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		_, execErr := p.pool.Exec(cctx, string(b))
-		cancel()
-		if execErr != nil {
-			return fmt.Errorf("exec migration %s: %w", path, execErr)
-		}
-	}
+    for _, name := range names {
+        path := filepath.Join(dir, name)
+        b, err := os.ReadFile(path)
+        if err != nil {
+            return fmt.Errorf("read migration %s: %w", path, err)
+        }
+        sum := sha3.Sum512(b)
+        checksum := hex.EncodeToString(sum[:])
+
+        // Check if migration already applied with same checksum
+        var existingChecksum string
+        err = p.pool.QueryRow(ctx, `SELECT checksum FROM public.schema_migrations WHERE filename=$1`, name).Scan(&existingChecksum)
+        if err == nil && existingChecksum == checksum {
+            logging.Info("pg_migration_skip", logging.F("file", name))
+            continue
+        }
+        // Apply (or re-apply) migration
+        logging.Info("pg_apply_migration", logging.F("file", name))
+        cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+        _, execErr := p.pool.Exec(cctx, string(b))
+        cancel()
+        if execErr != nil {
+            return fmt.Errorf("exec migration %s: %w", path, execErr)
+        }
+        // Record/Update migration checksum
+        if _, err := p.pool.Exec(ctx, `INSERT INTO public.schema_migrations(filename, checksum) VALUES ($1,$2)
+            ON CONFLICT (filename) DO UPDATE SET checksum=EXCLUDED.checksum, applied_at=now()`, name, checksum); err != nil {
+            return fmt.Errorf("record migration %s: %w", name, err)
+        }
+    }
 
 	return nil
 }
