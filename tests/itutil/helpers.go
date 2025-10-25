@@ -25,28 +25,46 @@ import (
 
 // WaitForPostgresReady waits for the Postgres container to be ready by attempting a connection
 func WaitForPostgresReady(t *testing.T, dsn string, deadline time.Duration) {
-	t.Helper()
-	end := time.Now().Add(deadline)
-	for time.Now().Before(end) {
-		// Try to connect to Postgres
-		pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{
-			DSN:             dsn,
-			ApplyMigrations: false, // Don't apply migrations, just test connection
-		})
-		if err == nil {
-			pg.Close() // Close the test connection
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("Postgres container not ready within %v", deadline)
+    t.Helper()
+    end := time.Now().Add(deadline)
+    consecutiveOK := 0
+    for time.Now().Before(end) {
+        // Create a lightweight client without migrations and run a simple query
+        pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false})
+        if err == nil && pg != nil && pg.Pool() != nil {
+            var one int
+            ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+            qerr := pg.Pool().QueryRow(ctx, "SELECT 1").Scan(&one)
+            cancel()
+            if qerr == nil && one == 1 {
+                pg.Close()
+                consecutiveOK++
+                if consecutiveOK >= 3 { // require a few consecutive successes
+                    time.Sleep(250 * time.Millisecond) // small settle time
+                    return
+                }
+                time.Sleep(150 * time.Millisecond)
+                continue
+            }
+            pg.Close()
+        }
+        consecutiveOK = 0
+        time.Sleep(150 * time.Millisecond)
+    }
+    t.Fatalf("Postgres container not ready within %v", deadline)
 }
 
 // StartPostgres launches a Postgres container and returns the container handle and DSN.
 func StartPostgres(t *testing.T) (*psqlmod.PostgresContainer, string) {
     t.Helper()
     ctx := context.Background()
-    pg, err := psqlmod.RunContainer(ctx, psqlmod.WithDatabase("testdb"), psqlmod.WithUsername("test"), psqlmod.WithPassword("test"))
+    pg, err := psqlmod.RunContainer(ctx,
+        psqlmod.WithDatabase("testdb"),
+        psqlmod.WithUsername("test"),
+        psqlmod.WithPassword("test"),
+        // Reduce noisy restarts and give Postgres more time before first client connection
+        psqlmod.WithInitScripts(),
+    )
     if err != nil { t.Fatalf("pg up: %v", err) }
     dsn, err := pg.ConnectionString(ctx, "sslmode=disable")
     if err != nil { t.Fatalf("pg dsn: %v", err) }
@@ -63,6 +81,8 @@ func StartRedis(t *testing.T) (*redismod.RedisContainer, string) {
     if err != nil { t.Fatalf("redis host: %v", err) }
     port, err := r.MappedPort(ctx, "6379")
     if err != nil { t.Fatalf("redis port: %v", err) }
+    // give redis a brief settle period before clients connect
+    time.Sleep(150 * time.Millisecond)
     return r, fmt.Sprintf("%s:%s", host, port.Port())
 }
 
@@ -105,7 +125,7 @@ func WaitHTTPReady(t *testing.T, url string, deadline time.Duration) {
             if resp.StatusCode == 200 { resp.Body.Close(); return }
             resp.Body.Close()
         }
-        time.Sleep(100 * time.Millisecond)
+        time.Sleep(150 * time.Millisecond)
     }
     t.Fatalf("ready timeout for %s", url)
 }

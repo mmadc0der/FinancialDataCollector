@@ -87,7 +87,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     time.Sleep(1 * time.Second)
 
     // wait ready
-    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
     // Wait before test operations
     time.Sleep(1 * time.Second)

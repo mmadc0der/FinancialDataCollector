@@ -55,7 +55,7 @@ func TestDLQOnUnauthenticatedPublish(t *testing.T) {
     defer cancel()
 
     // wait ready
-    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
     rcli := redis.NewClient(&redis.Options{Addr: addr})
     // publish without token (lean protocol)

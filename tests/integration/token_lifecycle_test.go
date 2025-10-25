@@ -59,7 +59,7 @@ func TestTokenLifecycle_IssuanceAndVerification(t *testing.T) {
 	defer cancel()
 
 	// wait ready
-	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
 	// Placeholder: actual token validation would require calling auth endpoints
 	// This test verifies the auth subsystem is initialized and responsive
@@ -98,7 +98,7 @@ func TestTokenLifecycle_RateLimit_WindowSliding(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
-	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()

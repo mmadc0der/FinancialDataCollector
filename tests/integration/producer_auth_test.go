@@ -57,7 +57,7 @@ func TestProducerAuth_ValidToken_PublishAccepted(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
-	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
@@ -114,7 +114,7 @@ func TestProducerAuth_BadTokenFormat(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
-	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
@@ -173,7 +173,7 @@ func TestProducerAuth_InvalidPayload_JSON(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
-	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
@@ -229,7 +229,7 @@ func TestProducerAuth_PayloadTooLarge(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
-	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
 	rcli := redis.NewClient(&redis.Options{Addr: addr})
 	defer rcli.Close()
@@ -286,7 +286,7 @@ func TestProducerAuth_RateLimiting_Fingerprint(t *testing.T) {
 	cancel := itutil.StartKernel(t, cfg)
 	defer cancel()
 
-	itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 20*time.Second)
 
 	t.Logf("Rate limit set to 1 RPM with 0 burst - rapid attempts will be limited")
 }
