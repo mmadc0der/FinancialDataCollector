@@ -15,6 +15,7 @@ import (
     "time"
 
     "github.com/redis/go-redis/v9"
+    "github.com/google/uuid"
 
     itutil "github.com/example/data-kernel/tests/itutil"
     "github.com/example/data-kernel/internal/auth"
@@ -30,7 +31,11 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
-    // Wait for containers to be stable
+    // Ensure Postgres is actually ready to accept connections before migrations
+    itutil.WaitForPostgresReady(t, dsn, 20*time.Second)
+
+    // Wait for containers to be stable and DB to accept connections
+    itutil.WaitForPostgresReady(t, dsn, 20*time.Second)
     time.Sleep(500 * time.Millisecond)
 
     // Prepare DB: apply migrations and create default entities
@@ -68,7 +73,7 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 100, producerID),
-        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{
             Issuer:   "it",
@@ -102,9 +107,9 @@ func TestIngestE2E_RedisToPostgres(t *testing.T) {
     _ = rcli.Set(context.Background(), cfg.Redis.KeyPrefix+"schemas:"+subjectID, schemaID, time.Hour).Err()
 
     // publish a message into Redis (lean protocol)
-    ev := map[string]any{"event_id":"01TEST","ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"source":"test","symbol":"T"}}
+    ev := map[string]any{"event_id": uuid.NewString(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"source":"test","symbol":"T"}}
     evb, _ := json.Marshal(ev)
-    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id":"01TEST","payload": string(evb), "token": tok}}).Err(); err != nil {
+    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": uuid.NewString(), "payload": string(evb), "token": tok}}).Err(); err != nil {
         t.Fatalf("xadd: %v", err)
     }
 
@@ -126,8 +131,9 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
-	// Wait for containers to be stable
-	time.Sleep(500 * time.Millisecond)
+    // Wait for containers to be stable and DB to accept connections
+    itutil.WaitForPostgresReady(t, dsn, 20*time.Second)
+    time.Sleep(500 * time.Millisecond)
 
     // Prepare DB
 	pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
@@ -201,11 +207,11 @@ func TestIngestE2E_BatchTimeout(t *testing.T) {
 
 	// Send 3 messages (less than batch size of 5)
 	for i := 0; i < 3; i++ {
-        ev := map[string]any{"event_id": fmt.Sprintf("batch-%d", i), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"value": i}}
+        ev := map[string]any{"event_id": uuid.NewString(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"value": i}}
         evb, _ := json.Marshal(ev)
         if err := rcli.XAdd(context.Background(), &redis.XAddArgs{
             Stream: "fdc:events",
-            Values: map[string]any{"id": fmt.Sprintf("batch-%d", i), "payload": string(evb), "token": tok},
+            Values: map[string]any{"id": uuid.NewString(), "payload": string(evb), "token": tok},
         }).Err(); err != nil {
 			t.Fatalf("xadd: %v", err)
 		}
@@ -287,8 +293,9 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	rc, addr := itutil.StartRedis(t)
 	defer rc.Terminate(context.Background())
 
-	// Wait for containers to be stable
-	time.Sleep(500 * time.Millisecond)
+    // Wait for containers to be stable and DB to accept connections
+    itutil.WaitForPostgresReady(t, dsn, 20*time.Second)
+    time.Sleep(500 * time.Millisecond)
 
     // Prepare DB
 	pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
@@ -364,11 +371,11 @@ func TestIngestE2E_Partition_TimeAccuracy(t *testing.T) {
 	now := time.Now().UnixNano()
 	for i := 0; i < 2; i++ {
         _ = now // keep variable for potential future use
-        ev := map[string]any{"event_id": fmt.Sprintf("part-%d", i), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"seq": i}}
+        ev := map[string]any{"event_id": uuid.NewString(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"seq": i}}
         evb, _ := json.Marshal(ev)
         if err := rcli.XAdd(context.Background(), &redis.XAddArgs{
             Stream: "fdc:events",
-            Values: map[string]any{"id": fmt.Sprintf("part-%d", i), "payload": string(evb), "token": tok},
+            Values: map[string]any{"id": uuid.NewString(), "payload": string(evb), "token": tok},
         }).Err(); err != nil {
 			t.Fatalf("xadd: %v", err)
 		}
