@@ -15,6 +15,7 @@ import (
     "crypto/rand"
 
     "github.com/redis/go-redis/v9"
+    "github.com/google/uuid"
 
     itutil "github.com/example/data-kernel/tests/itutil"
     "github.com/example/data-kernel/internal/auth"
@@ -62,7 +63,7 @@ func TestDuplicateEventID_SecondInsertIgnored(t *testing.T) {
     tok, _, _, _ := ver.IssueSubject(context.Background(), producerID, subjectID, time.Hour, "", "")
 
     r := redis.NewClient(&redis.Options{Addr: addr})
-    evID := "dupe-evt-1"
+    evID := uuid.NewString()
     p := map[string]any{"event_id": evID, "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"k":"v"}}
     b, _ := json.Marshal(p)
     _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": evID, "payload": string(b), "token": tok}}).Err()

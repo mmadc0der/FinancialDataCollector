@@ -15,6 +15,7 @@ import (
     "crypto/rand"
 
     "github.com/redis/go-redis/v9"
+    "github.com/google/uuid"
 
     itutil "github.com/example/data-kernel/tests/itutil"
     "github.com/example/data-kernel/internal/auth"
@@ -62,13 +63,19 @@ func TestBatchBackpressure_MultipleFlushes(t *testing.T) {
     r := redis.NewClient(&redis.Options{Addr: addr})
     total := 13
     for i := 0; i < total; i++ {
-        payload := map[string]any{"event_id": "bp-"+strconv.Itoa(i), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"i": i}}
+        payload := map[string]any{"event_id": uuid.NewString(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"i": i}}
         b, _ := json.Marshal(payload)
-        _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": "bp-"+strconv.Itoa(i), "payload": string(b), "token": tok}}).Err()
+        _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": uuid.NewString(), "payload": string(b), "token": tok}}).Err()
     }
 
     // wait for multiple flushes
-    time.Sleep(2 * time.Second)
+    end := time.Now().Add(5 * time.Second)
+    for time.Now().Before(end) {
+        var cnt int
+        _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE subject_id=$1`, subjectID).Scan(&cnt)
+        if cnt >= total { break }
+        time.Sleep(150 * time.Millisecond)
+    }
     var cnt int
     _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE subject_id=$1`, subjectID).Scan(&cnt)
     if cnt < total { t.Fatalf("expected >= %d rows, got %d", total, cnt) }

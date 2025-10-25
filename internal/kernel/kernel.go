@@ -237,24 +237,16 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                         continue
                     }
                 }
-                // Resolve schema via cache→async DB lookup
+                // Resolve schema via cache only; if missing, reject to DLQ to keep behavior strict and explicit
                 var schemaID string
                 if sid, ok := k.rd.SchemaCacheGet(ctx, ev.SubjectID); ok {
                     schemaID = sid
                 } else {
-                    // Async schema resolution to avoid blocking main thread
-                    go func(subjectID, eventID string) {
-                        bgCtx := getContext()
-                        defer putContext(bgCtx)
-                        if s, err := k.pg.GetCurrentSchemaID(bgCtx, subjectID); err == nil && s != "" {
-                            _ = k.rd.SchemaCacheSet(bgCtx, subjectID, s, time.Hour)
-                            logging.Debug("schema_cache_miss_resolved", logging.F("subject_id", subjectID), logging.F("schema_id", s))
-                        }
-                    }(ev.SubjectID, ev.EventID)
-
-                    // For now, route with empty schema ID - this will be handled by DB constraints
-                    // In production, you might want to implement a more sophisticated fallback
-                    schemaID = "" // Let the DB handle missing schema validation
+                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "schema_missing")
+                    logging.Warn("redis_schema_missing", logging.F("subject_id", ev.SubjectID), logging.F("id", id))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    globalMetricsBatcher.IncRedisAck()
+                    continue
                 }
                 // route for durable handling; ack will be done after persistence via router callback
                 k.rt.handleLeanEvent(m.ID, ev.EventID, ev.TS, ev.SubjectID, producerID, ev.Payload, ev.Tags, schemaID)
