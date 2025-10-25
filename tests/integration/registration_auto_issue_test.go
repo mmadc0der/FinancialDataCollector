@@ -61,7 +61,7 @@ func TestRegistrationRespondsPerNonce(t *testing.T) {
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, MigrationsDir: "../../migrations", BatchSize: 10, BatchMaxWaitMs: 50},
-        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerGroup: "kernel"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{
             RequireToken: true,

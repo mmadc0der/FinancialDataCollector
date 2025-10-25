@@ -40,7 +40,7 @@ func TestTokenLifecycle_IssuanceAndVerification(t *testing.T) {
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
 		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
-		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
+        Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
 			RequireToken:               true,
@@ -82,7 +82,7 @@ func TestTokenLifecycle_RateLimit_WindowSliding(t *testing.T) {
 	cfg := kernelcfg.Config{
 		Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
 		Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
-		Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false},
+        Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: false, ConsumerGroup: "kernel"},
 		Logging:  kernelcfg.LoggingConfig{Level: "error"},
 		Auth: kernelcfg.AuthConfig{
 			RequireToken:               true,
