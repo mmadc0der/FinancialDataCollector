@@ -16,6 +16,7 @@ import (
     "golang.org/x/crypto/sha3"
 
     "github.com/redis/go-redis/v9"
+    "github.com/google/uuid"
 
     itutil "github.com/example/data-kernel/tests/itutil"
     "github.com/example/data-kernel/internal/kernelcfg"
@@ -67,7 +68,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 50, 50, ""),
-        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: true},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", PublishEnabled: true, ConsumerGroup: "kernel"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{
             RequireToken: true,
@@ -76,8 +77,8 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
             KeyID: "k",
             PrivateKey: privB64,
             PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)},
-            ProducerSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
-            AdminSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
+            ProducerSSHCA: "",
+            AdminSSHCA: "",
         },
     }
     cancel := itutil.StartKernel(t, cfg)
@@ -95,11 +96,15 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     rcli := redis.NewClient(&redis.Options{Addr: addr})
     // 1) Registration: send and wait on per-nonce response
     payload := []byte(`{"producer_hint":"it","meta":{"env":"test"}}`)
+    // Canonicalize JSON like the server does before signing
+    var payloadTmp any
+    _ = json.Unmarshal(payload, &payloadTmp)
+    canon, _ := json.Marshal(payloadTmp)
     nonce := "0123456789abcdef"
-    sum := sha3.Sum512(append(append([]byte{}, payload...), append([]byte{'.'}, []byte(nonce)...)...))
-    sig := ed25519.Sign(priv, sum[:])
+    msg := append(canon, []byte("."+nonce)...)
+    sig := ed25519.Sign(priv, msg)
     sigB64 := base64.RawStdEncoding.EncodeToString(sig)
-    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "register", Values: map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}}).Err(); err != nil {
+    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "register", Values: map[string]any{"pubkey": pubLine, "payload": string(canon), "nonce": nonce, "sig": sigB64}}).Err(); err != nil {
         t.Fatalf("register xadd: %v", err)
     }
     waitFor[int64](t, 10*time.Second, func() (int64, bool) {
@@ -109,8 +114,8 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
 
     // 2) Token exchange: request and wait per-producer
     nonce2 := "abcdef0123456789"
-    sum2 := sha3.Sum512([]byte("{}." + nonce2))
-    sig2 := ed25519.Sign(priv, sum2[:])
+    msg2 := []byte("{}." + nonce2)
+    sig2 := ed25519.Sign(priv, msg2)
     sig2B64 := base64.RawStdEncoding.EncodeToString(sig2)
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "token:exchange", Values: map[string]any{"pubkey": pubLine, "payload": "{}", "nonce": nonce2, "sig": sig2B64}}).Err(); err != nil {
         t.Fatalf("exchange xadd: %v", err)
@@ -130,10 +135,16 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     sub, _, _, err := ver.Verify(context.Background(), tok)
     if err != nil || sub != producerID { t.Fatalf("verify token failed: %v sub=%s want=%s", err, sub, producerID) }
 
-    // 3) Subject register with schema_id and wait per-producer
-    subj := map[string]any{"subject_key": "IT-SUBJ-1", "schema_id": schemaID}
-    b, _ := json.Marshal(subj)
-    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "subject:register", Values: map[string]any{"payload": string(b), "token": tok}}).Err(); err != nil { t.Fatalf("subject xadd: %v", err) }
+    // 3) Subject register using signed pubkey (protocol expects pubkey+sig)
+    subj := map[string]any{"op":"register", "subject_key": "IT-SUBJ-1", "schema_name": "it-schema", "schema_body": map[string]any{}}
+    var subjTmp any
+    _ = json.Unmarshal([]byte(`{"op":"register", "subject_key": "IT-SUBJ-1", "schema_name": "it-schema", "schema_body": {}}`), &subjTmp)
+    subjCanon, _ := json.Marshal(subjTmp)
+    nonceS := "subj-nonce-001"
+    msgS := append(subjCanon, []byte("."+nonceS)...)
+    sigS := ed25519.Sign(priv, msgS)
+    sigSB64 := base64.RawStdEncoding.EncodeToString(sigS)
+    if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "subject:register", Values: map[string]any{"pubkey": pubLine, "payload": string(subjCanon), "nonce": nonceS, "sig": sigSB64}}).Err(); err != nil { t.Fatalf("subject xadd: %v", err) }
     sid := waitFor[string](t, 10*time.Second, func() (string, bool) {
         res, _ := rcli.XRead(context.Background(), &redis.XReadArgs{Streams: []string{cfg.Redis.KeyPrefix + "subject:resp:"+producerID, "0-0"}, Count: 1, Block: 2 * time.Second}).Result()
         if len(res) == 0 || len(res[0].Messages) == 0 { return "", false }
@@ -143,14 +154,14 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     if sid == "" { t.Fatalf("empty subject_id") }
 
     // 4) Publish event accepted (lean protocol)
-    ev := map[string]any{"event_id":"it-evt-1", "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": sid, "payload": map[string]any{"kind":"test"}}
+    ev := map[string]any{"event_id": uuid.NewString(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": sid, "payload": map[string]any{"kind":"test"}}
     evb, _ := json.Marshal(ev)
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": ev["event_id"], "payload": string(evb), "token": tok}}).Err(); err != nil { t.Fatalf("event xadd: %v", err) }
 
     // 5) Deregister and ensure events are rejected to DLQ
     nonce3 := "feedfacecafebeef"
-    sum3 := sha3.Sum512([]byte("{}." + nonce3))
-    sig3 := ed25519.Sign(priv, sum3[:])
+    msg3 := []byte("{}." + nonce3)
+    sig3 := ed25519.Sign(priv, msg3)
     sig3B64 := base64.RawStdEncoding.EncodeToString(sig3)
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "register", Values: map[string]any{"action":"deregister", "pubkey": pubLine, "payload": "{}", "nonce": nonce3, "sig": sig3B64}}).Err(); err != nil {
         t.Fatalf("deregister xadd: %v", err)
