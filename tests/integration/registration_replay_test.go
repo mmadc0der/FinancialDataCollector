@@ -3,24 +3,23 @@
 package it
 
 import (
-    "context"
-    "encoding/base64"
-    "encoding/json"
-    "os"
-    "strconv"
-    "testing"
-    "time"
+	"context"
+	"encoding/base64"
+	"os"
+	"strconv"
+	"testing"
+	"time"
 
-    "crypto/ed25519"
-    "crypto/rand"
+	"crypto/ed25519"
+	"crypto/rand"
 
-    "github.com/redis/go-redis/v9"
-    "golang.org/x/crypto/sha3"
-    ssh "golang.org/x/crypto/ssh"
+	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
 
-    itutil "github.com/example/data-kernel/tests/itutil"
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/kernelcfg"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	itutil "github.com/example/data-kernel/tests/itutil"
 )
 
 func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {

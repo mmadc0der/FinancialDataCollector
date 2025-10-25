@@ -3,18 +3,18 @@
 package it
 
 import (
-    "context"
-    "os"
-    "strconv"
-    "testing"
-    "time"
+	"context"
+	"os"
+	"strconv"
+	"testing"
+	"time"
 
-    "crypto/ed25519"
-    "crypto/rand"
+	"crypto/ed25519"
+	"crypto/rand"
 
-    itutil "github.com/example/data-kernel/tests/itutil"
-    "github.com/example/data-kernel/internal/kernelcfg"
-    ssh "golang.org/x/crypto/ssh"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	itutil "github.com/example/data-kernel/tests/itutil"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 func TestSSHCert_ValidityWindowsAndWrongCA(t *testing.T) {
@@ -32,7 +32,6 @@ func TestSSHCert_ValidityWindowsAndWrongCA(t *testing.T) {
     // CA B
     _, caPrivB, _ := ed25519.GenerateKey(rand.Reader)
     caSignerB, _ := ssh.NewSignerFromKey(caPrivB)
-    caBLine := string(ssh.MarshalAuthorizedKey(caSignerB.PublicKey()))
 
     // Producer key
     pub, _, _ := ed25519.GenerateKey(rand.Reader)
