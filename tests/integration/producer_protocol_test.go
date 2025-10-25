@@ -157,7 +157,6 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     if err != nil || sub != producerID { t.Fatalf("verify token failed: %v sub=%s want=%s", err, sub, producerID) }
 
     // 3) Subject register using signed pubkey (protocol expects pubkey+sig)
-    subj := map[string]any{"op":"register", "subject_key": "IT-SUBJ-1", "schema_name": "it-schema", "schema_body": map[string]any{}}
     var subjTmp any
     _ = json.Unmarshal([]byte(`{"op":"register", "subject_key": "IT-SUBJ-1", "schema_name": "it-schema", "schema_body": {}}`), &subjTmp)
     subjCanon, _ := json.Marshal(subjTmp)

@@ -8,7 +8,6 @@ import (
     "crypto/rand"
     "encoding/base64"
     "encoding/json"
-    "fmt"
     "os"
     "strconv"
     "testing"
