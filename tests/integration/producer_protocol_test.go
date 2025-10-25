@@ -14,6 +14,8 @@ import (
     "crypto/ed25519"
     "crypto/rand"
     "golang.org/x/crypto/sha3"
+    ssh "golang.org/x/crypto/ssh"
+    "strings"
 
     "github.com/redis/go-redis/v9"
     "github.com/google/uuid"
@@ -46,10 +48,29 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     itutil.WaitForMigrations(t, pg, 10*time.Second)
     pool := pg.Pool()
 
-    // keypair for registration/token issuance verification
+    // Generate CA (for SSH certificate) and producer keypair
+    caPub, caPriv, err := ed25519.GenerateKey(rand.Reader)
+    if err != nil { t.Fatalf("ca keygen: %v", err) }
+    caSigner, err := ssh.NewSignerFromKey(caPriv)
+    if err != nil { t.Fatalf("ca signer: %v", err) }
+    caPubLine := string(ssh.MarshalAuthorizedKey(caSigner.PublicKey()))
+
     pub, priv, err := ed25519.GenerateKey(rand.Reader)
     if err != nil { t.Fatalf("keygen: %v", err) }
-    pubLine := "ssh-ed25519 " + base64.StdEncoding.EncodeToString(pub) + " it@test"
+    // Make SSH certificate for producer key, signed by CA
+    prodPub, err := ssh.NewPublicKey(pub)
+    if err != nil { t.Fatalf("ssh pub: %v", err) }
+    cert := &ssh.Certificate{
+        Key:             prodPub,
+        Serial:          1,
+        CertType:        ssh.UserCert,
+        KeyId:           "it",
+        ValidAfter:      uint64(time.Now().Add(-time.Minute).Unix()),
+        ValidBefore:     uint64(time.Now().Add(1 * time.Hour).Unix()),
+        Permissions:     ssh.Permissions{},
+    }
+    if err := cert.SignCert(rand.Reader, caSigner); err != nil { t.Fatalf("sign cert: %v", err) }
+    pubLine := string(ssh.MarshalAuthorizedKey(cert))
     fp := func(in []byte) string { h := sha3.Sum512(in); return base64.StdEncoding.EncodeToString(h[:]) }([]byte(pubLine))
 
     // create producer and bind key as approved
@@ -77,8 +98,8 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
             KeyID: "k",
             PrivateKey: privB64,
             PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)},
-            ProducerSSHCA: "",
-            AdminSSHCA: "",
+            ProducerSSHCA: strings.TrimSpace(caPubLine),
+            AdminSSHCA: strings.TrimSpace(caPubLine),
         },
     }
     cancel := itutil.StartKernel(t, cfg)
