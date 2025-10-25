@@ -564,10 +564,13 @@ func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload,
          VALUES (gen_random_uuid(), $1, $2::jsonb, $3, $4, $5, NULLIF($6,''), CASE WHEN $7<>'' THEN now() ELSE NULL END, NULLIF($7,''))
          ON CONFLICT (fingerprint, nonce)
          DO UPDATE SET
-            status = EXCLUDED.status,
-            reason = NULLIF(EXCLUDED.reason,''),
+            status = CASE
+                        WHEN public.producer_registrations.status IN ('replay','invalid_sig','invalid_cert') THEN public.producer_registrations.status
+                        ELSE EXCLUDED.status
+                     END,
+            reason = COALESCE(NULLIF(EXCLUDED.reason,''), public.producer_registrations.reason),
             reviewed_at = CASE WHEN EXCLUDED.reviewer <> '' THEN now() ELSE public.producer_registrations.reviewed_at END,
-            reviewer = NULLIF(EXCLUDED.reviewer,'')`,
+            reviewer = COALESCE(NULLIF(EXCLUDED.reviewer,''), public.producer_registrations.reviewer)`,
         fingerprint, payload, sig, nonce, status, reason, reviewer,
     )
 	return err

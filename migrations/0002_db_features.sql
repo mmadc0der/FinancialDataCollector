@@ -302,6 +302,67 @@ BEGIN
 END;
 $$;
 
+-- Bootstrap a subject with an initial schema family version (v1) if missing
+-- Returns: subject_id, schema_id, version, unchanged (true if existing v1 matches provided body or body not provided)
+CREATE OR REPLACE FUNCTION public.bootstrap_subject_with_schema(
+    _subject_key TEXT,
+    _name        TEXT,
+    _body        JSONB,
+    _attrs       JSONB DEFAULT NULL
+) RETURNS TABLE(subject_id UUID, schema_id UUID, version INT, unchanged BOOLEAN)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_subject_id     UUID;
+    v_current_schema UUID;
+    v_existing_body  JSONB;
+    v_schema_id      UUID;
+    v_version        INT;
+BEGIN
+    IF _subject_key IS NULL OR length(_subject_key)=0 THEN RAISE EXCEPTION 'subject_key required'; END IF;
+    IF _name IS NULL OR length(_name)=0 THEN RAISE EXCEPTION 'schema name required'; END IF;
+
+    -- Ensure subject exists (merge attrs) and get id
+    v_subject_id := public.ensure_subject(_subject_key, _attrs, TRUE);
+
+    -- If subject already has a current schema, return it and whether the body matches
+    SELECT s.current_schema_id INTO v_current_schema FROM public.subjects s WHERE s.subject_id = v_subject_id;
+    IF v_current_schema IS NOT NULL THEN
+        SELECT sc.body, sc.schema_id, sc.version INTO v_existing_body, v_schema_id, v_version FROM public.schemas sc WHERE sc.schema_id = v_current_schema;
+        subject_id := v_subject_id;
+        schema_id  := v_schema_id;
+        version    := v_version;
+        unchanged  := (_body IS NULL) OR (v_existing_body IS NOT DISTINCT FROM COALESCE(_body, '{}'::jsonb));
+        RETURN QUERY SELECT subject_id, schema_id, version, unchanged;
+        RETURN;
+    END IF;
+
+    -- No current schema: pick existing v1 if present, else create v1 with provided body (or empty)
+    SELECT sc.schema_id, sc.version INTO v_schema_id, v_version
+    FROM public.schemas sc
+    WHERE sc.name = _name
+    ORDER BY sc.version ASC
+    LIMIT 1;
+
+    IF v_schema_id IS NULL THEN
+        v_version := 1;
+        INSERT INTO public.schemas(schema_id, name, version, body)
+        VALUES (gen_random_uuid(), _name, v_version, COALESCE(_body, '{}'::jsonb))
+        RETURNING public.schemas.schema_id INTO v_schema_id;
+        unchanged := FALSE;
+    ELSE
+        SELECT body INTO v_existing_body FROM public.schemas WHERE schema_id = v_schema_id;
+        unchanged := (_body IS NULL) OR (v_existing_body IS NOT DISTINCT FROM COALESCE(_body, '{}'::jsonb));
+    END IF;
+
+    -- Set as current for subject (idempotent) and return
+    PERFORM public.set_current_subject_schema(v_subject_id, v_schema_id);
+    subject_id := v_subject_id;
+    schema_id  := v_schema_id;
+    version    := v_version;
+    RETURN QUERY SELECT subject_id, schema_id, version, unchanged;
+END;
+$$;
+
 -- Atomic schema upgrade helpers
 CREATE OR REPLACE FUNCTION public.upgrade_subject_schema_auto(
     _subject_key TEXT,
