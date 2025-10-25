@@ -505,6 +505,11 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 // Path 1: renewal with existing token
                 if tok, ok := m.Values["token"].(string); ok && tok != "" {
                     if pid, _, _, err := k.au.Verify(ctx, tok); err == nil {
+                        // Deny renewal for disabled producers
+                        if disabled, derr := k.pg.IsProducerDisabled(ctx, pid); derr == nil && disabled {
+                            _ = k.rd.Ack(ctx, m.ID)
+                            continue
+                        }
                         if t, _, exp, ierr := k.au.Issue(ctx, pid, time.Hour, "exchange", ""); ierr == nil {
                             respStream := prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+pid)
                             _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
@@ -562,6 +567,11 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 }
                 if producerID == nil || *producerID == "" {
                     logging.Info("token_exchange_no_producer", logging.F("fingerprint", fp))
+                    _ = k.rd.Ack(ctx, m.ID)
+                    continue
+                }
+                // Deny token issue when producer disabled
+                if disabled, derr := k.pg.IsProducerDisabled(ctx, *producerID); derr == nil && disabled {
                     _ = k.rd.Ack(ctx, m.ID)
                     continue
                 }

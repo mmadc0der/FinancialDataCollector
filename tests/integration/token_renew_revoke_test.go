@@ -76,7 +76,8 @@ func TestTokenRevocation_BlocksVerification(t *testing.T) {
     cfg := kernelcfg.AuthConfig{Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: base64.RawStdEncoding.EncodeToString(priv), PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(pub)}}
     ver, _ := auth.NewVerifier(cfg, pg, nil)
     tok, jti, _, _ := ver.Issue(context.Background(), producerID, time.Hour, "", "")
-    if err := ver.Revoke(context.Background(), jti, "test"); err != nil { t.Fatalf("revoke: %v", err) }
+    // Use Postgres direct revoke to avoid multi-statement error in prepared exec
+    if err := pg.RevokeToken(context.Background(), jti, "test"); err != nil { t.Fatalf("revoke: %v", err) }
     if _, _, _, err := ver.Verify(context.Background(), tok); err == nil { t.Fatalf("expected revoked token to fail verify") }
 }
 

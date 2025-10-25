@@ -465,8 +465,14 @@ func (p *Postgres) RevokeToken(ctx context.Context, jti, reason string) error {
 	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err := p.pool.Exec(cctx, `INSERT INTO public.revoked_tokens(jti, reason) VALUES ($1,$2) ON CONFLICT (jti) DO UPDATE SET reason=EXCLUDED.reason, revoked_at=now(); UPDATE public.producer_tokens SET revoked_at=now() WHERE jti=$1`, jti, reason)
-	return err
+    if _, err := p.pool.Exec(cctx, `INSERT INTO public.revoked_tokens(jti, reason) VALUES ($1,$2) ON CONFLICT (jti) DO UPDATE SET reason=EXCLUDED.reason, revoked_at=now()`, jti, reason); err != nil {
+        return err
+    }
+    // Separate statement to avoid multi-command prepared statement issues
+    if _, err := p.pool.Exec(cctx, `UPDATE public.producer_tokens SET revoked_at=now() WHERE jti=$1`, jti); err != nil {
+        return err
+    }
+    return nil
 }
 
 // IsTokenRevoked returns true if token is revoked. If DB is unavailable we conservatively return true and log.

@@ -80,11 +80,17 @@ func TestSchemaCacheMiss_BackfillsAndPersists(t *testing.T) {
     b, _ := json.Marshal(ev)
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": uuid.NewString(), "payload": string(b), "token": tok}}).Err(); err != nil { t.Fatalf("xadd: %v", err) }
 
-    // Assert persisted to DB and cache key backfilled
+    // Assert persisted to DB with retry loop
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/healthz", 5*time.Second)
-    ctx := context.Background()
+    end := time.Now().Add(5 * time.Second)
+    for time.Now().Before(end) {
+        var cnt int
+        _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE subject_id=$1`, subjectID).Scan(&cnt)
+        if cnt >= 1 { break }
+        time.Sleep(150 * time.Millisecond)
+    }
     var cnt int
-    _ = pool.QueryRow(ctx, `SELECT COUNT(*) FROM public.event_index WHERE subject_id=$1`, subjectID).Scan(&cnt)
+    _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE subject_id=$1`, subjectID).Scan(&cnt)
     if cnt < 1 { t.Fatalf("expected event persisted, got %d", cnt) }
     itutil.WaitRedisKeyExists(t, rcli, cfg.Redis.KeyPrefix+"schemas:"+subjectID, 5*time.Second)
 }
