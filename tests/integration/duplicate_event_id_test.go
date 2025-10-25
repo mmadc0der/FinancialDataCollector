@@ -70,8 +70,13 @@ func TestDuplicateEventID_SecondInsertIgnored(t *testing.T) {
     // second time (duplicate id)
     _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: "fdc:events", Values: map[string]any{"id": evID, "payload": string(b), "token": tok}}).Err()
 
-    time.Sleep(1 * time.Second)
+    // Wait briefly for kernel to flush; assert stable count == 1
+    end := time.Now().Add(3 * time.Second)
     var cnt int
-    _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE event_id=$1`, evID).Scan(&cnt)
+    for time.Now().Before(end) {
+        _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.event_index WHERE event_id=$1`, evID).Scan(&cnt)
+        if cnt == 1 { break }
+        time.Sleep(100 * time.Millisecond)
+    }
     if cnt != 1 { t.Fatalf("expected 1 row for duplicate event_id, got %d", cnt) }
 }

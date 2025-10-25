@@ -237,16 +237,28 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                         continue
                     }
                 }
-                // Resolve schema via cache only; if missing, reject to DLQ to keep behavior strict and explicit
+                // Resolve schema via Redis cache; on miss, fallback to Postgres and backfill cache
                 var schemaID string
                 if sid, ok := k.rd.SchemaCacheGet(ctx, ev.SubjectID); ok {
                     schemaID = sid
                 } else {
-                    _ = k.rd.ToDLQ(ctx, dlq, id, payload, "schema_missing")
-                    logging.Warn("redis_schema_missing", logging.F("subject_id", ev.SubjectID), logging.F("id", id))
-                    _ = k.rd.Ack(ctx, m.ID)
-                    globalMetricsBatcher.IncRedisAck()
-                    continue
+                    // Fallback: query Postgres for current schema_id and cache it
+                    if k.pg != nil {
+                        if sid, err := k.pg.GetCurrentSchemaID(ctx, ev.SubjectID); err == nil && sid != "" {
+                            schemaID = sid
+                            ttl := time.Duration(k.cfg.Performance.SchemaCacheTTLSeconds) * time.Second
+                            if ttl <= 0 { ttl = time.Hour }
+                            _ = k.rd.SchemaCacheSet(ctx, ev.SubjectID, schemaID, ttl)
+                            logging.Info("schema_cache_backfilled", logging.F("subject_id", ev.SubjectID), logging.F("schema_id", schemaID))
+                        }
+                    }
+                    if schemaID == "" {
+                        _ = k.rd.ToDLQ(ctx, dlq, id, payload, "schema_missing")
+                        logging.Warn("redis_schema_missing", logging.F("subject_id", ev.SubjectID), logging.F("id", id))
+                        _ = k.rd.Ack(ctx, m.ID)
+                        globalMetricsBatcher.IncRedisAck()
+                        continue
+                    }
                 }
                 // route for durable handling; ack will be done after persistence via router callback
                 k.rt.handleLeanEvent(m.ID, ev.EventID, ev.TS, ev.SubjectID, producerID, ev.Payload, ev.Tags, schemaID)
