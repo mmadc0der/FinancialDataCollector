@@ -3,27 +3,28 @@
 package it
 
 import (
-    "context"
-    "encoding/base64"
-    "encoding/json"
-    "os"
-    "strconv"
-    "testing"
-    "time"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"strconv"
+	"testing"
+	"time"
 
-    "crypto/ed25519"
-    "crypto/rand"
-    "golang.org/x/crypto/sha3"
-    ssh "golang.org/x/crypto/ssh"
-    "strings"
+	"crypto/ed25519"
+	"crypto/rand"
+	"strings"
 
-    "github.com/redis/go-redis/v9"
-    "github.com/google/uuid"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
 
-    itutil "github.com/example/data-kernel/tests/itutil"
-    "github.com/example/data-kernel/internal/kernelcfg"
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/auth"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/example/data-kernel/internal/auth"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	itutil "github.com/example/data-kernel/tests/itutil"
 )
 
 func TestProducerProtocol_EndToEnd(t *testing.T) {
@@ -49,7 +50,7 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     pool := pg.Pool()
 
     // Generate CA (for SSH certificate) and producer keypair
-    caPub, caPriv, err := ed25519.GenerateKey(rand.Reader)
+    _, caPriv, err := ed25519.GenerateKey(rand.Reader)
     if err != nil { t.Fatalf("ca keygen: %v", err) }
     caSigner, err := ssh.NewSignerFromKey(caPriv)
     if err != nil { t.Fatalf("ca signer: %v", err) }
