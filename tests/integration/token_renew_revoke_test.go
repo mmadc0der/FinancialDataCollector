@@ -3,22 +3,22 @@
 package it
 
 import (
-    "context"
-    "encoding/base64"
-    "os"
-    "strconv"
-    "testing"
-    "time"
+	"context"
+	"encoding/base64"
+	"os"
+	"strconv"
+	"testing"
+	"time"
 
-    "crypto/ed25519"
-    "crypto/rand"
+	"crypto/ed25519"
+	"crypto/rand"
 
-    "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 
-    itutil "github.com/example/data-kernel/tests/itutil"
-    "github.com/example/data-kernel/internal/auth"
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/kernelcfg"
+	"github.com/example/data-kernel/internal/auth"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	itutil "github.com/example/data-kernel/tests/itutil"
 )
 
 func TestTokenExchange_RenewalWithExistingToken(t *testing.T) {
@@ -60,7 +60,7 @@ func TestTokenRevocation_BlocksVerification(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
     pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())
-    rc, addr := itutil.StartRedis(t)
+    rc, _ := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
     itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
 
