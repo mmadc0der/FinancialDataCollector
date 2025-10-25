@@ -4,6 +4,7 @@ package itutil
 
 import (
     "context"
+    "encoding/json"
     "fmt"
     "net"
     "net/http"
@@ -153,6 +154,30 @@ func WaitReadStream(t *testing.T, r *redis.Client, stream string, deadline time.
     }
     t.Fatalf("timeout reading from stream %s", stream)
     return redis.XMessage{}
+}
+
+// CanonicalizeJSON marshals any JSON to a deterministic string form
+func CanonicalizeJSON(b []byte) []byte {
+    var v any
+    if json.Unmarshal(b, &v) != nil {
+        return b
+    }
+    cb, err := json.Marshal(v)
+    if err != nil { return b }
+    return cb
+}
+
+// WaitRedisKeyExists polls Redis until a key exists (GET non-empty or EXISTS>0)
+func WaitRedisKeyExists(t *testing.T, r *redis.Client, key string, deadline time.Duration) {
+    t.Helper()
+    end := time.Now().Add(deadline)
+    for time.Now().Before(end) {
+        if n, _ := r.Exists(context.Background(), key).Result(); n > 0 {
+            return
+        }
+        time.Sleep(100 * time.Millisecond)
+    }
+    t.Fatalf("redis key not found within deadline: %s", key)
 }
 
 // NewPostgresConfig creates a PostgresConfig with the correct migrations directory for integration tests
