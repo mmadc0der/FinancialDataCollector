@@ -168,12 +168,12 @@ func TestProducerProtocol_EndToEnd(t *testing.T) {
     if err := rcli.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix + "subject:register", Values: map[string]any{"pubkey": pubLine, "payload": string(subjCanon), "nonce": nonceS, "sig": sigSB64}}).Err(); err != nil { t.Fatalf("subject xadd: %v", err) }
     subjRespStream := cfg.Redis.KeyPrefix + "subject:resp:" + producerID
     // Read a response message and surface any errors for debugging
-    msg := itutil.WaitReadStream(t, rcli, subjRespStream, 15*time.Second)
-    if errStr, _ := msg.Values["error"].(string); errStr != "" {
-        t.Fatalf("subject register error: %s values=%v", errStr, msg.Values)
+    rmsg := itutil.WaitReadStream(t, rcli, subjRespStream, 15*time.Second)
+    if errStr, _ := rmsg.Values["error"].(string); errStr != "" {
+        t.Fatalf("subject register error: %s values=%v", errStr, rmsg.Values)
     }
-    sid, _ := msg.Values["subject_id"].(string)
-    if sid == "" { t.Fatalf("empty subject_id values=%v", msg.Values) }
+    sid, _ := rmsg.Values["subject_id"].(string)
+    if sid == "" { t.Fatalf("empty subject_id values=%v", rmsg.Values) }
 
     // 4) Publish event accepted (lean protocol)
     ev := map[string]any{"event_id": uuid.NewString(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": sid, "payload": map[string]any{"kind":"test"}}
