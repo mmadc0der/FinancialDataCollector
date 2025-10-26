@@ -298,7 +298,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
     if k.rd == nil || k.pg == nil { return }
     stream := prefixed(k.cfg.Redis.KeyPrefix, "subject:register")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
     }
     consumer := fmt.Sprintf("%s-subreg-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {
@@ -497,7 +497,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
     if k.rd == nil || k.pg == nil || k.au == nil { return }
     stream := prefixed(k.cfg.Redis.KeyPrefix, "token:exchange")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
     }
     consumer := fmt.Sprintf("%s-token-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {
@@ -616,7 +616,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
     if k.rd == nil || k.pg == nil { return }
     stream := prefixed(k.cfg.Redis.KeyPrefix, "schema:upgrade")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
     }
     consumer := fmt.Sprintf("%s-schup-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {

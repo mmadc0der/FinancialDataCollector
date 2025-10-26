@@ -303,7 +303,7 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
     stream := prefixed(k.cfg.Redis.KeyPrefix, "register")
     // Ensure consumer group exists for the registration stream (ignore BUSYGROUP errors)
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "$" ).Err()
+        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
     }
     
     logging.Info("register_consumer_start", 
