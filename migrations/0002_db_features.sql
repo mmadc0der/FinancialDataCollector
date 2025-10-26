@@ -332,7 +332,7 @@ BEGIN
         schema_id  := v_schema_id;
         version    := v_version;
         unchanged  := (_body IS NULL) OR (v_existing_body IS NOT DISTINCT FROM COALESCE(_body, '{}'::jsonb));
-        RETURN QUERY SELECT subject_id, schema_id, version, unchanged;
+        RETURN QUERY SELECT v_subject_id, v_schema_id, v_version, unchanged;
         RETURN;
     END IF;
 
@@ -359,7 +359,7 @@ BEGIN
     subject_id := v_subject_id;
     schema_id  := v_schema_id;
     version    := v_version;
-    RETURN QUERY SELECT subject_id, schema_id, version, unchanged;
+    RETURN QUERY SELECT v_subject_id, v_schema_id, v_version, unchanged;
 END;
 $$;
 
