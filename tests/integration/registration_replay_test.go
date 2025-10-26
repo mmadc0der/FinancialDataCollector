@@ -58,14 +58,16 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
 
     // Start kernel
     port := itutil.FreePort(t)
-    cfg := kernelcfg.Config{Server: kernelcfg.ServerConfig{Listen: ":"+strconv.Itoa(port)}, Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""), Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerGroup: "kernel"}, Logging: kernelcfg.LoggingConfig{Level: "error"}, Auth: kernelcfg.AuthConfig{Issuer: "it", Audience: "it", KeyID: "k", ProducerSSHCA: caPubLine, AdminSSHCA: caPubLine}}
+    cfg := kernelcfg.Config{Server: kernelcfg.ServerConfig{Listen: ":"+strconv.Itoa(port)}, Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""), Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerGroup: "kernel"}, Logging: kernelcfg.LoggingConfig{Level: "info"}, Auth: kernelcfg.AuthConfig{Issuer: "it", Audience: "it", KeyID: "k", ProducerSSHCA: caPubLine, AdminSSHCA: caPubLine}}
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
     // Give consumers a brief moment to initialize before sending messages
-    time.Sleep(300 * time.Millisecond)
+    time.Sleep(600 * time.Millisecond)
     // Ensure registration consumer group is ready on the register stream
     regStream := cfg.Redis.KeyPrefix+"register"
+    // Create redis client early for readiness polling
+    r := redis.NewClient(&redis.Options{Addr: addr})
     endWait := time.Now().Add(5 * time.Second)
     for time.Now().Before(endWait) {
         groups, _ := r.XInfoGroups(context.Background(), regStream).Result()
@@ -76,7 +78,6 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     }
 
     // Send registration twice with same nonce
-    r := redis.NewClient(&redis.Options{Addr: addr})
     nonce := "nonce-replay-1"
     payload := itutil.CanonicalizeJSON([]byte(`{"producer_hint":"rr","meta":{"x":1}}`))
     msg := append(append([]byte{}, payload...), []byte("."+nonce)...)
@@ -90,7 +91,13 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     // Ensure kernel processed the first registration by waiting for its response,
     // but if no response is emitted (e.g., pending), fall back to nonce key existence.
     waited := make(chan struct{}, 1)
-    go func(){ itutil.WaitStreamLen(t, r, respStream, 1, 5*time.Second); waited <- struct{}{} }()
+    go func(){
+        deadline := time.Now().Add(5 * time.Second)
+        for time.Now().Before(deadline) {
+            if l, _ := r.XLen(context.Background(), respStream).Result(); l >= 1 { waited <- struct{}{}; return }
+            time.Sleep(100 * time.Millisecond)
+        }
+    }()
     select {
     case <-waited:
         // ok
@@ -125,7 +132,15 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
         latestRows.Close()
         // Check TTL presence as well
         ttl, _ := r.TTL(context.Background(), cfg.Redis.KeyPrefix+"reg:nonce:"+fp+":"+nonce).Result()
-        t.Fatalf("expected replay audit row; got total=%d breakdown=%v latest=%v ttl=%v", total, breakdown, latest, ttl)
+        // Extra Redis diagnostics
+        regLen, _ := r.XLen(context.Background(), regStream).Result()
+        respLen, _ := r.XLen(context.Background(), respStream).Result()
+        regGroups, _ := r.XInfoGroups(context.Background(), regStream).Result()
+        // Last few messages (best-effort)
+        regLast, _ := r.XRevRangeN(context.Background(), regStream, "+", "-", 5).Result()
+        respLast, _ := r.XRevRangeN(context.Background(), respStream, "+", "-", 5).Result()
+        t.Fatalf("expected replay audit row; total=%d breakdown=%v latest=%v ttl=%v regLen=%d respLen=%d regGroups=%v regLast=%v respLast=%v",
+            total, breakdown, latest, ttl, regLen, respLen, regGroups, regLast, respLast)
     }
 
     // Assert nonce key TTL exists

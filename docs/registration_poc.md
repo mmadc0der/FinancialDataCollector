@@ -7,7 +7,7 @@
 
 ### Design Overview (v2 - Enhanced Security)
 - Redis registration stream `fdc:register` (fixed): producers submit signed requests.
-- Responses are published to `fdc:register:resp:<nonce>` (per-request, ephemeral with TTL).
+- Responses are published to `fdc:register:resp:<nonce>` (per-request, ephemeral with TTL; kernel sets an expiry on this stream after emitting the response).
 - OpenSSH-style public keys for producers are used to verify signatures and derive fingerprints.
 - Postgres keeps:
   - `producer_keys(fingerprint, pubkey, status[pending|approved|revoked|superseded], producer_id NOT NULL, superseded_at)`
@@ -25,7 +25,7 @@
   - `pubkey`: OpenSSH public key (text)
   - `payload`: JSON string, e.g. `{ "producer_hint": "binance", "contact": "ops@example.com", "meta": {"region":"eu"}, "producer_id": "uuid" }` (producer_id optional for key rotation)
   - `nonce`: random string (>=16 bytes)
-  - `sig`: base64 signature over `SHA3-512(payload||"."||nonce)` using the corresponding `pubkey`'s private key
+- `sig`: base64 signature over the exact bytes `payload + "." + nonce` using the corresponding `pubkey`'s private key (no pre-hash; the kernel verifies raw Ed25519 signature over this concatenation after canonicalizing the JSON payload)
 
 ### Verification Steps (v2)
 1. **Rate Limiting**: Check Redis rate limit (default 10 RPM per fingerprint), silent drop if exceeded.
@@ -52,7 +52,7 @@
 
 ### Security Audit & Risks (v2)
 - **Rate Limiting**: Kernel-side enforcement (default 10 RPM) prevents registration spam, silent drop on limit exceeded.
-- **Replay Protection**: Nonce anti-replay with Redis `SETNX reg:nonce:<fp>:<nonce>` with 1h TTL.
+- **Replay Protection**: Nonce anti-replay with Redis `SETNX reg:nonce:<fp>:<nonce>` with 1h TTL, plus a DB unique index on `(fingerprint, nonce)` to enforce uniqueness server-side.
 - **Key Substitution**: Signature verifies against provided `pubkey`, binding requires admin approval; no auto-issue.
 - **Token Exchange Abuse**: Only `approved` keys can exchange for tokens; rate limiting per fingerprint.
 - **State Machine Security**: Strict validation with no fallbacks; every failure = hard rejection.
@@ -67,7 +67,7 @@
 - **Implemented**: Enhanced logging (INFO level for all access events)
 - **Remaining**: Enforce unique `nonce` per fingerprint for a time window (DB unique constraint or Redis set with TTL)
 - **Remaining**: Implement token-exchange rate limits per fingerprint and global caps
-- **Remaining**: Enforce short TTL and auto-cleanup for `fdc:register:resp:<nonce>`
+- **Done**: Enforce short TTL and auto-cleanup for `fdc:register:resp:<nonce>`
 
 ### Implementation Status (v2 - Complete)
 - **Database**: Migration `0007_registration_v2.sql` with enhanced schema, atomic functions, and constraints
