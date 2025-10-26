@@ -64,6 +64,16 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
     // Give consumers a brief moment to initialize before sending messages
     time.Sleep(300 * time.Millisecond)
+    // Ensure registration consumer group is ready on the register stream
+    regStream := cfg.Redis.KeyPrefix+"register"
+    endWait := time.Now().Add(5 * time.Second)
+    for time.Now().Before(endWait) {
+        groups, _ := r.XInfoGroups(context.Background(), regStream).Result()
+        ready := false
+        for _, g := range groups { if g.Name == cfg.Redis.ConsumerGroup { ready = true; break } }
+        if ready { break }
+        time.Sleep(100 * time.Millisecond)
+    }
 
     // Send registration twice with same nonce
     r := redis.NewClient(&redis.Options{Addr: addr})
@@ -73,7 +83,7 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     sig := ed25519.Sign(priv, msg)
     sigB64 := base64.RawStdEncoding.EncodeToString(sig)
     values := map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}
-    regStream := cfg.Redis.KeyPrefix+"register"
+    // regStream defined above
     respStream := cfg.Redis.KeyPrefix+"register:resp:"+nonce
     nonceKey := cfg.Redis.KeyPrefix+"reg:nonce:"+fp+":"+nonce
     _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: regStream, Values: values}).Err()
