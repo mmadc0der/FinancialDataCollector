@@ -71,8 +71,12 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     sig := ed25519.Sign(priv, msg)
     sigB64 := base64.RawStdEncoding.EncodeToString(sig)
     values := map[string]any{"pubkey": pubLine, "payload": string(payload), "nonce": nonce, "sig": sigB64}
-    _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"register", Values: values}).Err()
-    _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"register", Values: values}).Err()
+    regStream := cfg.Redis.KeyPrefix+"register"
+    nonceKey := cfg.Redis.KeyPrefix+"reg:nonce:"+fp+":"+nonce
+    _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: regStream, Values: values}).Err()
+    // Ensure the first registration is processed (nonce key created) before sending the replay
+    itutil.WaitRedisKeyExists(t, r, nonceKey, 5*time.Second)
+    _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: regStream, Values: values}).Err()
 
     // Assert DB audit has replay record
     end := time.Now().Add(5 * time.Second)
@@ -104,7 +108,7 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     }
 
     // Assert nonce key TTL exists
-    ttl, _ := r.TTL(context.Background(), cfg.Redis.KeyPrefix+"reg:nonce:"+fp+":"+nonce).Result()
+    ttl, _ := r.TTL(context.Background(), nonceKey).Result()
     if ttl <= 0 { t.Fatalf("expected nonce TTL > 0, got %v", ttl) }
 }
 
