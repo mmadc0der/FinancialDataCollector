@@ -450,7 +450,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     schemaName = req.SchemaName
                     if err != nil {
                         logging.Warn("subject_register_upgrade_error", logging.F("id", m.ID), logging.Err(err))
-                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "upgrade_failed"}) }
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "upgrade_failed", "reason": err.Error()}) }
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
@@ -461,7 +461,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     schemaName = req.SchemaName
                     if err != nil {
                         logging.Warn("subject_register_register_error", logging.F("id", m.ID), logging.Err(err))
-                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "register_failed"}) }
+                        if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "register_failed", "reason": err.Error()}) }
                         _ = k.rd.Ack(ctx, m.ID)
                         continue
                     }
