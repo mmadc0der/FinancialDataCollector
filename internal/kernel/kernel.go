@@ -99,8 +99,15 @@ func (k *Kernel) Start(ctx context.Context) error {
     // Start Redis consumer (mandatory)
     if rd, err := data.NewRedis(k.cfg.Redis); err == nil {
         k.rd = rd
-        // best-effort create group
+        // best-effort create groups for all streams BEFORE starting consumers to avoid race with producers
         _ = k.rd.EnsureGroup(ctx)
+        if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
+            // Fixed protocol streams
+            _ = k.rd.C().XGroupCreateMkStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, "register"), k.cfg.Redis.ConsumerGroup, "0-0").Err()
+            _ = k.rd.C().XGroupCreateMkStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:register"), k.cfg.Redis.ConsumerGroup, "0-0").Err()
+            _ = k.rd.C().XGroupCreateMkStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, "token:exchange"), k.cfg.Redis.ConsumerGroup, "0-0").Err()
+            _ = k.rd.C().XGroupCreateMkStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, "schema:upgrade"), k.cfg.Redis.ConsumerGroup, "0-0").Err()
+        }
         logging.Info("redis_consumer_start", logging.F("stream", prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)), logging.F("group", k.cfg.Redis.ConsumerGroup))
         go k.consumeRedis(ctx)
         // registration stream consumer (fixed stream)
@@ -223,7 +230,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if subjectIDFromToken != "" && !strings.EqualFold(subjectIDFromToken, ev.SubjectID) {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "subject_mismatch_token")
                     logging.Warn("redis_subject_mismatch", logging.F("id", id))
-                    _ = k.rd.Ack(ctx, m.ID)
+                            _ = k.rd.Ack(ctx, m.ID)
                     globalMetricsBatcher.IncRedisAck()
                     continue
                 }
@@ -333,9 +340,6 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     okSig := false
                     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
-                            var tmp any
-                            if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
-                            // Ed25519-only: verify raw signature over canonical bytes without prehash
                             msg := []byte(payloadStr + "." + nonce)
                             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                             if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
@@ -543,9 +547,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 okSig := false
                 if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                     if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
-                        var tmp any
-                        if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
-                        // Ed25519-only: verify raw signature over canonical bytes without prehash
+                        // Verify exact bytes as sent by client (no re-canonicalization)
                         msg := []byte(payloadStr + "." + nonce)
                         sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                         if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
@@ -641,9 +643,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 okSig := false
                 if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                     if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
-                        var tmp any
-                        if json.Unmarshal([]byte(payloadStr), &tmp) == nil { if cb, e := json.Marshal(tmp); e == nil { payloadStr = string(cb) } }
-                        // Ed25519-only: verify raw signature over canonical bytes without prehash
+                        // Verify exact bytes as sent by client (no re-canonicalization)
                         msg := []byte(payloadStr + "." + nonce)
                         sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                         if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }

@@ -98,6 +98,16 @@ func (r *Redis) Ack(ctx context.Context, ids ...string) error {
     return err
 }
 
+// AckStream acknowledges messages for a specific stream and trims it.
+func (r *Redis) AckStream(ctx context.Context, stream string, ids ...string) error {
+    if r.c == nil || stream == "" || r.group == "" || len(ids) == 0 { return nil }
+    pipe := r.c.Pipeline()
+    pipe.XAck(ctx, stream, r.group, ids...)
+    pipe.XTrimMaxLenApprox(ctx, stream, 32384, 0)
+    _, err := pipe.Exec(ctx)
+    return err
+}
+
 
 
 // ToDLQ writes a payload to DLQ stream.

@@ -228,14 +228,7 @@ func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool 
     
     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
-            // Canonicalize payload JSON deterministically
-            var tmp any
-            if json.Unmarshal([]byte(payloadStr), &tmp) == nil {
-                if cb, err := json.Marshal(tmp); err == nil {
-                    payloadStr = string(cb)
-                }
-            }
-            // Verify raw Ed25519 signature over canonical bytes (no prehash)
+
             msg := []byte(payloadStr + "." + nonce)
             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
             if decErr != nil {
@@ -347,7 +340,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     
     if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
         logging.Info("registration_missing_fields", logging.F("id", m.ID))
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     
@@ -363,7 +356,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         logging.Info("registration_payload_parse_error",
             logging.F("fingerprint", fp),
             logging.Err(err))
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
 
@@ -386,7 +379,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     if !k.checkNonceReplay(ctx, fp, nonce) {
         // Create registration record for audit
         k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "replay", "duplicate_nonce", "")
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     
@@ -399,7 +392,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
             "status": "invalid_sig",
             "reason": "signature_verification_failed",
         })
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     
@@ -453,7 +446,10 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         k.rd.Ack(ctx, m.ID)
         return
     }
-    _ = statusProducerID // unused but part of API
+    if statusProducerID != nil && *statusProducerID != "" {
+        // Prefer authoritative producer_id from key status for responses
+        producerID = *statusProducerID
+    }
 
     // Create pending registration record for audit
     _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, status, "", "")
@@ -492,7 +488,7 @@ func (k *Kernel) handleDeregister(ctx context.Context, producerID, fp string, ms
         "producer_id": producerID,
         "status": "deregistered",
     })
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 // Handle known approved key
@@ -506,7 +502,7 @@ func (k *Kernel) handleKnownApproved(ctx context.Context, producerID, fp string,
         "producer_id": producerID,
         "status": "approved",
     })
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 // Handle known pending key
@@ -516,7 +512,7 @@ func (k *Kernel) handleKnownPending(ctx context.Context, producerID, fp string, 
         logging.F("fingerprint", fp))
     
     // Silent - no response for pending keys per protocol
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 // Handle known denied key
