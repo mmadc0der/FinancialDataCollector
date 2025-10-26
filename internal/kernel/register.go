@@ -324,14 +324,14 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
         
         for _, s := range res {
             for _, m := range s.Messages {
-                k.processRegistrationMessage(ctx, m)
+                k.processRegistrationMessage(ctx, stream, m)
             }
         }
     }
 }
 
 // Process a single registration message
-func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessage) {
+func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, m redis.XMessage) {
     // Extract fields
     pubkey, _ := m.Values["pubkey"].(string)
     payloadStr, _ := m.Values["payload"].(string)
@@ -341,7 +341,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     
     if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
         logging.Info("registration_missing_fields", logging.F("id", m.ID))
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     
@@ -357,7 +357,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         logging.Info("registration_payload_parse_error",
             logging.F("fingerprint", fp),
             logging.Err(err))
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
 
@@ -372,15 +372,18 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
 
     // Rate limiting check per producer_id/fingerprint
     if !k.checkRateLimit(ctx, rateLimitID) {
-        k.rd.Ack(ctx, m.ID)
-        return // silent drop for rate limited requests
+        // respond to client on same per-nonce response stream for consistency
+        k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "rate_limited"})
+        _ = k.rd.AckStream(ctx, stream, m.ID)
+        return
     }
     
     // Check nonce replay
     if !k.checkNonceReplay(ctx, fp, nonce) {
-        // Create registration record for audit
-        k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "replay", "duplicate_nonce", "")
-        k.rd.Ack(ctx, m.ID)
+        // Create registration record for audit and notify client
+        _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "replay", "duplicate_nonce", "")
+        k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "replay", "reason": "duplicate_nonce"})
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     
@@ -393,7 +396,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
             "status": "invalid_sig",
             "reason": "signature_verification_failed",
         })
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     
@@ -408,7 +411,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
                 "status": "invalid_cert",
                 "reason": "certificate_verification_failed",
             })
-            k.rd.Ack(ctx, m.ID)
+            _ = k.rd.AckStream(ctx, stream, m.ID)
             return
         }
         logging.Info("registration_cert_verified",
@@ -426,14 +429,14 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         logging.Error("registration_producer_key_register_error",
             logging.F("fingerprint", fp),
             logging.Err(err))
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     logging.Info("registration_producer_registered", logging.F("producer_id", producerID), logging.F("fingerprint", fp), logging.F("hint", payload.ProducerHint))
 
     // Handle deregister action
     if action == "deregister" {
-        k.handleDeregister(ctx, producerID, fp, m.ID, nonce)
+        k.handleDeregister(ctx, stream, producerID, fp, m.ID, nonce)
         return
     }
 
@@ -444,7 +447,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
             logging.F("producer_id", producerID),
             logging.F("fingerprint", fp),
             logging.Err(err))
-        k.rd.Ack(ctx, m.ID)
+        _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     if statusProducerID != nil && *statusProducerID != "" {
@@ -458,20 +461,20 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     // State machine based on current status
     switch status {
     case "approved":
-        k.handleKnownApproved(ctx, producerID, fp, m.ID, nonce)
+        k.handleKnownApproved(ctx, stream, producerID, fp, m.ID, nonce)
     case "pending":
-        k.handleKnownPending(ctx, producerID, fp, m.ID, nonce)
+        k.handleKnownPending(ctx, stream, producerID, fp, m.ID, nonce)
     case "revoked", "superseded":
-        k.handleKnownDenied(ctx, &producerID, fp, status, m.ID, nonce)
+        k.handleKnownDenied(ctx, stream, &producerID, fp, status, m.ID, nonce)
     default:
         // This shouldn't happen after RegisterProducerKey, but handle gracefully
         logging.Info("registration_unknown_status", logging.F("producer_id", producerID), logging.F("status", status))
-        k.handleNewProducer(ctx, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID)
+        k.handleNewProducer(ctx, stream, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID)
     }
 }
 
 // Handle deregister action
-func (k *Kernel) handleDeregister(ctx context.Context, producerID, fp string, msgID, nonce string) {
+func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
     logging.Info("registration_deregister_received", logging.F("producer_id", producerID))
     
     err := k.pg.DisableProducer(ctx, producerID)
@@ -489,11 +492,11 @@ func (k *Kernel) handleDeregister(ctx context.Context, producerID, fp string, ms
         "producer_id": producerID,
         "status": "deregistered",
     })
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 // Handle known approved key
-func (k *Kernel) handleKnownApproved(ctx context.Context, producerID, fp string, msgID, nonce string) {
+func (k *Kernel) handleKnownApproved(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
     logging.Info("registration_known_approved", 
         logging.F("producer_id", producerID), 
         logging.F("fingerprint", fp))
@@ -503,21 +506,21 @@ func (k *Kernel) handleKnownApproved(ctx context.Context, producerID, fp string,
         "producer_id": producerID,
         "status": "approved",
     })
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 // Handle known pending key
-func (k *Kernel) handleKnownPending(ctx context.Context, producerID, fp string, msgID, nonce string) {
+func (k *Kernel) handleKnownPending(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
     logging.Info("registration_known_pending", 
         logging.F("producer_id", producerID), 
         logging.F("fingerprint", fp))
     
     // Silent - no response for pending keys per protocol
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 // Handle known denied key
-func (k *Kernel) handleKnownDenied(ctx context.Context, producerID *string, fp, status, msgID, nonce string) {
+func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerID *string, fp, status, msgID, nonce string) {
     var pid string
     if producerID != nil { pid = *producerID }
     logging.Info("registration_known_denied",
@@ -530,11 +533,11 @@ func (k *Kernel) handleKnownDenied(ctx context.Context, producerID *string, fp, 
         "status": "denied",
         "reason": status,
     })
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 // Handle new producer registration (fallback - should not occur post-RegisterProducerKey)
-func (k *Kernel) handleNewProducer(ctx context.Context, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
+func (k *Kernel) handleNewProducer(ctx context.Context, stream, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
     logging.Info("registration_new_producer", logging.F("producer_id", producerID))
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
@@ -542,7 +545,7 @@ func (k *Kernel) handleNewProducer(ctx context.Context, producerID, fp string, p
         "producer_id": producerID,
         "status": "pending",
     })
-    k.rd.Ack(ctx, msgID)
+    _ = k.rd.AckStream(ctx, stream, msgID)
 }
 
 func sshFingerprint(pubKeyData []byte) string {
