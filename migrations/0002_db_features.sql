@@ -350,7 +350,7 @@ BEGIN
         RETURNING public.schemas.schema_id INTO v_schema_id;
         unchanged := FALSE;
     ELSE
-        SELECT body INTO v_existing_body FROM public.schemas WHERE schema_id = v_schema_id;
+        SELECT s.body INTO v_existing_body FROM public.schemas s WHERE s.schema_id = v_schema_id;
         unchanged := (_body IS NULL) OR (v_existing_body IS NOT DISTINCT FROM COALESCE(_body, '{}'::jsonb));
     END IF;
 
