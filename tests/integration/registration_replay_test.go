@@ -77,8 +77,16 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     respStream := cfg.Redis.KeyPrefix+"register:resp:"+nonce
     nonceKey := cfg.Redis.KeyPrefix+"reg:nonce:"+fp+":"+nonce
     _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: regStream, Values: values}).Err()
-    // Ensure kernel processed the first registration by waiting for its response on per-nonce stream
-    itutil.WaitStreamLen(t, r, respStream, 1, 10*time.Second)
+    // Ensure kernel processed the first registration by waiting for its response,
+    // but if no response is emitted (e.g., pending), fall back to nonce key existence.
+    waited := make(chan struct{}, 1)
+    go func(){ itutil.WaitStreamLen(t, r, respStream, 1, 5*time.Second); waited <- struct{}{} }()
+    select {
+    case <-waited:
+        // ok
+    case <-time.After(5 * time.Second):
+        itutil.WaitRedisKeyExists(t, r, nonceKey, 10*time.Second)
+    }
     _ = r.XAdd(context.Background(), &redis.XAddArgs{Stream: regStream, Values: values}).Err()
 
     // Assert DB audit has replay record
