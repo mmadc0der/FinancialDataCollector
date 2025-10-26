@@ -1,21 +1,22 @@
 package kernel
 
 import (
-    "context"
-    "crypto/ed25519"
-    "bytes"
-    "encoding/base64"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "time"
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
 
-    "github.com/example/data-kernel/internal/logging"
-    "github.com/example/data-kernel/internal/metrics"
-    "github.com/redis/go-redis/v9"
-    ssh "golang.org/x/crypto/ssh"
-    "golang.org/x/crypto/sha3"
-    "sync"
+	"sync"
+
+	"github.com/example/data-kernel/internal/logging"
+	"github.com/example/data-kernel/internal/metrics"
+	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
 )
 
 // In-memory rate limiter for better performance than Lua scripts
@@ -340,7 +341,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     
     if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
         logging.Info("registration_missing_fields", logging.F("id", m.ID))
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        k.rd.Ack(ctx, m.ID)
         return
     }
     
@@ -356,7 +357,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
         logging.Info("registration_payload_parse_error",
             logging.F("fingerprint", fp),
             logging.Err(err))
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        k.rd.Ack(ctx, m.ID)
         return
     }
 
@@ -379,7 +380,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
     if !k.checkNonceReplay(ctx, fp, nonce) {
         // Create registration record for audit
         k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "replay", "duplicate_nonce", "")
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        k.rd.Ack(ctx, m.ID)
         return
     }
     
@@ -392,7 +393,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, m redis.XMessag
             "status": "invalid_sig",
             "reason": "signature_verification_failed",
         })
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        k.rd.Ack(ctx, m.ID)
         return
     }
     
@@ -488,7 +489,7 @@ func (k *Kernel) handleDeregister(ctx context.Context, producerID, fp string, ms
         "producer_id": producerID,
         "status": "deregistered",
     })
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    k.rd.Ack(ctx, msgID)
 }
 
 // Handle known approved key
@@ -502,7 +503,7 @@ func (k *Kernel) handleKnownApproved(ctx context.Context, producerID, fp string,
         "producer_id": producerID,
         "status": "approved",
     })
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    k.rd.Ack(ctx, msgID)
 }
 
 // Handle known pending key
@@ -512,7 +513,7 @@ func (k *Kernel) handleKnownPending(ctx context.Context, producerID, fp string, 
         logging.F("fingerprint", fp))
     
     // Silent - no response for pending keys per protocol
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    k.rd.Ack(ctx, msgID)
 }
 
 // Handle known denied key
