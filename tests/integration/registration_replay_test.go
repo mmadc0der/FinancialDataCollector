@@ -79,7 +79,7 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
 
     // Send registration twice with same nonce
     nonce := "nonce-replay-1"
-    payload := itutil.CanonicalizeJSON([]byte(`{"producer_hint":"rr","meta":{"x":1}}`))
+    payload := itutil.CanonicalizeJSON([]byte(`{"producer_hint":"rr","meta":{"x":"1"}}`))
     msg := append(append([]byte{}, payload...), []byte("."+nonce)...)
     sig := ed25519.Sign(priv, msg)
     sigB64 := base64.RawStdEncoding.EncodeToString(sig)
