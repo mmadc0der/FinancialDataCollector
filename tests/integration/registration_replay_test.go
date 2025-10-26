@@ -62,6 +62,8 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)
+    // Give consumers a brief moment to initialize before sending messages
+    time.Sleep(300 * time.Millisecond)
 
     // Send registration twice with same nonce
     r := redis.NewClient(&redis.Options{Addr: addr})
