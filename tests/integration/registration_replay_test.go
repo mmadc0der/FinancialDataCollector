@@ -4,6 +4,7 @@ package it
 
 import (
 	"context"
+    "database/sql"
 	"encoding/base64"
 	"os"
 	"strconv"
