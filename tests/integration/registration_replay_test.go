@@ -83,7 +83,24 @@ func TestRegistrationReplay_RecordsAuditAndTTL(t *testing.T) {
     }
     var n int
     _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.producer_registrations WHERE fingerprint=$1 AND nonce=$2 AND status='replay'`, fp, nonce).Scan(&n)
-    if n < 1 { t.Fatalf("expected replay audit row") }
+    if n < 1 {
+        // Gather diagnostics to understand failure
+        var total int
+        _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.producer_registrations WHERE fingerprint=$1`, fp).Scan(&total)
+        // Status breakdown
+        rows, _ := pool.Query(context.Background(), `SELECT status, COUNT(*) FROM public.producer_registrations WHERE fingerprint=$1 GROUP BY status`, fp)
+        breakdown := map[string]int{}
+        for rows.Next() { var st string; var c int; _ = rows.Scan(&st, &c); breakdown[st] = c }
+        rows.Close()
+        // Latest few entries
+        latestRows, _ := pool.Query(context.Background(), `SELECT status, reason FROM public.producer_registrations WHERE fingerprint=$1 ORDER BY ts DESC LIMIT 3`, fp)
+        latest := make([][2]string, 0, 3)
+        for latestRows.Next() { var st, rs sql.NullString; _ = latestRows.Scan(&st, &rs); latest = append(latest, [2]string{st.String, rs.String}) }
+        latestRows.Close()
+        // Check TTL presence as well
+        ttl, _ := r.TTL(context.Background(), cfg.Redis.KeyPrefix+"reg:nonce:"+fp+":"+nonce).Result()
+        t.Fatalf("expected replay audit row; got total=%d breakdown=%v latest=%v ttl=%v", total, breakdown, latest, ttl)
+    }
 
     // Assert nonce key TTL exists
     ttl, _ := r.TTL(context.Background(), cfg.Redis.KeyPrefix+"reg:nonce:"+fp+":"+nonce).Result()
