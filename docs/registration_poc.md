@@ -17,20 +17,20 @@
   - **New Producer**: Unknown fingerprint, no `producer_id` → creates producer, key status=`pending`
   - **Key Rotation**: Unknown fingerprint, WITH `producer_id` → validates existing producer, key status=`pending`
   - **Known Keys**: Returns existing status (approved/pending/denied)
-- **Rate Limiting**: Kernel-side enforcement (default 10 RPM), silent drop on limit exceeded.
-- Admin API is protected by an OpenSSH CA public key with `/auth/review` endpoint for approve/deny actions.
+- **Rate Limiting**: Kernel-side, distributed (Redis Lua token bucket) with per-op identity keys.
+- **Admin API**: protected via mTLS and detached signature with OpenSSH admin certificate.
 
 ### Message Format (registration stream)
 - XADD fields:
   - `pubkey`: OpenSSH public key (text)
-  - `payload`: JSON string, e.g. `{ "producer_hint": "binance", "contact": "ops@example.com", "meta": {"region":"eu"}, "producer_id": "uuid" }` (producer_id optional for key rotation)
+  - `payload`: canonical JSON, e.g. `{ "producer_hint": "binance", "contact": "ops@example.com", "meta": {"region":"eu"}, "producer_id": "uuid" }`
   - `nonce`: random string (>=16 bytes)
-- `sig`: base64 signature over the exact bytes `payload + "." + nonce` using the corresponding `pubkey`'s private key (no pre-hash; the kernel verifies raw Ed25519 signature over this concatenation after canonicalizing the JSON payload)
+  - `sig`: base64 signature over `canonical(payload)+"."+nonce` using the corresponding `pubkey`'s private key
 
 ### Verification Steps (v2)
-1. **Rate Limiting**: Check Redis rate limit (default 10 RPM per fingerprint), silent drop if exceeded.
-2. Canonicalize `payload` JSON to a deterministic string; concatenate `payload + "." + nonce`.
-3. Verify signature with the provided `pubkey` over that exact byte sequence.
+1. **Rate Limiting**: Check distributed rate limiter; drop if exceeded.
+2. Canonicalize `payload` JSON; concatenate `canonical(payload) + "." + nonce`.
+3. Verify signature with provided `pubkey` over that exact byte sequence; unwrap SSH certificate to raw key if `producer_ssh_ca` is configured and matches.
 4. Derive fingerprint (SHA3-512 over public key bytes, base64).
 5. **State Machine Logic**:
    - **Case 1 (New Producer)**: Unknown fingerprint, no `producer_id` → create producer, key status=`pending`
@@ -38,8 +38,8 @@
    - **Case 3 (Known Approved)**: Known fingerprint, status=`approved` → return existing `producer_id`
    - **Case 4 (Known Pending)**: Known fingerprint, status=`pending` → silent (no response)
    - **Case 5 (Known Denied)**: Known fingerprint, status=`revoked`/`superseded` → return denial
-6. Create `producer_registrations` row with status `pending` and include the resolved `producer_id`.
-7. Acknowledge after durable writes and publish a response to `fdc:register:resp:<nonce>` with `{ fingerprint, producer_id, status, reason? }` and set a short TTL on the stream.
+6. Create `producer_registrations` row and enforce DB uniqueness on `(fingerprint, nonce)`.
+7. Acknowledge after durable writes and publish a response to `fdc:register:resp:<nonce>` with `{ fingerprint, producer_id, status, reason? }` and a short TTL.
 
 ### Admin Workflow (v2)
 - **`/auth/review`** endpoint for approve/deny actions:
@@ -48,42 +48,35 @@
   - **Deny Registration**: Marks key as revoked with reason
 - Root `GET /auth`: View pending registrations
 - Admin can revoke tokens via `POST /auth/revoke`.
-- Admin requests must be authenticated with OpenSSH certificates signed by a configured CA.
+- Admin requests must be authenticated with:
+  - mTLS (client cert signed by Admin X.509 CA), and
+  - Detached Ed25519 signature with OpenSSH admin certificate (`X-Admin-Cert`, `X-Admin-Nonce`, `X-Admin-Signature`) over `canonicalJSON(body)+"\n"+METHOD+"\n"+PATH+"\n"+nonce`.
 
 ### Security Audit & Risks (v2)
-- **Rate Limiting**: Kernel-side enforcement (default 10 RPM) prevents registration spam, silent drop on limit exceeded.
-- **Replay Protection**: Nonce anti-replay with Redis `SETNX reg:nonce:<fp>:<nonce>` with 1h TTL, plus a DB unique index on `(fingerprint, nonce)` to enforce uniqueness server-side.
-- **Key Substitution**: Signature verifies against provided `pubkey`, binding requires admin approval; no auto-issue.
-- **Token Exchange Abuse**: Only `approved` keys can exchange for tokens; rate limiting per fingerprint.
-- **State Machine Security**: Strict validation with no fallbacks; every failure = hard rejection.
-- **Atomic Key Rotation**: Old key superseded in same transaction as new key approved; no window with 0 or 2 approved keys.
-- **DLQ Exposure**: Registration stream separate from data stream; no secrets in Redis.
-- **Admin CA Verification**: SSH certificate validation with `X-SSH-Cert` and `X-SSH-Principal` headers.
-- **Database Availability**: Auth/token gating requires Postgres reachability; spill-only mode rejects unauthenticated events.
-
-### Future Hardening (v2)
-- **Implemented**: Rate limiting, atomic key rotation, strict state machine validation
-- **Implemented**: OpenSSH certificate verification for admin endpoints
-- **Implemented**: Enhanced logging (INFO level for all access events)
-- **Remaining**: Enforce unique `nonce` per fingerprint for a time window (DB unique constraint or Redis set with TTL)
-- **Remaining**: Implement token-exchange rate limits per fingerprint and global caps
-- **Done**: Enforce short TTL and auto-cleanup for `fdc:register:resp:<nonce>`
+- **Rate Limiting**: Distributed token bucket prevents spam; metrics expose allow/deny by operation.
+- **Replay Protection**: Redis `SETNX reg:nonce:<fp>:<nonce>` with 1h TTL, plus DB unique index on `(fingerprint, nonce)`.
+- **Key Substitution**: Cert unwrapping checks CA; admin approval binds key to producer.
+- **Token Exchange Abuse**: Only `approved` keys can exchange for tokens; distributed rate limits apply.
+- **State Machine Security**: Strict validation; failures are hard rejections.
+- **Atomic Key Rotation**: Old key superseded in same transaction as new key approved.
+- **DLQ Exposure**: No secrets in Redis streams.
+- **Admin CA Verification**: SSH certificate + principal checked; mTLS required.
+- **Database Availability**: Control-plane requires Postgres reachability.
 
 ### Implementation Status (v2 - Complete)
-- **Database**: Migration `0007_registration_v2.sql` with enhanced schema, atomic functions, and constraints
-- **Configuration**: Rate limiting and response TTL settings added
-- **Registration Flow**: Complete rewrite with state machine, rate limiting, and enhanced logging
-- **Admin Endpoints**: `/auth/review` for approve/deny actions with atomic key rotation support
-- **Token Exchange**: Enhanced validation requiring `approved` key status
-- **Producer Example**: Updated to support optional `producer_id` for key rotation
-- **Testing**: Integration tests updated for new flow
-- **Documentation**: Protocol and registration docs updated with v2 enhancements
-- **Security**: Rate limiting, atomic operations, strict validation, enhanced logging implemented
+- Database: baseline migrations enforce uniqueness and ingestion constraints.
+- Configuration: TLS/mTLS and admin signing settings added.
+- Registration Flow: canonical signing, rate limiting, and enhanced logging.
+- Admin Endpoints: mTLS + detached signature; atomic key rotation.
+- Token Exchange: requires `approved` key; canonical signing enforced.
+- Producer Example: supports optional `producer_id` for key rotation.
+- Testing: integration tests to be updated to enforce canonicalization and distributed rate limits.
+- Observability: Security KPIs exported via Prometheus.
 
 ### Token Exchange (v2 - Enhanced)
 - Stream: `fdc:token:exchange` (fixed); responses on `fdc:token:resp:<producer_id>`.
 - Request may be authenticated by either:
-  - a valid **approved** `pubkey` and signature over `payload + "." + nonce`, or
+  - a valid **approved** `pubkey` and signature over `canonical(payload) + "." + nonce`, or
   - a still-valid short-lived token for renewal.
 - **Key Status Validation**: Only keys with status=`approved` can exchange for tokens.
 - Kernel issues a short-lived token when the fingerprint is approved and bound to the `producer_id` and returns `{ fingerprint, producer_id, token, exp }`.

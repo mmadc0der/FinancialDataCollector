@@ -76,16 +76,30 @@ redis:
 ### Security notes
 - Store passwords as environment variables or secret files; avoid committing secrets.
 - Prefer local loopback or VPN; add TLS in front of Redis/Postgres when exposed.
- - SSH identities:
-   - Kernel signing key: store under `ssh/kernel_sign` and reference via `auth.private_key_file`.
-   - Producer CA: generate once and store under `modules.d/ssh/producer_ca` (private) and `producer_ca.pub` (public). Put the public key into `auth.producer_ssh_ca`.
-   - Use `scripts/producer_ca.sh init-ca` to create the producer CA and `scripts/producer_ca.sh sign -k <producer>.pub -I <id> -n producer` to issue producer certs.
+- SSH identities:
+  - Kernel signing key: store under `ssh/kernel_sign` and reference via `auth.private_key_file`.
+  - Producer CA: generate once and store under `modules.d/ssh/producer_ca` (private) and `producer_ca.pub` (public). Put the public key into `auth.producer_ssh_ca`.
+  - Use `scripts/producer_ca.sh init-ca` to create the producer CA and `scripts/producer_ca.sh sign -k <producer>.pub -I <id> -n producer` to issue producer certs.
+
+### Admin mTLS and detached signature (required)
+- Generate an Admin X.509 CA and issue client certs for admins. Provide the Admin CA PEM as `server.tls.client_ca_file` and set `require_client_cert: true`.
+- Configure server TLS cert/key via `server.tls.cert_file` and `server.tls.key_file`.
+- Generate an OpenSSH Admin CA and issue SSH certificates for admin keys. Put the Admin SSH CA public key in `auth.admin_ssh_ca`.
+- Set `auth.admin_principal` to the SSH certificate principal (e.g., `fdc-admin`). Optionally set `auth.admin_allowed_subjects` to allowed X.509 subjects.
+- Each admin request must include:
+  - `X-Admin-Cert`: OpenSSH user certificate (public), signed by Admin SSH CA
+  - `X-Admin-Nonce`: random nonce (unique per request)
+  - `X-Admin-Signature`: base64 Ed25519 signature over `canonicalJSON(body)+"\n"+METHOD+"\n"+PATH+"\n"+nonce`
 
 ### Observability
 - Postgres: enable `log_min_duration_statement` for slow queries.
 - Redis: monitor memory usage.
 - Prometheus: scrape `/metrics` on the kernel (add job in Prometheus config).
 - Grafana: import the dashboard JSON in `docs/grafana/kernel.json`.
+- Security KPIs available:
+  - `kernel_admin_mtls_denied_total`, `kernel_admin_signature_invalid_total`, `kernel_admin_replay_total`
+  - `kernel_canonical_verify_fail_total`
+  - `kernel_rate_limit_allow_total{op=...}`, `kernel_rate_limit_deny_total{op=...}`
 
 ### Authentication setup
 - Generate Ed25519 keypair; encode keys as base64 (raw).
