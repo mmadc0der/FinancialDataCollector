@@ -57,7 +57,9 @@ func TestResponseStreams_TTL_Set_OnSuccess(t *testing.T) {
 
     // Start kernel with short TTL (e.g., 60s)
     port := itutil.FreePort(t)
-    cfg := kernelcfg.Config{Server: kernelcfg.ServerConfig{Listen: ":"+strconv.Itoa(port)}, Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""), Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerGroup: "kernel"}, Logging: kernelcfg.LoggingConfig{Level: "error"}, Auth: kernelcfg.AuthConfig{Issuer: "it", Audience: "it", KeyID: "k", ProducerSSHCA: caPubLine, AdminSSHCA: caPubLine, RegistrationResponseTTLSeconds: 60}}
+    // Include issuer keys so token exchange can produce a response
+    issuerPub, issuerPriv, _ := ed25519.GenerateKey(rand.Reader)
+    cfg := kernelcfg.Config{Server: kernelcfg.ServerConfig{Listen: ":"+strconv.Itoa(port)}, Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""), Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerGroup: "kernel"}, Logging: kernelcfg.LoggingConfig{Level: "error"}, Auth: kernelcfg.AuthConfig{Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: base64.RawStdEncoding.EncodeToString(issuerPriv), PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(issuerPub)}, ProducerSSHCA: caPubLine, AdminSSHCA: caPubLine, RegistrationResponseTTLSeconds: 60}}
     cancel := itutil.StartKernel(t, cfg)
     defer cancel()
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 10*time.Second)

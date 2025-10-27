@@ -47,11 +47,13 @@ func TestSubjectRegister_RateLimit_ReturnsError(t *testing.T) {
     cert := &ssh.Certificate{Key: prodPub, Serial: 1, CertType: ssh.UserCert, KeyId: "it", ValidAfter: uint64(time.Now().Add(-time.Minute).Unix()), ValidBefore: uint64(time.Now().Add(time.Hour).Unix())}
     _ = cert.SignCert(rand.Reader, caSigner)
     pubLine := string(ssh.MarshalAuthorizedKey(cert))
+    // compute fingerprint for approved key row
+    fp := func(in []byte) string { h := sha3.Sum512(in); return base64.StdEncoding.EncodeToString(h[:]) }([]byte(pubLine))
 
     // Approved producer
     var producerID string
     if err := pool.QueryRow(context.Background(), `INSERT INTO public.producers(producer_id,name) VALUES (gen_random_uuid(),'subj-rl') RETURNING producer_id`).Scan(&producerID); err != nil { t.Fatalf("producer: %v", err) }
-    _, _ = pool.Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ('subj-rl-fp',$1,'approved',$2) ON CONFLICT (fingerprint) DO UPDATE SET status='approved', producer_id=EXCLUDED.producer_id`, pubLine, producerID)
+    _, _ = pool.Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ($1,$2,'approved',$3) ON CONFLICT (fingerprint) DO UPDATE SET status='approved', producer_id=EXCLUDED.producer_id, pubkey=EXCLUDED.pubkey`, fp, pubLine, producerID)
 
     // Start kernel with strict rate limit (1 RPM, burst 1)
     port := itutil.FreePort(t)
