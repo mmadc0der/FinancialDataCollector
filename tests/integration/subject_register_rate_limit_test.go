@@ -3,24 +3,25 @@
 package it
 
 import (
-    "context"
-    "encoding/base64"
-    "encoding/json"
-    "os"
-    "strconv"
-    "testing"
-    "time"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"os"
+	"strconv"
+	"testing"
+	"time"
 
-    "crypto/ed25519"
-    "crypto/rand"
+	"crypto/ed25519"
+	"crypto/rand"
 
-    ssh "golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
 
-    "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/kernelcfg"
-    itutil "github.com/example/data-kernel/tests/itutil"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	itutil "github.com/example/data-kernel/tests/itutil"
 )
 
 // Subject register rate limiting: second immediate request returns error=rate_limited on subject:resp
