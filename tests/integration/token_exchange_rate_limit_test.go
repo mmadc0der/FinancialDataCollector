@@ -3,23 +3,24 @@
 package it
 
 import (
-    "context"
-    "encoding/base64"
-    "os"
-    "strconv"
-    "testing"
-    "time"
+	"context"
+	"encoding/base64"
+	"os"
+	"strconv"
+	"testing"
+	"time"
 
-    "crypto/ed25519"
-    "crypto/rand"
+	"crypto/ed25519"
+	"crypto/rand"
 
-    ssh "golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
 
-    "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/kernelcfg"
-    itutil "github.com/example/data-kernel/tests/itutil"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	itutil "github.com/example/data-kernel/tests/itutil"
 )
 
 // Token exchange rate limit: with 1 RPM burst 1, second immediate request should be silently dropped (no response)
