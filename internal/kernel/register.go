@@ -1,22 +1,23 @@
 package kernel
 
 import (
-	"bytes"
-	"context"
-	"crypto/ed25519"
-	"encoding/base64"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"time"
+    "bytes"
+    "context"
+    "crypto/ed25519"
+    "encoding/base64"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "time"
 
-	"sync"
+    "sync"
 
-	"github.com/example/data-kernel/internal/logging"
-	"github.com/example/data-kernel/internal/metrics"
-	"github.com/redis/go-redis/v9"
-	"golang.org/x/crypto/sha3"
-	ssh "golang.org/x/crypto/ssh"
+    "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/metrics"
+    "github.com/example/data-kernel/internal/protocol"
+    "github.com/redis/go-redis/v9"
+    "golang.org/x/crypto/sha3"
+    ssh "golang.org/x/crypto/ssh"
 )
 
 // In-memory rate limiter for better performance than Lua scripts
@@ -106,7 +107,7 @@ type regPayload struct {
 
 // Rate limiting check - returns true if request should be allowed
 // Uses Redis sliding window rate limiting per producer_id (fail-closed security)
-func (k *Kernel) checkRateLimit(ctx context.Context, producerID string) bool {
+func (k *Kernel) checkRateLimit(ctx context.Context, op, producerID string) bool {
     if k.rd == nil || k.rd.C() == nil {
         logging.Error("rate_limit_redis_unavailable")
         return false // deny if Redis unavailable (fail-closed)
@@ -118,21 +119,48 @@ func (k *Kernel) checkRateLimit(ctx context.Context, producerID string) bool {
         return true // no rate limiting configured
     }
 
-    // Use sliding window rate limiting with Redis
-    // Key format: fdc:rate:reg:<producer_id>
-    rateKey := prefixed(k.cfg.Redis.KeyPrefix, "rate:reg:"+producerID)
-
-    // Use in-memory rate limiter for better performance
-    allowed := globalRateLimiter.isAllowed(rateKey, rpm, burst)
-    if !allowed {
+    // Distributed token bucket via Redis Lua (atomic)
+    // Keys/Args: KEYS[1]=bucket key, ARGV[1]=capacity, ARGV[2]=refill_rate_tokens_per_sec
+    rateKey := prefixed(k.cfg.Redis.KeyPrefix, fmt.Sprintf("rl:%s:%s", op, producerID))
+    lua := `
+local key = KEYS[1]
+local capacity = tonumber(ARGV[1])
+local refill = tonumber(ARGV[2])
+local now = redis.call('TIME')
+local now_s = tonumber(now[1])
+local data = redis.call('HMGET', key, 'tokens', 'ts')
+local tokens = tonumber(data[1]) or capacity
+local ts = tonumber(data[2]) or now_s
+local delta = now_s - ts
+if delta > 0 then
+  tokens = math.min(capacity, tokens + delta * refill)
+end
+local allowed = 0
+if tokens >= 1 then
+  tokens = tokens - 1
+  allowed = 1
+end
+redis.call('HMSET', key, 'tokens', tokens, 'ts', now_s)
+redis.call('EXPIRE', key, 120)
+return allowed
+`
+    refill := float64(rpm) / 60.0
+    // Eval returns int64 1/0
+    res, err := k.rd.C().Eval(ctx, lua, []string{rateKey}, burst, refill).Int()
+    if err != nil {
+        logging.Warn("rate_limit_eval_error", logging.Err(err))
+        return false
+    }
+    if res == 0 {
         logging.Info("rate_limited",
+            logging.F("op", op),
             logging.F("producer_id", producerID),
             logging.F("rpm", rpm),
             logging.F("burst", burst))
         metrics.RegistrationRateLimited.Inc()
+        return false
     }
-
-    return allowed
+    return true
 }
 
 
@@ -229,8 +257,8 @@ func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool 
     
     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
-
-            msg := []byte(payloadStr + "." + nonce)
+            canon := string(protocol.CanonicalizeJSON([]byte(payloadStr)))
+            msg := []byte(canon + "." + nonce)
             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
             if decErr != nil {
                 sigBytes, _ = base64.StdEncoding.DecodeString(sigB64)
@@ -371,7 +399,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     }
 
     // Rate limiting check per producer_id/fingerprint
-    if !k.checkRateLimit(ctx, rateLimitID) {
+    if !k.checkRateLimit(ctx, "reg", rateLimitID) {
         // respond to client on same per-nonce response stream for consistency
         k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "rate_limited"})
         _ = k.rd.AckStream(ctx, stream, m.ID)

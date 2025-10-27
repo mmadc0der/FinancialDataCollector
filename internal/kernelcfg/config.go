@@ -22,6 +22,14 @@ type ServerConfig struct {
 	MaxMessageBytes int64  `yaml:"max_message_bytes"`
 	ReadTimeoutMs   int    `yaml:"read_timeout_ms"`
     IngestQueueSize int    `yaml:"ingest_queue_size"`
+    TLS             TLSConfig `yaml:"tls"`
+}
+
+type TLSConfig struct {
+    CertFile        string `yaml:"cert_file"`
+    KeyFile         string `yaml:"key_file"`
+    ClientCAFile    string `yaml:"client_ca_file"`
+    RequireClientCert bool `yaml:"require_client_cert"`
 }
 
 // sinks removed (file sink was deprecated)
@@ -110,6 +118,10 @@ type AuthConfig struct {
     KeyStatusCacheTTLSeconds int `yaml:"key_status_cache_ttl_seconds"`
     // Token cache settings
     TokenCacheTTLSeconds int `yaml:"token_cache_ttl_seconds"`
+    // Admin request detached signature requirements
+    AdminPrincipal string   `yaml:"admin_principal"`
+    AdminAllowedSubjects []string `yaml:"admin_allowed_subjects"`
+    AdminSignRequired bool `yaml:"admin_sign_required"`
 }
 
 type PerformanceConfig struct {
@@ -194,6 +206,7 @@ func Load(path string) (*Config, error) {
     if cfg.Auth.RegistrationRateLimitBurst <= 0 { cfg.Auth.RegistrationRateLimitBurst = 3 }
     if cfg.Auth.KeyStatusCacheTTLSeconds <= 0 { cfg.Auth.KeyStatusCacheTTLSeconds = 300 }
     if cfg.Auth.TokenCacheTTLSeconds <= 0 { cfg.Auth.TokenCacheTTLSeconds = 3600 }
+    if !cfg.Auth.AdminSignRequired { cfg.Auth.AdminSignRequired = true }
 
     // Defaults for performance tuning
     if cfg.Performance.SchemaCacheTTLSeconds <= 0 { cfg.Performance.SchemaCacheTTLSeconds = 3600 }
@@ -210,6 +223,13 @@ func Load(path string) (*Config, error) {
     if cfg.Auth.Issuer == "" || cfg.Auth.Audience == "" || cfg.Auth.KeyID == "" { return nil, fmt.Errorf("auth.issuer, auth.audience, and auth.key_id are required") }
     if cfg.Auth.ProducerSSHCA == "" { return nil, fmt.Errorf("auth.producer_ssh_ca is required") }
     if cfg.Auth.AdminSSHCA == "" { return nil, fmt.Errorf("auth.admin_ssh_ca is required") }
+    // Enforce TLS with client certs for admin endpoints
+    if !cfg.Server.TLS.RequireClientCert {
+        cfg.Server.TLS.RequireClientCert = true
+    }
+    if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" || cfg.Server.TLS.ClientCAFile == "" {
+        return nil, fmt.Errorf("server.tls.cert_file, server.tls.key_file, and server.tls.client_ca_file are required for admin mTLS")
+    }
 	return &cfg, nil
 }
 

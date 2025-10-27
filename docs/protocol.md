@@ -37,6 +37,7 @@
 
 ### Producer registration
 - Stream: `fdc:register` (fixed) with fields `{ pubkey, payload, nonce, sig }`.
+- Sign over `canonical(payload)+"."+nonce` using the private key corresponding to `pubkey`.
 - **New Registration Flow (v2)**:
   - **Case 1 (New Producer)**: Unknown fingerprint, no `producer_id` in payload → creates new producer, key status=`pending`
   - **Case 2 (Key Rotation)**: Unknown fingerprint, WITH `producer_id` in payload → validates existing producer, key status=`pending`
@@ -44,7 +45,7 @@
   - **Case 4 (Known Pending)**: Known fingerprint, status=`pending` → silent (no response)
   - **Case 5 (Known Denied)**: Known fingerprint, status=`revoked`/`superseded` → returns denial
 - Response: `fdc:register:resp:<nonce>` with `{ fingerprint, producer_id, status, reason? }` (per-request ephemeral).
-- **Rate Limiting**: Kernel-side enforcement (default 10 RPM), silent drop on limit exceeded.
+- **Rate Limiting**: Kernel enforces distributed rate limiting per operation and identity.
 - **Anti-replay**: nonces cached with TTL; duplicate nonces rejected; DB uniqueness enforced.
 - **Admin Review**: Keys require manual approval via `POST /auth/review` before becoming `approved`.
 
@@ -52,14 +53,18 @@
 - Stream: `fdc:token:exchange` (fixed) with fields `{ pubkey?, token?, payload, nonce, sig? }`.
 - If using `pubkey`: the signature must be made with an OpenSSH certificate signed by `producer_ssh_ca`, and the key must be **approved** and bound to `producer_id`.
 - If using `token`: verify claims and allow short-lived renewal.
+- Sign over `canonical(payload)+"."+nonce`.
 - **Key Status Validation**: Only keys with status=`approved` can exchange for tokens.
 - Response: `fdc:token:resp:<producer_id>` with `{ fingerprint, producer_id, token, exp }`.
 
-### Auth Endpoints
-- `GET /auth`: view pending registrations
-- `POST /auth/review`: approve/deny producer registrations
-- `POST /auth/revoke`: revoke issued tokens
-All admin requests must include `X-SSH-Cert` carrying an OpenSSH certificate signed by `admin_ssh_ca` and `X-SSH-Principal`.
+### Admin Endpoints (mTLS + detached signature)
+- `GET /auth`, `POST /auth/review`, `POST /auth/revoke`.
+- Connection MUST use mTLS; client cert signed by the configured Admin X.509 CA, optionally restricted by allowed CN/SANs.
+- Each request MUST include detached signature headers:
+  - `X-Admin-Cert`: OpenSSH certificate (public) signed by `admin_ssh_ca`
+  - `X-Admin-Nonce`: unique string; replay-protected by Redis SETNX with 5m TTL
+  - `X-Admin-Signature`: base64 Ed25519 over `canonicalJSON(body)+"\n"+METHOD+"\n"+PATH+"\n"+nonce`
+- The SSH certificate principal must match configured `admin_principal` (or be in allowlist). No proxy header trust.
 
 ### Deregistration
 - Stream: `fdc:register` with `{ action: "deregister", pubkey, payload, nonce, sig }`.

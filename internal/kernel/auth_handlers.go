@@ -3,13 +3,17 @@ package kernel
 import (
     "bytes"
     "context"
+    "crypto/ed25519"
+    "encoding/base64"
     "encoding/json"
     "io"
+    "io/ioutil"
     "net/http"
     "strings"
     "time"
 
     "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/protocol"
     ssh "golang.org/x/crypto/ssh"
     "github.com/redis/go-redis/v9"
 )
@@ -737,7 +741,7 @@ func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
-	if k.au == nil || r.Method != http.MethodPost || !k.isAdmin(r) {
+    if k.au == nil || r.Method != http.MethodPost || !k.isAdmin(r) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -754,25 +758,82 @@ func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// isAdmin verifies admin via OpenSSH CA cert headers
+// isAdmin enforces strict mTLS and detached signature over the request
+// Headers required: X-Admin-Cert (OpenSSH cert), X-Admin-Nonce, X-Admin-Signature (base64)
 func (k *Kernel) isAdmin(r *http.Request) bool {
-	if k.cfg != nil && k.cfg.Auth.AdminSSHCA != "" {
-		certHeader := r.Header.Get("X-SSH-Cert")
-		principal := r.Header.Get("X-SSH-Principal")
-		if certHeader != "" && principal != "" {
-			caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.AdminSSHCA))
-			if err == nil && caPub != nil {
-				certPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(certHeader))
-				if err == nil {
-					if cert, ok := certPub.(*ssh.Certificate); ok {
-						checker := ssh.CertChecker{ IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), caPub.Marshal()) } }
-						if err := checker.CheckCert(principal, cert); err == nil { return true }
-						logging.Warn("admin_cert_check_failed", logging.F("principal", principal))
-					}
-				}
-			}
-		}
-	}
-	return false
+    if k.cfg == nil || k.cfg.Auth.AdminSSHCA == "" || !k.cfg.Auth.AdminSignRequired { return false }
+    // Require mTLS at connection level
+    if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 { return false }
+    // Optional CN/SAN allowlist
+    if len(k.cfg.Auth.AdminAllowedSubjects) > 0 {
+        subjOK := false
+        pc := r.TLS.PeerCertificates[0]
+        cn := pc.Subject.CommonName
+        for _, s := range k.cfg.Auth.AdminAllowedSubjects { if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(cn)) { subjOK = true; break } }
+        if !subjOK {
+            for _, name := range pc.DNSNames { for _, s := range k.cfg.Auth.AdminAllowedSubjects { if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(name)) { subjOK = true; break } } }
+        }
+        if !subjOK { return false }
+    }
+
+    // Detached signature requirements
+    adminCert := r.Header.Get("X-Admin-Cert")
+    nonce := r.Header.Get("X-Admin-Nonce")
+    sigB64 := r.Header.Get("X-Admin-Signature")
+    if adminCert == "" || nonce == "" || sigB64 == "" { return false }
+
+    // Prevent replay: nonce must be unique for a short window
+    if k.rd != nil && k.rd.C() != nil {
+        key := prefixed(k.cfg.Redis.KeyPrefix, "admin:nonce:"+nonce)
+        ok, err := k.rd.C().SetNX(r.Context(), key, 1, 5*time.Minute).Result()
+        if err != nil { logging.Warn("admin_nonce_guard_error", logging.Err(err)); return false }
+        if !ok { logging.Warn("admin_nonce_replay", logging.F("nonce", nonce)); return false }
+    }
+
+    // Verify SSH certificate and principal against AdminSSHCA and configured principal allowlist
+    caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.AdminSSHCA))
+    if err != nil || caPub == nil { return false }
+    certPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(adminCert))
+    if err != nil { return false }
+    cert, ok := certPub.(*ssh.Certificate)
+    if !ok { return false }
+    checker := ssh.CertChecker{ IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), caPub.Marshal()) } }
+    // Admin principal must match configured principal if provided
+    principalOK := false
+    if p := strings.TrimSpace(k.cfg.Auth.AdminPrincipal); p != "" {
+        for _, vp := range cert.ValidPrincipals { if vp == p { principalOK = true; break } }
+    } else {
+        principalOK = len(cert.ValidPrincipals) > 0
+    }
+    if !principalOK { logging.Warn("admin_principal_mismatch"); return false }
+    if err := checker.CheckCert(cert.ValidPrincipals[0], cert); err != nil { logging.Warn("admin_cert_check_failed", logging.Err(err)); return false }
+
+    // Build canonical string: canonicalJSON(body)+"\n"+method+"\n"+path+"\n"+nonce
+    var bodyBytes []byte
+    if r.Body != nil {
+        bodyBytes, _ = ioutil.ReadAll(r.Body)
+        r.Body.Close()
+        r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+    }
+    if len(bodyBytes) == 0 { bodyBytes = []byte("{}") }
+    canon := protocol.CanonicalizeJSON(bodyBytes)
+    signing := append(canon, '\n')
+    signing = append(signing, []byte(strings.ToUpper(r.Method))...)
+    signing = append(signing, '\n')
+    signing = append(signing, []byte(r.URL.Path)...)
+    signing = append(signing, '\n')
+    signing = append(signing, []byte(nonce)...)
+
+    // Verify signature with ed25519 key from SSH certificate
+    ok2 := false
+    if cp, ok := cert.Key.(ssh.CryptoPublicKey); ok {
+        if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
+            sig, err := base64.RawStdEncoding.DecodeString(sigB64)
+            if err != nil { sig, _ = base64.StdEncoding.DecodeString(sigB64) }
+            if len(sig) == ed25519.SignatureSize && ed25519.Verify(edpk, signing, sig) { ok2 = true }
+        }
+    }
+    if !ok2 { logging.Warn("admin_signature_invalid"); return false }
+    return true
 }
 

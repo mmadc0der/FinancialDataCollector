@@ -3,7 +3,12 @@ server:
   max_message_bytes: 1048576
   read_timeout_ms: 15000
   ingest_queue_size: 8192
-  
+  tls:
+    cert_file: "/etc/fdc/tls/server.crt"
+    key_file: "/etc/fdc/tls/server.key"
+    client_ca_file: "/etc/fdc/tls/admin_ca.pem"
+    require_client_cert: true
+
 postgres:
   dsn: "postgres://data_kernel:CHANGE_ME_STRONG@127.0.0.1:5432/data_kernel_db?sslmode=disable"
   max_conns: 32              # increased for higher concurrency
@@ -57,8 +62,11 @@ auth:
   private_key: ""
   private_key_file: ""
   private_key_passphrase_file: ""
-  admin_ssh_ca: ""
-  producer_ssh_ca: ""
+  admin_ssh_ca: "/etc/fdc/ssh/admin_ca.pub"   # OpenSSH CA for admin detached signatures
+  producer_ssh_ca: "/etc/fdc/ssh/producer_ca.pub"
+  admin_principal: "fdc-admin"                 # must be present in SSH cert principals
+  admin_allowed_subjects: ["fdc-admin"]        # optional X.509 CN/SAN allowlist for mTLS
+  admin_sign_required: true
   cache_ttl_seconds: 300
   skew_seconds: 60
   registration_response_ttl_seconds: 300  # TTL for registration response streams (5 minutes)
@@ -83,6 +91,4 @@ performance:
   # Spill mechanism settings
   spill_batch_size: 1000
   spill_max_file_size_mb: 100
-  # Rate limiting settings
-  rate_limit_lua_enabled: false  # use application-level rate limiting for better performance
 

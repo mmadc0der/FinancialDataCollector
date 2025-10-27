@@ -3,6 +3,9 @@ package kernel
 import (
 	"fmt"
 	"net/http"
+    "crypto/tls"
+    "crypto/x509"
+    "os"
 
 	"bytes"
 	"crypto/ed25519"
@@ -19,7 +22,8 @@ import (
 	"github.com/example/data-kernel/internal/data"
 	"github.com/example/data-kernel/internal/kernelcfg"
 	"github.com/example/data-kernel/internal/logging"
-	"github.com/example/data-kernel/internal/metrics"
+    "github.com/example/data-kernel/internal/metrics"
+    "github.com/example/data-kernel/internal/protocol"
 	"github.com/redis/go-redis/v9"
 	ssh "golang.org/x/crypto/ssh"
 )
@@ -88,7 +92,17 @@ func (k *Kernel) Start(ctx context.Context) error {
     mux.HandleFunc("/auth", k.handleListPending)
     mux.HandleFunc("/auth/review", k.handleReview)
     mux.HandleFunc("/auth/revoke", k.handleRevokeToken)
-    server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux}
+    // Configure strict mTLS for admin server
+    tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+    if k.cfg.Server.TLS.CertFile != "" && k.cfg.Server.TLS.KeyFile != "" && k.cfg.Server.TLS.ClientCAFile != "" {
+        caBytes, err := os.ReadFile(k.cfg.Server.TLS.ClientCAFile)
+        if err != nil { return fmt.Errorf("read client ca: %w", err) }
+        caPool := x509.NewCertPool()
+        if !caPool.AppendCertsFromPEM(caBytes) { return fmt.Errorf("bad client ca") }
+        tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+        tlsCfg.ClientCAs = caPool
+    }
+    server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux, TLSConfig: tlsCfg}
 
     // Auth verifier (mandatory)
     v, err := auth.NewVerifier(k.cfg.Auth, k.pg, k.rd)
@@ -133,7 +147,13 @@ func (k *Kernel) Start(ctx context.Context) error {
         if k.pg != nil { k.pg.Close() }
     }()
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+    if k.cfg.Server.TLS.CertFile != "" && k.cfg.Server.TLS.KeyFile != "" {
+        if err := server.ListenAndServeTLS(k.cfg.Server.TLS.CertFile, k.cfg.Server.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+            return err
+        }
+        return nil
+    }
+    if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
@@ -340,7 +360,8 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     okSig := false
                     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                         if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
-                            msg := []byte(payloadStr + "." + nonce)
+                            canon := string(protocol.CanonicalizeJSON([]byte(payloadStr)))
+                            msg := []byte(canon + "." + nonce)
                             sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                             if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
                             if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
@@ -384,7 +405,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                             _ = k.rd.C().Expire(ctx, setKey, 10*time.Minute).Err()
                         }
                     }
-                    if !k.checkRateLimit(ctx, producerID) {
+                    if !k.checkRateLimit(ctx, "subject", producerID) {
                         // best-effort notify client
                         k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "rate_limited"})
                         _ = k.rd.Ack(ctx, m.ID)
@@ -548,7 +569,8 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                     if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
                         // Verify exact bytes as sent by client (no re-canonicalization)
-                        msg := []byte(payloadStr + "." + nonce)
+                            canon := string(protocol.CanonicalizeJSON([]byte(payloadStr)))
+                            msg := []byte(canon + "." + nonce)
                         sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                         if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
                         if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
@@ -583,7 +605,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 }
 
                 // Rate limiting check for token exchange
-                if !k.checkRateLimit(ctx, *producerID) {
+                if !k.checkRateLimit(ctx, "token", *producerID) {
                     _ = k.rd.Ack(ctx, m.ID)
                     continue // silent drop for rate limited requests
                 }
@@ -644,7 +666,8 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
                     if edpk, ok := cp.CryptoPublicKey().(ed25519.PublicKey); ok && len(edpk) == ed25519.PublicKeySize {
                         // Verify exact bytes as sent by client (no re-canonicalization)
-                        msg := []byte(payloadStr + "." + nonce)
+                        canon := string(protocol.CanonicalizeJSON([]byte(payloadStr)))
+                        msg := []byte(canon + "." + nonce)
                         sigBytes, decErr := base64.RawStdEncoding.DecodeString(sigB64)
                         if decErr != nil { sigBytes, _ = base64.StdEncoding.DecodeString(sigB64) }
                         if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
@@ -666,7 +689,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
                 if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" { _ = k.rd.Ack(ctx, m.ID); continue }
                 producerID := *pidPtr
-                if !k.checkRateLimit(ctx, producerID) { _ = k.rd.Ack(ctx, m.ID); continue }
+                if !k.checkRateLimit(ctx, "schema", producerID) { _ = k.rd.Ack(ctx, m.ID); continue }
 
                 // Parse payload
                 var req struct{
