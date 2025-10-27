@@ -13,6 +13,7 @@ import (
     "time"
 
     "github.com/example/data-kernel/internal/logging"
+    "github.com/example/data-kernel/internal/metrics"
     "github.com/example/data-kernel/internal/protocol"
     ssh "golang.org/x/crypto/ssh"
     "github.com/redis/go-redis/v9"
