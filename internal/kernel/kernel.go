@@ -369,6 +369,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                     if !okSig {
                         logging.Warn("subject_register_bad_signature", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
+                        metrics.CanonicalVerifyFail.Inc()
                         // best-effort send error response if producer is known
                         if status, pidPtr, _ := k.pg.GetKeyStatus(ctx, fp); pidPtr != nil && *pidPtr != "" {
                             _ = status // status not used for this error
@@ -576,7 +577,7 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                         if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
                     }
                 }
-                if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
+                if !okSig { metrics.CanonicalVerifyFail.Inc(); _ = k.rd.Ack(ctx, m.ID); continue }
                 status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
                 if err != nil {
                     logging.Error("token_exchange_status_check_error", logging.F("fingerprint", fp), logging.Err(err))

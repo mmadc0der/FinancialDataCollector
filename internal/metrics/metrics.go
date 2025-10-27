@@ -27,10 +27,27 @@ var (
     // Registration rate limiting metrics
     RegistrationRateLimited = prom.NewCounter(prom.CounterOpts{Name: "kernel_registration_rate_limited_total", Help: "Registration requests rate limited"})
     RegistrationRateLimitErrors = prom.NewCounter(prom.CounterOpts{Name: "kernel_registration_rate_limit_errors_total", Help: "Errors in rate limiting checks"})
+    // Security metrics
+    AdminMTLSDenied = prom.NewCounter(prom.CounterOpts{Name: "kernel_admin_mtls_denied_total", Help: "Admin requests denied due to missing/invalid mTLS"})
+    AdminSigInvalid = prom.NewCounter(prom.CounterOpts{Name: "kernel_admin_signature_invalid_total", Help: "Admin requests with invalid detached signature"})
+    AdminReplay = prom.NewCounter(prom.CounterOpts{Name: "kernel_admin_replay_total", Help: "Admin requests rejected due to nonce replay"})
+    CanonicalVerifyFail = prom.NewCounter(prom.CounterOpts{Name: "kernel_canonical_verify_fail_total", Help: "Producer signature verification failures after canonicalization"})
+    RateLimitAllow = prom.NewCounterVec(prom.CounterOpts{Name: "kernel_rate_limit_allow_total", Help: "Allowed ops by distributed rate limiter"}, []string{"op"})
+    RateLimitDeny = prom.NewCounterVec(prom.CounterOpts{Name: "kernel_rate_limit_deny_total", Help: "Denied ops by distributed rate limiter"}, []string{"op"})
 )
 
 func init() {
-    prom.MustRegister(IngestDropped, RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration, PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal, SpillWriteTotal, SpillBytesTotal, SpillReplayTotal, RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge, AuthDeniedTotal, RegistrationRateLimited, RegistrationRateLimitErrors)
+    prom.MustRegister(
+        IngestDropped,
+        RedisReadTotal, RedisAckTotal, RedisDLQTotal, RedisBatchDuration,
+        PGBatchSize, PGBatchDuration, PGPersistTotal, PGErrorsTotal,
+        SpillWriteTotal, SpillBytesTotal, SpillReplayTotal,
+        RedisPendingGauge, RedisStreamLenGauge, SpillFilesGauge,
+        AuthDeniedTotal,
+        RegistrationRateLimited, RegistrationRateLimitErrors,
+        AdminMTLSDenied, AdminSigInvalid, AdminReplay, CanonicalVerifyFail,
+        RateLimitAllow, RateLimitDeny,
+    )
 }
 
 func Handler() http.Handler { return promhttp.Handler() }

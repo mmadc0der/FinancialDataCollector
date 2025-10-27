@@ -763,7 +763,7 @@ func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 func (k *Kernel) isAdmin(r *http.Request) bool {
     if k.cfg == nil || k.cfg.Auth.AdminSSHCA == "" || !k.cfg.Auth.AdminSignRequired { return false }
     // Require mTLS at connection level
-    if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 { return false }
+    if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 { metrics.AdminMTLSDenied.Inc(); return false }
     // Optional CN/SAN allowlist
     if len(k.cfg.Auth.AdminAllowedSubjects) > 0 {
         subjOK := false
@@ -787,7 +787,7 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
         key := prefixed(k.cfg.Redis.KeyPrefix, "admin:nonce:"+nonce)
         ok, err := k.rd.C().SetNX(r.Context(), key, 1, 5*time.Minute).Result()
         if err != nil { logging.Warn("admin_nonce_guard_error", logging.Err(err)); return false }
-        if !ok { logging.Warn("admin_nonce_replay", logging.F("nonce", nonce)); return false }
+        if !ok { logging.Warn("admin_nonce_replay", logging.F("nonce", nonce)); metrics.AdminReplay.Inc(); return false }
     }
 
     // Verify SSH certificate and principal against AdminSSHCA and configured principal allowlist
@@ -833,7 +833,7 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
             if len(sig) == ed25519.SignatureSize && ed25519.Verify(edpk, signing, sig) { ok2 = true }
         }
     }
-    if !ok2 { logging.Warn("admin_signature_invalid"); return false }
+    if !ok2 { logging.Warn("admin_signature_invalid"); metrics.AdminSigInvalid.Inc(); return false }
     return true
 }
 

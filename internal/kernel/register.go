@@ -158,8 +158,10 @@ return allowed
             logging.F("rpm", rpm),
             logging.F("burst", burst))
         metrics.RegistrationRateLimited.Inc()
+        metrics.RateLimitDeny.WithLabelValues(op).Inc()
         return false
     }
+    metrics.RateLimitAllow.WithLabelValues(op).Inc()
     return true
 }
 
