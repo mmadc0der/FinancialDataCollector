@@ -36,6 +36,7 @@ func TestRegistration_InvalidSignature_AuditAndResponse(t *testing.T) {
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     itutil.WaitForMigrations(t, pg, 10*time.Second)
+    pool := pg.Pool()
 
     // CA and producer certificate
     _, caPriv, _ := ed25519.GenerateKey(rand.Reader)
