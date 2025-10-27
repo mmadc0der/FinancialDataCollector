@@ -53,23 +53,23 @@ func TestRateLimit(t *testing.T) {
     fingerprint := "test-fingerprint-123"
     
     // First request should be allowed
-    if !k.checkRateLimit(ctx, fingerprint) {
+    if !k.checkRateLimit(ctx, "reg", fingerprint) {
         t.Error("First request should be allowed")
     }
     
     // Second request should be allowed (within burst)
-    if !k.checkRateLimit(ctx, fingerprint) {
+    if !k.checkRateLimit(ctx, "reg", fingerprint) {
         t.Error("Second request should be allowed (burst)")
     }
     
     // Third request should be rate limited
-    if k.checkRateLimit(ctx, fingerprint) {
+    if k.checkRateLimit(ctx, "reg", fingerprint) {
         t.Error("Third request should be rate limited")
     }
     
     // Wait a bit and try again - should still be rate limited
     time.Sleep(100 * time.Millisecond)
-    if k.checkRateLimit(ctx, fingerprint) {
+    if k.checkRateLimit(ctx, "reg", fingerprint) {
         t.Error("Fourth request should still be rate limited")
     }
 }
@@ -108,17 +108,17 @@ func TestRateLimit_ExactBoundary(t *testing.T) {
     fp := "boundary-test"
     
     // First request (within limit)
-    if !k.checkRateLimit(ctx, fp) {
+    if !k.checkRateLimit(ctx, "reg", fp) {
         t.Error("First request should be allowed (within limit=1)")
     }
     
     // Second request (at burst boundary)
-    if !k.checkRateLimit(ctx, fp) {
+    if !k.checkRateLimit(ctx, "reg", fp) {
         t.Error("Second request should be allowed (burst=1)")
     }
     
     // Third request (over limit+burst)
-    if k.checkRateLimit(ctx, fp) {
+    if k.checkRateLimit(ctx, "reg", fp) {
         t.Error("Third request should be rate limited (exceeded limit+burst)")
     }
 }
@@ -140,7 +140,7 @@ func TestRateLimit_RedisUnavailable(t *testing.T) {
     }
     
     // Should deny (fail-closed) when Redis unavailable
-    if k.checkRateLimit(ctx, "test-fp") {
+    if k.checkRateLimit(ctx, "reg", "test-fp") {
         t.Error("Should deny (fail-closed) when Redis unavailable")
     }
 }
