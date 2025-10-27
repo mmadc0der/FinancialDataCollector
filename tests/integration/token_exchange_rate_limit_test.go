@@ -49,15 +49,15 @@ func TestTokenExchange_RateLimit_SilentDrop(t *testing.T) {
     cert := &ssh.Certificate{Key: prodPub, Serial: 1, CertType: ssh.UserCert, KeyId: "it", ValidAfter: uint64(time.Now().Add(-time.Minute).Unix()), ValidBefore: uint64(time.Now().Add(time.Hour).Unix())}
     if err := cert.SignCert(rand.Reader, caSigner); err != nil { t.Fatalf("sign cert: %v", err) }
     pubLine := string(ssh.MarshalAuthorizedKey(cert))
+    // Compute fingerprint same as kernel
+    fp := func(in []byte) string { h := sha3.Sum512(in); return base64.StdEncoding.EncodeToString(h[:]) }([]byte(pubLine))
 
     var producerID string
     if err := pool.QueryRow(context.Background(), `INSERT INTO public.producers(producer_id,name) VALUES (gen_random_uuid(),'tok-rl') RETURNING producer_id`).Scan(&producerID); err != nil { t.Fatalf("producer: %v", err) }
-    if _, err := pool.Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ((SELECT fingerprint FROM public.producer_keys LIMIT 1) ,$1,'approved',$2) ON CONFLICT DO NOTHING`, pubLine, producerID); err != nil {
-        // fallback: compute fingerprint via kernel logic not accessible here; simply ensure there is an approved key bound
-        _ = err
+    // Bind the computed fingerprint as approved
+    if _, err := pool.Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ($1,$2,'approved',$3) ON CONFLICT (fingerprint) DO UPDATE SET status='approved', producer_id=EXCLUDED.producer_id, pubkey=EXCLUDED.pubkey`, fp, pubLine, producerID); err != nil {
+        t.Fatalf("upsert key: %v", err)
     }
-    // Simpler: ensure at least one approved key exists by inserting a minimal row with bound producer
-    _, _ = pool.Exec(context.Background(), `INSERT INTO public.producer_keys(fingerprint,pubkey,status,producer_id) VALUES ('tok-rl-fp',$1,'approved',$2) ON CONFLICT (fingerprint) DO UPDATE SET status='approved', producer_id=EXCLUDED.producer_id`, pubLine, producerID)
 
     // Start kernel with strict low rate limits for registration/token
     port := itutil.FreePort(t)
