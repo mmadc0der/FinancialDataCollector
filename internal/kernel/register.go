@@ -422,7 +422,9 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
         if !certValid {
             logging.Info("registration_cert_invalid", logging.F("fingerprint", fp))
-            k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed", "")
+            // Ensure producer_keys entry exists for FK constraint
+            _ = k.pg.UpsertProducerKey(ctx, fp, pubkey)
+            _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed", "")
             k.sendRegistrationResponse(ctx, nonce, map[string]any{
                 "fingerprint": fp,
                 "status": "invalid_cert",
