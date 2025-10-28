@@ -160,9 +160,14 @@ func TestRegistration_InvalidCertificate_AuditAndResponse(t *testing.T) {
     m := itutil.WaitReadStream(t, r, respStream, 10*time.Second)
     if st, _ := m.Values["status"].(string); st != "invalid_cert" { t.Fatalf("expected status=invalid_cert, got %v", m.Values) }
 
-    // Audit row with status=invalid_cert
+    // Audit row with status=invalid_cert - wait for async processing
     var cnt int
-    _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.producer_registrations WHERE fingerprint=$1 AND nonce=$2 AND status='invalid_cert'`, fp, nonce).Scan(&cnt)
+    endWait := time.Now().Add(5 * time.Second)
+    for time.Now().Before(endWait) {
+        _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.producer_registrations WHERE fingerprint=$1 AND nonce=$2 AND status='invalid_cert'`, fp, nonce).Scan(&cnt)
+        if cnt >= 1 { break }
+        time.Sleep(100 * time.Millisecond)
+    }
     if cnt < 1 { t.Fatalf("expected invalid_cert audit row") }
 
     // Nonce guard should exist with TTL

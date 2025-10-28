@@ -238,7 +238,7 @@ func (k *Kernel) verifyCertificate(pubkey string) (bool, string, time.Time, time
     return true, cert.KeyId, va, vb
 }
 
-// Verify signature over payload + nonce
+// Verify signature over payload + nonce (certificate validity already verified)
 func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool {
     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
     if err != nil {
@@ -246,15 +246,15 @@ func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool 
         return false
     }
     
-    // If certificate required, unwrap cert
-    // Always require CA-signed certificate; unwrap to raw key for signature verify
-    if k.cfg.Auth.ProducerSSHCA == "" { logging.Info("registration_cert_missing_ca"); return false }
-    caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
-    if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
-        parsedPub = cert.Key
-    } else {
-        logging.Info("registration_cert_invalid")
-        return false
+    // Extract the raw key from certificate (certificate validity already verified)
+    if k.cfg.Auth.ProducerSSHCA != "" {
+        caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+        if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
+            parsedPub = cert.Key
+        } else {
+            logging.Info("registration_cert_invalid")
+            return false
+        }
     }
     
     if cp, ok := parsedPub.(ssh.CryptoPublicKey); ok {
@@ -417,20 +417,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         return
     }
     
-    // Verify signature
-    if !k.verifySignature(pubkey, payloadStr, nonce, sigB64) {
-        logging.Info("registration_signature_invalid", logging.F("fingerprint", fp))
-        k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "invalid_sig", "signature_verification_failed", "")
-        k.sendRegistrationResponse(ctx, nonce, map[string]any{
-            "fingerprint": fp,
-            "status": "invalid_sig",
-            "reason": "signature_verification_failed",
-        })
-        _ = k.rd.AckStream(ctx, stream, m.ID)
-        return
-    }
-    
-    // Verify certificate if required
+    // Verify certificate first (before signature verification)
     if true {
         certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
         if !certValid {
@@ -449,6 +436,19 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
             logging.F("cert_key_id", keyID),
             logging.F("valid_after", validAfter),
             logging.F("valid_before", validBefore))
+    }
+    
+    // Verify signature (after certificate verification)
+    if !k.verifySignature(pubkey, payloadStr, nonce, sigB64) {
+        logging.Info("registration_signature_invalid", logging.F("fingerprint", fp))
+        k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "invalid_sig", "signature_verification_failed", "")
+        k.sendRegistrationResponse(ctx, nonce, map[string]any{
+            "fingerprint": fp,
+            "status": "invalid_sig",
+            "reason": "signature_verification_failed",
+        })
+        _ = k.rd.AckStream(ctx, stream, m.ID)
+        return
     }
 
     // Atomically create producer and bind fingerprint for first-time registration
