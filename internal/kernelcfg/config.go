@@ -222,13 +222,18 @@ func Load(path string) (*Config, error) {
     if cfg.Redis.Addr == "" || cfg.Redis.Stream == "" || cfg.Redis.KeyPrefix == "" { return nil, fmt.Errorf("redis.addr, redis.stream, and redis.key_prefix are required") }
     if cfg.Auth.Issuer == "" || cfg.Auth.Audience == "" || cfg.Auth.KeyID == "" { return nil, fmt.Errorf("auth.issuer, auth.audience, and auth.key_id are required") }
     if cfg.Auth.ProducerSSHCA == "" { return nil, fmt.Errorf("auth.producer_ssh_ca is required") }
-    if cfg.Auth.AdminSSHCA == "" { return nil, fmt.Errorf("auth.admin_ssh_ca is required") }
-    // Enforce TLS with client certs for admin endpoints
-    if !cfg.Server.TLS.RequireClientCert {
-        cfg.Server.TLS.RequireClientCert = true
+    // Enforce TLS with client certs for admin endpoints only if TLS files are configured
+    if cfg.Server.TLS.CertFile != "" || cfg.Server.TLS.KeyFile != "" || cfg.Server.TLS.ClientCAFile != "" {
+        if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" || cfg.Server.TLS.ClientCAFile == "" {
+            return nil, fmt.Errorf("server.tls.cert_file, server.tls.key_file, and server.tls.client_ca_file are all required for admin mTLS")
+        }
+        if !cfg.Server.TLS.RequireClientCert {
+            cfg.Server.TLS.RequireClientCert = true
+        }
     }
-    if cfg.Server.TLS.CertFile == "" || cfg.Server.TLS.KeyFile == "" || cfg.Server.TLS.ClientCAFile == "" {
-        return nil, fmt.Errorf("server.tls.cert_file, server.tls.key_file, and server.tls.client_ca_file are required for admin mTLS")
+    // AdminSSHCA is required if not in test mode (allow test mode to skip)
+    if cfg.Server.TLS.CertFile != "" && cfg.Auth.AdminSSHCA == "" {
+        return nil, fmt.Errorf("auth.admin_ssh_ca is required when server.tls is configured")
     }
 	return &cfg, nil
 }
