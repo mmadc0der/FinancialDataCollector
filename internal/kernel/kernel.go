@@ -237,7 +237,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if producerID != "" {
                     if disabled, err := k.pg.IsProducerDisabled(ctx, producerID); err == nil && disabled {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_disabled")
-                        ev.Registration("disabled", "", producerID, "", "producer_disabled", "producer is disabled")
+                        ev.Registration("disabled", "", producerID, "producer_disabled", "producer is disabled")
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack disabled producer: %v", ackErr))
                         } else {
@@ -269,7 +269,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 // if token has sid, enforce match
                 if subjectIDFromToken != "" && !strings.EqualFold(subjectIDFromToken, eventData.SubjectID) {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "subject_mismatch_token")
-                    ev.Auth("failure", "", "", false, fmt.Sprintf("subject mismatch: token=%s,event=%s", subjectIDFromToken, ev.SubjectID))
+                    ev.Auth("failure", "", "", false, fmt.Sprintf("subject mismatch: token=%s,event=%s", subjectIDFromToken, eventData.SubjectID))
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack subject mismatch: %v", ackErr))
                     } else {
@@ -281,7 +281,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if producerID != "" {
                     if ok, err := k.pg.CheckProducerSubject(ctx, producerID, eventData.SubjectID); err != nil || !ok {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_subject_forbidden")
-                        ev.Auth("failure", "", "", false, fmt.Sprintf("producer-subject binding forbidden: producer=%s,subject=%s", producerID, ev.SubjectID))
+                        ev.Auth("failure", "", "", false, fmt.Sprintf("producer-subject binding forbidden: producer=%s,subject=%s", producerID, eventData.SubjectID))
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack forbidden binding: %v", ackErr))
                         } else {
@@ -306,7 +306,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     }
                     if schemaID == "" {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "schema_missing")
-                        ev.Infra("error", "postgres", "failed", fmt.Sprintf("schema missing for subject: %s", ev.SubjectID))
+                        ev.Infra("error", "postgres", "failed", fmt.Sprintf("schema missing for subject: %s", eventData.SubjectID))
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack schema missing: %v", ackErr))
                         } else {
@@ -812,7 +812,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
                 if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { 
-                    ev.Registration("invalid", "", "", "", "invalid_request", "missing required fields")
+                    ev.Registration("invalid", "", "", "invalid_request", "missing required fields")
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack missing fields: %v", ackErr))
                     }
@@ -822,7 +822,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 fp := sshFingerprint([]byte(pubkey))
                 parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
                 if err != nil { 
-                    ev.Registration("invalid", fp, "", "", "invalid_request", fmt.Sprintf("pubkey parse error: %v", err))
+                    ev.Registration("invalid", fp, "", "invalid_request", fmt.Sprintf("pubkey parse error: %v", err))
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack parse error: %v", ackErr))
                     }

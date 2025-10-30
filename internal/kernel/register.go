@@ -439,7 +439,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     }
     
     // Verify certificate first (before signature verification)
-    certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
+    certValid, _, _, _ := k.verifyCertificate(pubkey)
     if !certValid {
         // Register producer key with audit record for invalid cert
         producerID, err := k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed")
