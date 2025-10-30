@@ -65,10 +65,11 @@ func NewKernel(configPath string) (*Kernel, error) {
 }
 
 func (k *Kernel) Start(ctx context.Context) error {
-    ev := logging.NewEventLogger()
-    
+    // Initialize logging first so migrations are logged properly
     stopLog := logging.Init(k.cfg.Logging)
     defer stopLog()
+    ev := logging.NewEventLogger()
+
     ev.Infra("start", "kernel", "success", fmt.Sprintf("kernel starting on %s", k.cfg.Server.Listen))
     ev.Infra("config", "redis", "success", fmt.Sprintf("addr=%s,prefix=%s,stream=%s,group=%s", k.cfg.Redis.Addr, k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream, k.cfg.Redis.ConsumerGroup))
 

@@ -107,13 +107,13 @@ type regPayload struct {
 }
 
 // Rate limiting check - returns true if request should be allowed
-// Uses Redis sliding window rate limiting per producer_id (fail-closed security)
+// Uses Redis sliding window rate limiting per producer_id (fail-open when Redis unavailable)
 func (k *Kernel) checkRateLimit(ctx context.Context, op, producerID string) bool {
     ev := logging.NewEventLogger()
-    
+
     if k.rd == nil || k.rd.C() == nil {
-        ev.Infra("error", "redis", "failed", "rate limit check: redis unavailable")
-        return false // deny if Redis unavailable (fail-closed)
+        ev.Infra("error", "redis", "failed", "rate limit check: redis unavailable - allowing request")
+        return true // allow if Redis unavailable (fail-open for rate limiting)
     }
 
     rpm := k.cfg.Auth.RegistrationRateLimitRPM
@@ -151,8 +151,8 @@ return allowed
     // Eval returns int64 1/0
     res, err := k.rd.C().Eval(ctx, lua, []string{rateKey}, burst, refill).Int()
     if err != nil {
-        ev.Infra("error", "redis", "failed", fmt.Sprintf("rate limit eval error: %v", err))
-        return false
+        ev.Infra("error", "redis", "failed", fmt.Sprintf("rate limit eval error: %v - allowing request", err))
+        return true // allow on Redis errors (fail-open)
     }
     if res == 0 {
         metrics.RegistrationRateLimited.Inc()

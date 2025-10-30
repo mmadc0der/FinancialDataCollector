@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/example/data-kernel/internal/kernelcfg"
@@ -34,6 +35,14 @@ func NewRedis(cfg kernelcfg.RedisConfig) (*Redis, error) {
         PoolSize: cfg.PoolSize,
         MinIdleConns: cfg.MinIdleConns,
     })
+
+    // Test connection immediately
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+    if err := client.Ping(ctx).Err(); err != nil {
+        return nil, fmt.Errorf("redis ping failed: %w", err)
+    }
+
     stream := cfg.Stream
     if cfg.KeyPrefix != "" { stream = cfg.KeyPrefix + stream }
     return &Redis{cfg: cfg, c: client, stream: stream, group: cfg.ConsumerGroup}, nil

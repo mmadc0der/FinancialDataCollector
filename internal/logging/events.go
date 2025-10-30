@@ -48,27 +48,24 @@ func (e *EventLogger) APIAccess(action, from, subject, object, status, reason st
 	if reason != "" {
 		fields = append(fields, F("reason", reason))
 	}
-	e.log(level, "api_access", fields...)
+	e.log(level, "api-access", fields...)
 }
 
 // Auth logs authentication events
 // action: login|logout|verify|failure
 func (e *EventLogger) Auth(action, subject, ip string, success bool, reason string) {
 	level := InfoLevel
+	status := "success"
 	if !success {
 		level = WarnLevel // Failed auth attempts are WARN
+		status = "failed"
 		if action == "failure" {
 			level = ErrorLevel // Explicit failures are ERROR
 		}
 	} else {
 		level = DebugLevel // Successful auth can be DEBUG
 	}
-	
-	status := "success"
-	if !success {
-		status = "failed"
-	}
-	
+
 	fields := []Field{
 		F("event", "auth"),
 		F("action", action),
@@ -83,21 +80,24 @@ func (e *EventLogger) Auth(action, subject, ip string, success bool, reason stri
 	if reason != "" {
 		fields = append(fields, F("reason", reason))
 	}
-	e.log(level, "auth_event", fields...)
+	e.log(level, "auth", fields...)
 }
 
 // Authorization logs authorization events
 // action: allow|deny
 func (e *EventLogger) Authorization(action, subject, object, reason string) {
 	level := InfoLevel
+	status := "success"
 	if action == "deny" {
 		level = WarnLevel // Denials are WARN
+		status = "denied"
 	}
-	
+
 	fields := []Field{
 		F("event", "authorization"),
 		F("action", action),
 		F("object", object),
+		F("status", status),
 	}
 	if subject != "" {
 		fields = append(fields, F("subject", subject))
@@ -105,7 +105,7 @@ func (e *EventLogger) Authorization(action, subject, object, reason string) {
 	if reason != "" {
 		fields = append(fields, F("reason", reason))
 	}
-	e.log(level, "authorization_event", fields...)
+	e.log(level, "authorization", fields...)
 }
 
 // Registration logs registration events
@@ -122,7 +122,7 @@ func (e *EventLogger) Registration(action, fingerprint, producerID, status, reas
 	case "attempt":
 		level = DebugLevel // Attempts can be DEBUG
 	}
-	
+
 	fields := []Field{
 		F("event", "registration"),
 		F("action", action),
@@ -137,24 +137,21 @@ func (e *EventLogger) Registration(action, fingerprint, producerID, status, reas
 	if reason != "" {
 		fields = append(fields, F("reason", reason))
 	}
-	e.log(level, "registration_event", fields...)
+	e.log(level, "registration", fields...)
 }
 
 // Token logs token lifecycle events
 // action: issue|exchange|revoke|verify
 func (e *EventLogger) Token(action, producerID, subjectID, jti string, success bool, reason string) {
 	level := InfoLevel
+	status := "success"
 	if !success {
 		level = WarnLevel // Failed token operations are WARN
+		status = "failed"
 	} else if action == "verify" {
 		level = DebugLevel // Successful verifications are DEBUG
 	}
-	
-	status := "success"
-	if !success {
-		status = "failed"
-	}
-	
+
 	fields := []Field{
 		F("event", "token"),
 		F("action", action),
@@ -172,23 +169,20 @@ func (e *EventLogger) Token(action, producerID, subjectID, jti string, success b
 	if reason != "" {
 		fields = append(fields, F("reason", reason))
 	}
-	e.log(level, "token_event", fields...)
+	e.log(level, "token", fields...)
 }
 
 // Admin logs admin action events
 // action: review|approve|deny|revoke|access
 func (e *EventLogger) Admin(action, adminPrincipal, target, reason string, success bool) {
 	level := InfoLevel
-	if !success {
-		level = ErrorLevel // Failed admin actions are ERROR
-	}
-	// Admin actions are always INFO or higher (security requirement)
-	
 	status := "success"
 	if !success {
+		level = ErrorLevel // Failed admin actions are ERROR
 		status = "failed"
 	}
-	
+	// Admin actions are always INFO or higher (security requirement)
+
 	fields := []Field{
 		F("event", "admin"),
 		F("action", action),
@@ -201,7 +195,7 @@ func (e *EventLogger) Admin(action, adminPrincipal, target, reason string, succe
 	if reason != "" {
 		fields = append(fields, F("reason", reason))
 	}
-	e.log(level, "admin_event", fields...)
+	e.log(level, "admin", fields...)
 }
 
 // Infra logs infrastructure events
@@ -210,16 +204,14 @@ func (e *EventLogger) Admin(action, adminPrincipal, target, reason string, succe
 // status: success|failed
 func (e *EventLogger) Infra(action, component, status, details string) {
 	level := DebugLevel
-	if status == "failed" {
+	if status == "failed" || action == "error" {
 		level = ErrorLevel // Infrastructure failures are ERROR
-	} else if action == "error" {
-		level = ErrorLevel
 	} else if action == "retry" {
 		level = WarnLevel // Retries are WARN
 	} else if status == "success" && (action == "connect" || action == "disconnect") {
 		level = DebugLevel // Connection events are DEBUG when successful
 	}
-	
+
 	fields := []Field{
 		F("event", "infra"),
 		F("action", action),
@@ -229,7 +221,7 @@ func (e *EventLogger) Infra(action, component, status, details string) {
 	if details != "" {
 		fields = append(fields, F("details", details))
 	}
-	e.log(level, "infra_event", fields...)
+	e.log(level, "infra", fields...)
 }
 
 // Helper function to extract HTTP method from request
