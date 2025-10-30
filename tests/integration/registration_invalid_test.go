@@ -3,24 +3,24 @@
 package it
 
 import (
-    "context"
-    "encoding/base64"
-    "os"
-    "strconv"
-    "testing"
-    "time"
+	"context"
+	"encoding/base64"
+	"os"
+	"strconv"
+	"testing"
+	"time"
 
-    "crypto/ed25519"
-    "crypto/rand"
+	"crypto/ed25519"
+	"crypto/rand"
 
-    "golang.org/x/crypto/sha3"
-    ssh "golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/sha3"
+	ssh "golang.org/x/crypto/ssh"
 
-    "github.com/redis/go-redis/v9"
+	"github.com/redis/go-redis/v9"
 
-    "github.com/example/data-kernel/internal/data"
-    "github.com/example/data-kernel/internal/kernelcfg"
-    itutil "github.com/example/data-kernel/tests/itutil"
+	"github.com/example/data-kernel/internal/data"
+	"github.com/example/data-kernel/internal/kernelcfg"
+	itutil "github.com/example/data-kernel/tests/itutil"
 )
 
 // Invalid signature: audit row status=invalid_sig; response on per-nonce with reason; nonce guard exists (set before signature check)
@@ -162,8 +162,8 @@ func TestRegistration_InvalidCertificate_AuditAndResponse(t *testing.T) {
 
     // Audit row with status=invalid_cert - wait for async processing
     var cnt int
-    endWait := time.Now().Add(5 * time.Second)
-    for time.Now().Before(endWait) {
+    statusWait := time.Now().Add(5 * time.Second)
+    for time.Now().Before(statusWait) {
         _ = pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM public.producer_registrations WHERE fingerprint=$1 AND nonce=$2 AND status='invalid_cert'`, fp, nonce).Scan(&cnt)
         if cnt >= 1 { break }
         time.Sleep(100 * time.Millisecond)
