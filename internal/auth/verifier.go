@@ -96,6 +96,8 @@ func parseB64(s string) ([]byte, error) { return base64.RawStdEncoding.DecodeStr
 // Issue signs a token for a producer (if private key configured) and records JTI.
 // Optionally binds the token to a producer key fingerprint (fp).
 func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Duration, notes string, fp string) (string, string, time.Time, error) {
+    ev := logging.NewEventLogger()
+    
     if len(v.priv) == 0 && v.signer == nil {
         return "", "", time.Time{}, errors.New("issuer private key not configured")
     }
@@ -117,16 +119,18 @@ func (v *Verifier) Issue(ctx context.Context, producerID string, ttl time.Durati
     }
     tok := signing + "." + b64url(sigRaw)
     if err := authDbInsertToken(v.pg, ctx, producerID, jti, exp, notes); err != nil {
-        logging.Error("auth_token_db_insert_error", logging.F("jti", jti), logging.F("producer_id", producerID), logging.Err(err))
+        ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to insert token: %v", err))
     }
     // cache JTI in Redis for fast validation
     if ttl := time.Until(exp); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+jti, producerID+"|"+fp, ttl) }
-    logging.Info("auth_token_issued", logging.F("producer_id", producerID), logging.F("jti", jti), logging.F("fp", fp))
+    ev.Token("issue", producerID, "", jti, true, "")
     return tok, jti, exp, nil
 }
 
 // IssueSubject issues a subject-scoped token by embedding sid.
 func (v *Verifier) IssueSubject(ctx context.Context, producerID, subjectID string, ttl time.Duration, notes string, fp string) (string, string, time.Time, error) {
+    ev := logging.NewEventLogger()
+    
     if len(v.priv) == 0 && v.signer == nil {
         return "", "", time.Time{}, errors.New("issuer private key not configured")
     }
@@ -149,12 +153,14 @@ func (v *Verifier) IssueSubject(ctx context.Context, producerID, subjectID strin
     tok := signing + "." + b64url(sigRaw)
     _ = authDbInsertToken(v.pg, ctx, producerID, jti, exp, notes)
     if ttl := time.Until(exp); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+jti, producerID+"|"+fp, ttl) }
-    logging.Info("auth_token_issued_subject", logging.F("producer_id", producerID), logging.F("subject_id", subjectID), logging.F("jti", jti))
+    ev.Token("issue", producerID, subjectID, jti, true, "")
     return tok, jti, exp, nil
 }
 
 // Verify validates token signature and basic claims; DB must know the JTI and not be revoked.
 func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, string, error) {
+    ev := logging.NewEventLogger()
+    
     if tok == "" {
         return "", "", "", errors.New("auth_required")
     }
@@ -181,29 +187,38 @@ func (v *Verifier) Verify(ctx context.Context, tok string) (string, string, stri
     if c.Exp < now-int64(v.cfg.SkewSeconds) { return "", "", "", errors.New("token_expired") }
     // Redis cache: fast revoke check
     if ok, _ := authRedisExists(v.rd, ctx, "revoked:jti:"+c.Jti); ok > 0 {
+        ev.Token("verify", c.Sub, c.Sid, c.Jti, false, "token_revoked")
         return "", "", "", errors.New("token_revoked")
     }
     if s, _ := authRedisGet(v.rd, ctx, "auth:jti:"+c.Jti); s != "" {
         // Optionally validate producer_id match
         if idx := strings.IndexByte(s, '|'); idx > 0 {
             pid := s[:idx]
-            if pid == c.Sub { return c.Sub, c.Sid, c.Jti, nil }
+            if pid == c.Sub { 
+                ev.Token("verify", c.Sub, c.Sid, c.Jti, true, "")
+                return c.Sub, c.Sid, c.Jti, nil 
+            }
         } else if s == c.Sub {
+            ev.Token("verify", c.Sub, c.Sid, c.Jti, true, "")
             return c.Sub, c.Sid, c.Jti, nil
         }
     }
     ok, prod := authDbTokenExists(v.pg, ctx, c.Jti)
     if !ok {
-        logging.Error("token_verify_not_found", logging.F("jti", c.Jti), logging.F("expected_producer", c.Sub))
+        ev.Token("verify", c.Sub, c.Sid, c.Jti, false, "token_not_found")
         return "", "", "", errors.New("unknown_or_mismatched_token")
     }
     if prod != c.Sub {
-        logging.Error("token_verify_producer_mismatch", logging.F("jti", c.Jti), logging.F("db_producer", prod), logging.F("token_producer", c.Sub))
+        ev.Token("verify", c.Sub, c.Sid, c.Jti, false, "producer_mismatch")
         return "", "", "", errors.New("unknown_or_mismatched_token")
     }
-    if authDbIsTokenRevoked(v.pg, ctx, c.Jti) { return "", "", "", errors.New("token_revoked") }
+    if authDbIsTokenRevoked(v.pg, ctx, c.Jti) { 
+        ev.Token("verify", c.Sub, c.Sid, c.Jti, false, "token_revoked_db")
+        return "", "", "", errors.New("token_revoked") 
+    }
     // Cache allow in Redis for remaining TTL
     if ttl := time.Until(time.Unix(c.Exp, 0)); ttl > 0 { _ = authRedisSet(v.rd, ctx, "auth:jti:"+c.Jti, c.Sub+"|"+c.Fp, ttl) }
+    ev.Token("verify", c.Sub, c.Sid, c.Jti, true, "")
     return c.Sub, c.Sid, c.Jti, nil
 }
 

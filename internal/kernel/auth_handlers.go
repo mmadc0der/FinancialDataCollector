@@ -11,6 +11,7 @@ import (
     "net/http"
     "strings"
     "time"
+    "fmt"
 
     "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/metrics"
@@ -35,6 +36,27 @@ type approveRequest struct {
     Notes       string `json:"notes"`
 }
 
+// extractAdminPrincipal extracts the admin principal from the SSH certificate in X-Admin-Cert header
+// Returns empty string if certificate is not available or cannot be parsed
+func (k *Kernel) extractAdminPrincipal(r *http.Request) string {
+    adminCert := r.Header.Get("X-Admin-Cert")
+    if adminCert == "" {
+        return ""
+    }
+    
+    certPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(adminCert))
+    if err != nil {
+        return ""
+    }
+    
+    cert, ok := certPub.(*ssh.Certificate)
+    if !ok || len(cert.ValidPrincipals) == 0 {
+        return ""
+    }
+    
+    return cert.ValidPrincipals[0]
+}
+
 // GET /auth returns producer information based on filter criteria
 // Query parameters:
 // - filter=pending (default): pending registrations only
@@ -43,7 +65,15 @@ type approveRequest struct {
 // - filter=registered: only producers that completed registration (have keys)
 // - long=true: include detailed info like keys and tokens (default: false)
 func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
-    if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { w.WriteHeader(http.StatusUnauthorized); return }
+    ev := logging.NewEventLogger()
+    adminPrincipal := k.extractAdminPrincipal(r)
+    
+    if r.Method != http.MethodGet || !k.isAdmin(r) || k.pg == nil { 
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), "", r.URL.Path, "failed", "unauthorized", http.StatusUnauthorized)
+        ev.Authorization("deny", adminPrincipal, r.URL.Path, "admin check failed")
+        w.WriteHeader(http.StatusUnauthorized)
+        return 
+    }
 
     // Parse query parameters
     query := r.URL.Query()
@@ -67,13 +97,14 @@ func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
         "registered": true,
     }
     if !validFilters[filter] {
-        logging.Warn("admin_invalid_filter", logging.F("filter", filter))
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "invalid_filter", http.StatusBadRequest)
         w.WriteHeader(http.StatusBadRequest)
         return
     }
 
-    // log admin access
-    logging.Info("admin_producer_list", logging.F("filter", filter), logging.F("long", showLong))
+    // Log admin access as security event
+    ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "success", "", http.StatusOK)
+    ev.Admin("access", adminPrincipal, "", fmt.Sprintf("filter=%s,long=%v", filter, showLong), true)
 
     cctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
     defer cancel()
@@ -92,6 +123,8 @@ func (k *Kernel) handleListPending(w http.ResponseWriter, r *http.Request) {
 
 // handlePendingRegistrations handles pending registrations only
 func (k *Kernel) handlePendingRegistrations(w http.ResponseWriter, r *http.Request, cctx context.Context) {
+    ev := logging.NewEventLogger()
+    
     type row struct {
         Fingerprint string  `json:"fingerprint"`
         TS          time.Time `json:"ts"`
@@ -115,30 +148,30 @@ LIMIT 100`
     if k.pg.Pool() != nil {
         conn, err := k.pg.Pool().Acquire(cctx)
         if err != nil {
-            logging.Error("admin_pending_db_connect_error", logging.Err(err))
+            ev.Infra("connect", "postgres", "failed", fmt.Sprintf("failed to acquire connection: %v", err))
         } else {
             defer conn.Release()
             rowscan, err := conn.Query(cctx, q)
             if err != nil {
-                logging.Error("admin_pending_query_error", logging.Err(err))
-                logging.Error("admin_pending_query_details", logging.F("query", q))
+                ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to query pending registrations: %v", err))
             } else {
                 for rowscan.Next() {
                     var f string; var ts time.Time; var pid *string; var name *string
                     _ = rowscan.Scan(&f, &ts, &pid, &name)
                     rows = append(rows, row{Fingerprint: f, TS: ts, ProducerID: pid, Name: name})
                 }
-                logging.Info("admin_pending_rows_found", logging.F("count", len(rows)))
             }
         }
     } else {
-        logging.Error("admin_pending_no_db_pool", logging.F("message", "Database pool is nil"))
+        ev.Infra("error", "postgres", "failed", "database pool is nil")
     }
     _ = json.NewEncoder(w).Encode(rows)
 }
 
 // handleAllProducers handles all producers (including incomplete ones)
 func (k *Kernel) handleAllProducers(w http.ResponseWriter, r *http.Request, cctx context.Context, showLong bool) {
+    ev := logging.NewEventLogger()
+    
     type producerInfo struct {
         ProducerID   string     `json:"producer_id"`
         Name         *string    `json:"name"`
@@ -178,13 +211,12 @@ ORDER BY p.created_at DESC`
         if k.pg.Pool() != nil {
             conn, err := k.pg.Pool().Acquire(cctx)
             if err != nil {
-                logging.Error("admin_all_producers_db_connect_error", logging.Err(err))
+                ev.Infra("connect", "postgres", "failed", fmt.Sprintf("failed to acquire connection: %v", err))
             } else {
                 defer conn.Release()
                 rowscan, err := conn.Query(cctx, q)
                 if err != nil {
-                    logging.Error("admin_all_producers_query_error", logging.Err(err))
-                    logging.Error("admin_all_producers_query_details", logging.F("query", q))
+                    ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to query all producers: %v", err))
                 } else {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time; var status string
@@ -197,11 +229,10 @@ ORDER BY p.created_at DESC`
                             CreatedAt:   createdAt,
                         })
                     }
-                    logging.Info("admin_all_producers_rows_found", logging.F("count", len(producers)))
                 }
             }
         } else {
-            logging.Error("admin_all_producers_no_db_pool", logging.F("message", "Database pool is nil"))
+            ev.Infra("error", "postgres", "failed", "database pool is nil")
         }
     } else {
         // Long view - include key and token info for all producers (can be null)
@@ -243,26 +274,18 @@ ORDER BY p.created_at DESC`
         if k.pg.Pool() != nil {
             conn, err := k.pg.Pool().Acquire(cctx)
             if err != nil {
-                logging.Error("admin_all_long_db_connect_error", logging.Err(err))
+                ev.Infra("connect", "postgres", "failed", fmt.Sprintf("failed to acquire connection: %v", err))
             } else {
                 defer conn.Release()
                 rowscan, err := conn.Query(cctx, q)
                 if err != nil {
-                    logging.Error("admin_all_long_query_error", logging.Err(err))
+                    ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to query all producers (long): %v", err))
                 } else {
                     for rowscan.Next() {
                         var pid string; var name, desc *string; var createdAt time.Time; var status string
                         var activeKey, accessTokenJTI *string; var tokenExpires *time.Time; var tokenStatus *string
 
                         _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status, &activeKey, &accessTokenJTI, &tokenExpires, &tokenStatus)
-                        logging.Debug("admin_all_long_producer_data",
-                            logging.F("producer_id", pid),
-                            logging.F("name", name),
-                            logging.F("status", status),
-                            logging.F("active_key", activeKey),
-                            logging.F("token_jti", accessTokenJTI),
-                            logging.F("token_expires", tokenExpires),
-                            logging.F("token_status", tokenStatus))
                         producers = append(producers, producerInfo{
                             ProducerID:     pid,
                             Name:           name,
@@ -275,7 +298,6 @@ ORDER BY p.created_at DESC`
                             TokenStatus:    tokenStatus,
                         })
                     }
-                    logging.Info("admin_all_long_rows_found", logging.F("count", len(producers)))
                 }
             }
         }
@@ -286,6 +308,8 @@ ORDER BY p.created_at DESC`
 
 // handleActiveProducers handles only producers with active tokens
 func (k *Kernel) handleActiveProducers(w http.ResponseWriter, r *http.Request, cctx context.Context, showLong bool) {
+    ev := logging.NewEventLogger()
+    
     type producerInfo struct {
         ProducerID   string     `json:"producer_id"`
         Name         *string    `json:"name"`
@@ -337,12 +361,12 @@ ORDER BY p.created_at DESC`
     if k.pg.Pool() != nil {
         conn, err := k.pg.Pool().Acquire(cctx)
         if err != nil {
-            logging.Error("admin_active_producers_db_connect_error", logging.Err(err))
+            ev.Infra("connect", "postgres", "failed", fmt.Sprintf("failed to acquire connection: %v", err))
         } else {
             defer conn.Release()
             rowscan, err := conn.Query(cctx, q)
             if err != nil {
-                logging.Error("admin_active_producers_query_error", logging.Err(err))
+                ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to query active producers: %v", err))
             } else {
                 if showLong {
                     for rowscan.Next() {
@@ -350,13 +374,6 @@ ORDER BY p.created_at DESC`
                         var activeKey, accessTokenJTI *string; var tokenExpires *time.Time; var tokenStatus *string
 
                         _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &activeKey, &accessTokenJTI, &tokenExpires, &tokenStatus)
-                        logging.Debug("admin_active_long_producer_data",
-                            logging.F("producer_id", pid),
-                            logging.F("name", name),
-                            logging.F("active_key", activeKey),
-                            logging.F("token_jti", accessTokenJTI),
-                            logging.F("token_expires", tokenExpires),
-                            logging.F("token_status", tokenStatus))
                         producers = append(producers, producerInfo{
                             ProducerID:     pid,
                             Name:           name,
@@ -382,7 +399,6 @@ ORDER BY p.created_at DESC`
                         })
                     }
                 }
-                logging.Info("admin_active_producers_rows_found", logging.F("count", len(producers)))
             }
         }
     }
@@ -391,6 +407,8 @@ ORDER BY p.created_at DESC`
 
 // handleRegisteredProducers handles only producers that completed registration (have keys)
 func (k *Kernel) handleRegisteredProducers(w http.ResponseWriter, r *http.Request, cctx context.Context, showLong bool) {
+    ev := logging.NewEventLogger()
+    
     type producerInfo struct {
         ProducerID   string     `json:"producer_id"`
         Name         *string    `json:"name"`
@@ -468,12 +486,12 @@ ORDER BY p.created_at DESC`
     if k.pg.Pool() != nil {
         conn, err := k.pg.Pool().Acquire(cctx)
         if err != nil {
-            logging.Error("admin_registered_producers_db_connect_error", logging.Err(err))
+            ev.Infra("connect", "postgres", "failed", fmt.Sprintf("failed to acquire connection: %v", err))
         } else {
             defer conn.Release()
             rowscan, err := conn.Query(cctx, q)
             if err != nil {
-                logging.Error("admin_registered_producers_query_error", logging.Err(err))
+                ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to query registered producers: %v", err))
             } else {
                 if showLong {
                     for rowscan.Next() {
@@ -481,14 +499,6 @@ ORDER BY p.created_at DESC`
                         var activeKey, accessTokenJTI *string; var tokenExpires *time.Time; var tokenStatus *string
 
                         _ = rowscan.Scan(&pid, &name, &desc, &createdAt, &status, &activeKey, &accessTokenJTI, &tokenExpires, &tokenStatus)
-                        logging.Debug("admin_registered_long_producer_data",
-                            logging.F("producer_id", pid),
-                            logging.F("name", name),
-                            logging.F("status", status),
-                            logging.F("active_key", activeKey),
-                            logging.F("token_jti", accessTokenJTI),
-                            logging.F("token_expires", tokenExpires),
-                            logging.F("token_status", tokenStatus))
                         producers = append(producers, producerInfo{
                             ProducerID:     pid,
                             Name:           name,
@@ -515,7 +525,6 @@ ORDER BY p.created_at DESC`
                         })
                     }
                 }
-                logging.Info("admin_registered_producers_rows_found", logging.F("count", len(producers)))
             }
         }
     }
@@ -525,44 +534,43 @@ ORDER BY p.created_at DESC`
 // Removed handleAuthOverview; /auth returns pending list in this revision.
 // POST /auth/review handles both approve and deny actions
 func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
+    ev := logging.NewEventLogger()
+    adminPrincipal := k.extractAdminPrincipal(r)
+    
     if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil { 
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), "", r.URL.Path, "failed", "unauthorized", http.StatusUnauthorized)
+        ev.Authorization("deny", adminPrincipal, r.URL.Path, "admin check failed")
         w.WriteHeader(http.StatusUnauthorized)
         return 
     }
     
     var req reviewRequest
     if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-        logging.Warn("admin_review_decode_error", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.Err(err))
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("decode_error: %v", err), http.StatusBadRequest)
         w.WriteHeader(http.StatusBadRequest)
         return
     }
     
     // Validate required fields
     if req.Action == "" {
-        logging.Warn("admin_review_missing_action", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint))
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "missing_action", http.StatusBadRequest)
         w.WriteHeader(http.StatusBadRequest)
         return
     }
     if req.ProducerID == "" {
-        logging.Warn("admin_review_missing_producer_id", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.F("action", req.Action))
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "missing_producer_id", http.StatusBadRequest)
         w.WriteHeader(http.StatusBadRequest)
         return
     }
     if req.Action == "deny" && req.Reason == "" {
-        logging.Warn("admin_review_missing_reason", logging.F("admin_principal", r.Header.Get("X-SSH-Principal")), logging.F("action", req.Action), logging.F("producer_id", req.ProducerID))
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "missing_reason_for_deny", http.StatusBadRequest)
         w.WriteHeader(http.StatusBadRequest)
         return
     }
     
-    adminPrincipal := r.Header.Get("X-SSH-Principal")
-    logging.Info("admin_review_request", 
-        logging.F("action", req.Action), 
-        logging.F("producer_id", req.ProducerID),
-        logging.F("fingerprint", req.Fingerprint),
-        logging.F("admin_principal", adminPrincipal))
-    
     var result map[string]any
     var err error
+    success := false
     
     if req.Action == "approve" {
         // Determine if this is new producer or key rotation
@@ -579,7 +587,9 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
         }
         
         if err != nil {
-            logging.Error("admin_review_error", logging.F("producer_id", req.ProducerID), logging.F("action", "approve"), logging.Err(err))
+            ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to check approved keys: %v", err))
+            ev.Admin("approve", adminPrincipal, req.ProducerID, fmt.Sprintf("error: %v", err), false)
+            ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("db_error: %v", err), http.StatusInternalServerError)
             w.WriteHeader(http.StatusInternalServerError)
             return
         }
@@ -587,21 +597,25 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
         if hasApprovedKey {
             // Key rotation - need fingerprint
             if req.Fingerprint == "" {
-                logging.Warn("admin_review_missing_field", logging.F("producer_id", req.ProducerID), logging.F("action", "approve"), logging.F("field", "fingerprint"))
+                ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "missing_fingerprint_for_rotation", http.StatusBadRequest)
                 w.WriteHeader(http.StatusBadRequest)
                 return
             }
             _, err = k.pg.ApproveKeyRotation(r.Context(), req.Fingerprint, req.ProducerID, adminPrincipal, req.Notes)
             if err != nil {
-                logging.Error("admin_approve_key_rotation_error", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.Err(err))
+                ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to approve key rotation: %v", err))
+                ev.Admin("approve", adminPrincipal, req.ProducerID, fmt.Sprintf("key_rotation_error: %v", err), false)
+                ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("approve_error: %v", err), http.StatusBadRequest)
                 w.WriteHeader(http.StatusBadRequest)
                 return
             }
             result = map[string]any{"producer_id": req.ProducerID, "status": "approved", "fingerprint": req.Fingerprint, "type": "key_rotation"}
+            success = true
+            ev.Admin("approve", adminPrincipal, req.ProducerID, fmt.Sprintf("key_rotation: %s", req.Fingerprint), true)
         } else {
             // New producer - need fingerprint
             if req.Fingerprint == "" {
-                logging.Warn("admin_review_missing_field", logging.F("producer_id", req.ProducerID), logging.F("action", "approve"), logging.F("field", "fingerprint"))
+                ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "missing_fingerprint_for_new_producer", http.StatusBadRequest)
                 w.WriteHeader(http.StatusBadRequest)
                 return
             }
@@ -617,39 +631,51 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
                 }
             }
             if err != nil || producerName == "" {
-                logging.Error("admin_approve_producer_lookup_error", logging.F("producer_id", req.ProducerID), logging.Err(err))
+                ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to lookup producer: %v", err))
+                ev.Admin("approve", adminPrincipal, req.ProducerID, fmt.Sprintf("lookup_error: %v", err), false)
+                ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("lookup_error: %v", err), http.StatusInternalServerError)
                 w.WriteHeader(http.StatusInternalServerError)
                 return
             }
             _, err = k.pg.ApproveNewProducerKey(r.Context(), req.Fingerprint, producerName, adminPrincipal, req.Notes)
             if err != nil {
-                logging.Error("admin_approve_new_producer_error", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("name", producerName), logging.Err(err))
+                ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to approve new producer: %v", err))
+                ev.Admin("approve", adminPrincipal, req.ProducerID, fmt.Sprintf("new_producer_error: %v", err), false)
+                ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("approve_error: %v", err), http.StatusBadRequest)
                 w.WriteHeader(http.StatusBadRequest)
                 return
             }
             result = map[string]any{"producer_id": req.ProducerID, "status": "approved", "fingerprint": req.Fingerprint, "type": "new_producer"}
+            success = true
+            ev.Admin("approve", adminPrincipal, req.ProducerID, fmt.Sprintf("new_producer: %s", req.Fingerprint), true)
         }
-        
-        logging.Info("admin_approved", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint))
         
     } else if req.Action == "deny" {
         if req.Fingerprint == "" {
-            logging.Warn("admin_review_missing_field", logging.F("producer_id", req.ProducerID), logging.F("action", "deny"), logging.F("field", "fingerprint"))
+            ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "missing_fingerprint_for_deny", http.StatusBadRequest)
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         err = k.pg.RejectProducerKey(r.Context(), req.Fingerprint, adminPrincipal, req.Reason)
         if err != nil {
-            logging.Error("admin_deny_error", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("reason", req.Reason), logging.Err(err))
+            ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to reject producer key: %v", err))
+            ev.Admin("deny", adminPrincipal, req.ProducerID, fmt.Sprintf("reject_error: %v", err), false)
+            ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("reject_error: %v", err), http.StatusBadRequest)
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         result = map[string]any{"producer_id": req.ProducerID, "status": "denied", "fingerprint": req.Fingerprint, "reason": req.Reason}
-        logging.Info("admin_denied", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("reason", req.Reason))
+        success = true
+        ev.Admin("deny", adminPrincipal, req.ProducerID, fmt.Sprintf("fingerprint=%s,reason=%s", req.Fingerprint, req.Reason), true)
     } else {
-        logging.Warn("admin_review_invalid_action", logging.F("action", req.Action), logging.F("admin_principal", adminPrincipal))
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("invalid_action: %s", req.Action), http.StatusBadRequest)
         w.WriteHeader(http.StatusBadRequest)
         return
+    }
+    
+    // Log successful API access
+    if success {
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "success", "", http.StatusOK)
     }
     
     // After successful action, notify producer if this is an approval
@@ -671,16 +697,20 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
                     if ttl <= 0 {
                         ttl = 5 * time.Minute
                     }
-                    k.rd.C().XAdd(r.Context(), &redis.XAddArgs{
+                    if err := k.rd.C().XAdd(r.Context(), &redis.XAddArgs{
                         Stream: respStream,
                         Values: map[string]any{
                             "fingerprint": req.Fingerprint,
                             "producer_id": req.ProducerID,
                             "status": "approved",
                         },
-                    })
-                    k.rd.C().Expire(r.Context(), respStream, ttl)
-                    logging.Info("admin_approval_notified_producer", logging.F("producer_id", req.ProducerID), logging.F("fingerprint", req.Fingerprint), logging.F("nonce", nonce))
+                    }).Err(); err != nil {
+                        ev.Infra("write", "redis", "failed", fmt.Sprintf("failed to notify producer: %v", err))
+                    } else {
+                        if err := k.rd.C().Expire(r.Context(), respStream, ttl).Err(); err != nil {
+                            ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to set TTL on notification stream: %v", err))
+                        }
+                    }
                 }
             }
         }
@@ -691,6 +721,8 @@ func (k *Kernel) handleReview(w http.ResponseWriter, r *http.Request) {
 
 // POST /admin/approve - backward compatibility, redirects to review (deprecated path)
 func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
+    ev := logging.NewEventLogger()
+    
     if r.Method != http.MethodPost || !k.isAdmin(r) || k.pg == nil { 
         w.WriteHeader(http.StatusUnauthorized)
         return 
@@ -713,20 +745,21 @@ func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
     // If no producer_id provided, we need to create one - this is legacy behavior
     if reviewReq.ProducerID == "" {
         if req.Fingerprint == "" {
-            logging.Warn("admin_approve_legacy_missing_field", logging.F("field", "fingerprint"))
+            ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), k.extractAdminPrincipal(r), r.URL.Path, "failed", "missing_fingerprint", http.StatusBadRequest)
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         // For legacy, create producer with the provided name
         if req.Name == "" {
-            logging.Warn("admin_approve_legacy_missing_field", logging.F("field", "name"))
+            ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), k.extractAdminPrincipal(r), r.URL.Path, "failed", "missing_name", http.StatusBadRequest)
             w.WriteHeader(http.StatusBadRequest)
             return
         }
         // This is a simplified legacy path - create producer and approve key
-        pid, err := k.pg.ApproveNewProducerKey(r.Context(), req.Fingerprint, req.Name, r.Header.Get("X-SSH-Principal"), req.Notes)
+        pid, err := k.pg.ApproveNewProducerKey(r.Context(), req.Fingerprint, req.Name, k.extractAdminPrincipal(r), req.Notes)
         if err != nil {
-            logging.Error("admin_approve_legacy_error", logging.F("fingerprint", req.Fingerprint), logging.F("name", req.Name), logging.Err(err))
+            ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to approve new producer key: %v", err))
+            ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), k.extractAdminPrincipal(r), r.URL.Path, "failed", fmt.Sprintf("approve_error: %v", err), http.StatusBadRequest)
             w.WriteHeader(http.StatusBadRequest)
             return
         }
@@ -742,29 +775,49 @@ func (k *Kernel) handleApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (k *Kernel) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
+    ev := logging.NewEventLogger()
+    adminPrincipal := k.extractAdminPrincipal(r)
+    
     if k.au == nil || r.Method != http.MethodPost || !k.isAdmin(r) {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	var req struct{ JTI string `json:"jti"`; Reason string `json:"reason"` }
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.JTI == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), "", r.URL.Path, "failed", "unauthorized", http.StatusUnauthorized)
+        ev.Authorization("deny", adminPrincipal, r.URL.Path, "admin check failed")
+        w.WriteHeader(http.StatusUnauthorized)
+        return
+    }
+    
+    var req struct{ JTI string `json:"jti"`; Reason string `json:"reason"` }
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.JTI == "" {
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", "invalid_request", http.StatusBadRequest)
+        w.WriteHeader(http.StatusBadRequest)
+        return
+    }
+    
     if err := k.au.Revoke(r.Context(), req.JTI, req.Reason); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-    logging.Info("admin_revoke", logging.F("jti", req.JTI), logging.F("reason", req.Reason))
-	w.WriteHeader(http.StatusNoContent)
+        ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to revoke token: %v", err))
+        ev.Admin("revoke", adminPrincipal, req.JTI, fmt.Sprintf("error: %v", err), false)
+        ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "failed", fmt.Sprintf("revoke_error: %v", err), http.StatusInternalServerError)
+        w.WriteHeader(http.StatusInternalServerError)
+        return
+    }
+    
+    ev.Token("revoke", "", "", req.JTI, true, req.Reason)
+    ev.Admin("revoke", adminPrincipal, req.JTI, req.Reason, true)
+    ev.APIAccess(logging.HTTPMethod(r), logging.RemoteAddr(r), adminPrincipal, r.URL.Path, "success", "", http.StatusNoContent)
+    w.WriteHeader(http.StatusNoContent)
 }
 
 // isAdmin enforces strict mTLS and detached signature over the request
 // Headers required: X-Admin-Cert (OpenSSH cert), X-Admin-Nonce, X-Admin-Signature (base64)
 func (k *Kernel) isAdmin(r *http.Request) bool {
+    ev := logging.NewEventLogger()
+    
     if k.cfg == nil || k.cfg.Auth.AdminSSHCA == "" || !k.cfg.Auth.AdminSignRequired { return false }
     // Require mTLS at connection level
-    if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 { metrics.AdminMTLSDenied.Inc(); return false }
+    if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 { 
+        metrics.AdminMTLSDenied.Inc()
+        ev.Auth("failure", "", logging.RemoteAddr(r), false, "mTLS certificate missing")
+        return false 
+    }
     // Optional CN/SAN allowlist
     if len(k.cfg.Auth.AdminAllowedSubjects) > 0 {
         subjOK := false
@@ -774,30 +827,53 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
         if !subjOK {
             for _, name := range pc.DNSNames { for _, s := range k.cfg.Auth.AdminAllowedSubjects { if strings.EqualFold(strings.TrimSpace(s), strings.TrimSpace(name)) { subjOK = true; break } } }
         }
-        if !subjOK { return false }
+        if !subjOK { 
+            ev.Auth("failure", "", logging.RemoteAddr(r), false, "subject not in allowlist")
+            return false 
+        }
     }
 
     // Detached signature requirements
     adminCert := r.Header.Get("X-Admin-Cert")
     nonce := r.Header.Get("X-Admin-Nonce")
     sigB64 := r.Header.Get("X-Admin-Signature")
-    if adminCert == "" || nonce == "" || sigB64 == "" { return false }
+    if adminCert == "" || nonce == "" || sigB64 == "" { 
+        ev.Auth("failure", "", logging.RemoteAddr(r), false, "missing admin headers")
+        return false 
+    }
 
     // Prevent replay: nonce must be unique for a short window
     if k.rd != nil && k.rd.C() != nil {
         key := prefixed(k.cfg.Redis.KeyPrefix, "admin:nonce:"+nonce)
         ok, err := k.rd.C().SetNX(r.Context(), key, 1, 5*time.Minute).Result()
-        if err != nil { logging.Warn("admin_nonce_guard_error", logging.Err(err)); return false }
-        if !ok { logging.Warn("admin_nonce_replay", logging.F("nonce", nonce)); metrics.AdminReplay.Inc(); return false }
+        if err != nil { 
+            ev.Infra("error", "redis", "failed", fmt.Sprintf("admin nonce guard error: %v", err))
+            ev.Auth("failure", "", logging.RemoteAddr(r), false, "nonce guard error")
+            return false 
+        }
+        if !ok { 
+            ev.Auth("failure", "", logging.RemoteAddr(r), false, "nonce replay detected")
+            metrics.AdminReplay.Inc()
+            return false 
+        }
     }
 
     // Verify SSH certificate and principal against AdminSSHCA and configured principal allowlist
     caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.AdminSSHCA))
-    if err != nil || caPub == nil { return false }
+    if err != nil || caPub == nil { 
+        ev.Infra("error", "auth", "failed", fmt.Sprintf("failed to parse AdminSSHCA: %v", err))
+        return false 
+    }
     certPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(adminCert))
-    if err != nil { return false }
+    if err != nil { 
+        ev.Auth("failure", "", logging.RemoteAddr(r), false, fmt.Sprintf("failed to parse admin cert: %v", err))
+        return false 
+    }
     cert, ok := certPub.(*ssh.Certificate)
-    if !ok { return false }
+    if !ok { 
+        ev.Auth("failure", "", logging.RemoteAddr(r), false, "admin cert is not a certificate")
+        return false 
+    }
     checker := ssh.CertChecker{ IsUserAuthority: func(auth ssh.PublicKey) bool { return bytes.Equal(auth.Marshal(), caPub.Marshal()) } }
     // Admin principal must match configured principal if provided
     principalOK := false
@@ -806,8 +882,14 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
     } else {
         principalOK = len(cert.ValidPrincipals) > 0
     }
-    if !principalOK { logging.Warn("admin_principal_mismatch"); return false }
-    if err := checker.CheckCert(cert.ValidPrincipals[0], cert); err != nil { logging.Warn("admin_cert_check_failed", logging.Err(err)); return false }
+    if !principalOK { 
+        ev.Auth("failure", "", logging.RemoteAddr(r), false, "admin principal mismatch")
+        return false 
+    }
+    if err := checker.CheckCert(cert.ValidPrincipals[0], cert); err != nil { 
+        ev.Auth("failure", "", logging.RemoteAddr(r), false, fmt.Sprintf("admin cert check failed: %v", err))
+        return false 
+    }
 
     // Build canonical string: canonicalJSON(body)+"\n"+method+"\n"+path+"\n"+nonce
     var bodyBytes []byte
@@ -834,7 +916,18 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
             if len(sig) == ed25519.SignatureSize && ed25519.Verify(edpk, signing, sig) { ok2 = true }
         }
     }
-    if !ok2 { logging.Warn("admin_signature_invalid"); metrics.AdminSigInvalid.Inc(); return false }
+    if !ok2 { 
+        ev.Auth("failure", "", logging.RemoteAddr(r), false, "admin signature invalid")
+        metrics.AdminSigInvalid.Inc()
+        return false 
+    }
+    
+    // Successful admin authentication - log as security event
+    principal := ""
+    if len(cert.ValidPrincipals) > 0 {
+        principal = cert.ValidPrincipals[0]
+    }
+    ev.Auth("verify", principal, logging.RemoteAddr(r), true, "")
     return true
 }
 

@@ -94,6 +94,8 @@ func (p *Postgres) ensurePool() error {
 // applyMigrations reads .sql files from configured migrations directory and executes them in filename order.
 // It errors if the directory cannot be read or a migration execution fails.
 func (p *Postgres) applyMigrations(ctx context.Context) error {
+    ev := logging.NewEventLogger()
+    
 	if err := p.ensurePool(); err != nil {
 		return err
 	}
@@ -138,11 +140,10 @@ func (p *Postgres) applyMigrations(ctx context.Context) error {
         var existingChecksum string
         err = p.pool.QueryRow(ctx, `SELECT checksum FROM public.schema_migrations WHERE filename=$1`, name).Scan(&existingChecksum)
         if err == nil && existingChecksum == checksum {
-            logging.Info("pg_migration_skip", logging.F("file", name))
             continue
         }
         // Apply (or re-apply) migration
-        logging.Info("pg_apply_migration", logging.F("file", name))
+        ev.Infra("migrate", "postgres", "success", fmt.Sprintf("applying migration: %s", name))
         cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
         _, execErr := p.pool.Exec(cctx, string(b))
         cancel()
@@ -459,8 +460,10 @@ func (p *Postgres) InsertProducerToken(ctx context.Context, producerID, jti stri
 // On DB error it returns (false, "") and logs the error.
 // It treats not-found as (false,"").
 func (p *Postgres) TokenExists(ctx context.Context, jti string) (bool, string) {
+    ev := logging.NewEventLogger()
+    
 	if err := p.ensurePool(); err != nil {
-		logging.Error("pg_token_exists_no_pool", logging.F("err", err.Error()))
+		ev.Infra("error", "postgres", "failed", fmt.Sprintf("token exists check failed: pool unavailable: %v", err))
 		return false, ""
 	}
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -473,7 +476,7 @@ func (p *Postgres) TokenExists(ctx context.Context, jti string) (bool, string) {
 		if isNoRows(err) {
 			return false, ""
 		}
-		logging.Error("pg_token_exists_query_error", logging.F("err", err.Error()))
+		ev.Infra("read", "postgres", "failed", fmt.Sprintf("token exists query error: %v", err))
 		return false, ""
 	}
 	if revokedAt != nil {
@@ -503,8 +506,10 @@ func (p *Postgres) RevokeToken(ctx context.Context, jti, reason string) error {
 
 // IsTokenRevoked returns true if token is revoked. If DB is unavailable we conservatively return true and log.
 func (p *Postgres) IsTokenRevoked(ctx context.Context, jti string) bool {
+    ev := logging.NewEventLogger()
+    
 	if err := p.ensurePool(); err != nil {
-		logging.Error("pg_is_token_revoked_no_pool", logging.F("err", err.Error()))
+		ev.Infra("error", "postgres", "failed", fmt.Sprintf("token revoked check failed: pool unavailable: %v", err))
 		// conservative: treat unknown as revoked
 		return true
 	}
@@ -512,7 +517,7 @@ func (p *Postgres) IsTokenRevoked(ctx context.Context, jti string) bool {
 	defer cancel()
 	var exists bool
 	if err := p.pool.QueryRow(cctx, `SELECT EXISTS(SELECT 1 FROM public.revoked_tokens WHERE jti=$1)`, jti).Scan(&exists); err != nil {
-		logging.Error("pg_is_token_revoked_query_error", logging.F("err", err.Error()))
+		ev.Infra("read", "postgres", "failed", fmt.Sprintf("token revoked query error: %v", err))
 		// conservative
 		return true
 	}

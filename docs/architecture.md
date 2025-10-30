@@ -45,7 +45,10 @@ Incomplete (to be implemented):
   - Auth is mandatory: tokens are required on every event; registration and admin endpoints require OpenSSH certificates signed by configured CAs (`producer_ssh_ca`, `admin_ssh_ca`).
 
 ### Observability
-- Structured logging (JSON). Metrics via Prometheus on `/metrics`. Health endpoints at `/healthz` and `/readyz`.
-- Key metrics: `kernel_redis_read_total`, `kernel_redis_ack_total`, `kernel_redis_dlq_total`, `kernel_redis_batch_seconds`, `kernel_pg_batch_size`, `kernel_pg_batch_seconds`.
+
+- **Event-driven structured logging**: JSON logs with security-compliant event schemas (API access, authentication, authorization, registration, tokens, admin actions, infrastructure). All authentication and authorization events are logged with appropriate severity levels to meet international security requirements. See `docs/logging.md` for details.
+- **Metrics via Prometheus** on `/metrics`. Health endpoints at `/healthz` and `/readyz`.
+- **Key metrics**: `kernel_redis_read_total`, `kernel_redis_ack_total`, `kernel_redis_dlq_total`, `kernel_redis_batch_seconds`, `kernel_pg_batch_size`, `kernel_pg_batch_seconds`.
   - Auth: `kernel_auth_denied_total` increments on rejected unauthenticated messages.
+- **Event types**: All logs follow structured event schemas (`api-access`, `auth`, `authorization`, `registration`, `token`, `admin`, `infra`) for easy filtering and analysis in SIEM systems.
 

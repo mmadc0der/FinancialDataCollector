@@ -2,6 +2,7 @@ package spill
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -28,16 +29,21 @@ func NewWriter(dir string) (*Writer, error) {
 }
 
 func (w *Writer) Write(events []map[string]any) (string, int64, error) {
+    ev := logging.NewEventLogger()
+    
     if len(events) == 0 { return "", 0, nil }
     b, err := json.Marshal(events)
     if err != nil { return "", 0, err }
     name := time.Now().UTC().Format("20060102T150405.000000000") + ".json"
     path := filepath.Join(w.dir, name)
-    if err := os.WriteFile(path, b, 0o640); err != nil { return "", 0, err }
+    if err := os.WriteFile(path, b, 0o640); err != nil { 
+        ev.Infra("write", "spill", "failed", fmt.Sprintf("failed to write spill file %s: %v", name, err))
+        return "", 0, err 
+    }
     metrics.SpillWriteTotal.Inc()
     metrics.SpillBytesTotal.Add(float64(len(b)))
     updateFilesGauge(w.dir)
-    logging.Warn("spill_write", logging.F("file", name), logging.F("events", len(events)))
+    ev.Infra("write", "spill", "success", fmt.Sprintf("spill write: file=%s, events=%d", name, len(events)))
     return path, int64(len(b)), nil
 }
 
@@ -72,6 +78,8 @@ func (r *Replayer) Start() {
 func (r *Replayer) Stop() { close(r.stop) }
 
 func (r *Replayer) replayOnce() {
+    ev := logging.NewEventLogger()
+    
     if r.pg == nil { return }
     entries, err := os.ReadDir(r.dir)
     if err != nil { return }
@@ -87,14 +95,14 @@ func (r *Replayer) replayOnce() {
         if err := r.pg.IngestEventsJSON(nil, events); err != nil {
             // keep file; treat only connectivity as retryable; non-connectivity errors will be retried later
             if !isConnectivityError(err) {
-                logging.Error("spill_replay_error", logging.F("file", e.Name()), logging.Err(err))
+                ev.Infra("write", "postgres", "failed", fmt.Sprintf("spill replay error: file=%s, error=%v", e.Name(), err))
             }
             continue
         }
         _ = os.Remove(p)
         metrics.SpillReplayTotal.Inc()
         updateFilesGauge(r.dir)
-        logging.Info("spill_replay_success", logging.F("file", e.Name()), logging.F("events", len(events)))
+        ev.Infra("write", "postgres", "success", fmt.Sprintf("spill replay success: file=%s, events=%d", e.Name(), len(events)))
     }
 }
 

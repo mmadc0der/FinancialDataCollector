@@ -65,10 +65,12 @@ func NewKernel(configPath string) (*Kernel, error) {
 }
 
 func (k *Kernel) Start(ctx context.Context) error {
+    ev := logging.NewEventLogger()
+    
     stopLog := logging.Init(k.cfg.Logging)
     defer stopLog()
-    logging.Info("kernel_start", logging.F("listen", k.cfg.Server.Listen))
-    logging.Info("config_redis", logging.F("addr", k.cfg.Redis.Addr), logging.F("prefix", k.cfg.Redis.KeyPrefix), logging.F("stream", k.cfg.Redis.Stream), logging.F("group", k.cfg.Redis.ConsumerGroup))
+    ev.Infra("start", "kernel", "success", fmt.Sprintf("kernel starting on %s", k.cfg.Server.Listen))
+    ev.Infra("config", "redis", "success", fmt.Sprintf("addr=%s,prefix=%s,stream=%s,group=%s", k.cfg.Redis.Addr, k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream, k.cfg.Redis.ConsumerGroup))
 
     // Router handles durable persistence (Postgres-first, spill fallback) and optional publish
     r, err := newRouter(k.cfg, func(ids ...string) {
@@ -108,7 +110,7 @@ func (k *Kernel) Start(ctx context.Context) error {
     v, err := auth.NewVerifier(k.cfg.Auth, k.pg, k.rd)
     if err != nil { return err }
     k.au = v
-    logging.Info("auth_verifier_initialized", logging.F("issuer", k.cfg.Auth.Issuer), logging.F("audience", k.cfg.Auth.Audience))
+    ev.Infra("init", "auth", "success", fmt.Sprintf("verifier initialized: issuer=%s,audience=%s", k.cfg.Auth.Issuer, k.cfg.Auth.Audience))
 
     // Start Redis consumer (mandatory)
     if rd, err := data.NewRedis(k.cfg.Redis); err == nil {
@@ -122,7 +124,6 @@ func (k *Kernel) Start(ctx context.Context) error {
             _ = k.rd.C().XGroupCreateMkStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, "token:exchange"), k.cfg.Redis.ConsumerGroup, "0-0").Err()
             _ = k.rd.C().XGroupCreateMkStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, "schema:upgrade"), k.cfg.Redis.ConsumerGroup, "0-0").Err()
         }
-        logging.Info("redis_consumer_start", logging.F("stream", prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)), logging.F("group", k.cfg.Redis.ConsumerGroup))
         go k.consumeRedis(ctx)
         // registration stream consumer (fixed stream)
         go k.consumeRegister(ctx)
@@ -162,6 +163,8 @@ func (k *Kernel) Start(ctx context.Context) error {
 
 // consumeRedis reads events from Redis Streams and enqueues to router
 func (k *Kernel) consumeRedis(ctx context.Context) {
+    ev := logging.NewEventLogger()
+    
     consumer := fmt.Sprintf("%s-%d", "kernel", time.Now().UnixNano())
     count := k.cfg.Redis.ReadCount
     if count <= 0 { count = 100 }
@@ -176,19 +179,27 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
         streams, err := k.rd.ReadBatch(ctx, consumer, count, block)
         if err != nil {
             // backoff on errors
-            logging.Warn("redis_read_error", logging.Err(err))
+            ev.Infra("read", "redis", "failed", fmt.Sprintf("redis batch read error: %v", err))
             time.Sleep(500 * time.Millisecond)
             continue
         }
         if len(streams) > 0 { metrics.RedisBatchDuration.Observe(time.Since(t0).Seconds()) }
         // Update stream length and pending approximations (best-effort)
         if k.rd != nil && k.rd.C() != nil {
-            info, _ := k.rd.C().XInfoStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)).Result()
-            if info.Length > 0 { metrics.RedisStreamLenGauge.Set(float64(info.Length)) }
+            info, err := k.rd.C().XInfoStream(ctx, prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)).Result()
+            if err != nil {
+                ev.Infra("read", "redis", "failed", fmt.Sprintf("failed to get stream info: %v", err))
+            } else if info.Length > 0 { 
+                metrics.RedisStreamLenGauge.Set(float64(info.Length)) 
+            }
             // pending: XINFO GROUPS returns per-group pending
-            groups, _ := k.rd.C().XInfoGroups(ctx, prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)).Result()
-            for _, g := range groups {
-                if strings.EqualFold(g.Name, k.cfg.Redis.ConsumerGroup) { metrics.RedisPendingGauge.Set(float64(g.Pending)) }
+            groups, err := k.rd.C().XInfoGroups(ctx, prefixed(k.cfg.Redis.KeyPrefix, k.cfg.Redis.Stream)).Result()
+            if err != nil {
+                ev.Infra("read", "redis", "failed", fmt.Sprintf("failed to get group info: %v", err))
+            } else {
+                for _, g := range groups {
+                    if strings.EqualFold(g.Name, k.cfg.Redis.ConsumerGroup) { metrics.RedisPendingGauge.Set(float64(g.Pending)) }
+                }
             }
         }
 
@@ -198,10 +209,13 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 id, payload, token := data.DecodeMessage(m)
                 if len(payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, []byte("{}"), "empty_payload")
-                    logging.Warn("redis_dlq_empty_payload", logging.F("id", id))
+                    ev.Infra("error", "redis", "failed", fmt.Sprintf("empty payload for event id: %s", id))
                     globalMetricsBatcher.IncRedisDLQ()
-                    _ = k.rd.Ack(ctx, m.ID)
-                    globalMetricsBatcher.IncRedisAck()
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack empty payload: %v", ackErr))
+                    } else {
+                        globalMetricsBatcher.IncRedisAck()
+                    }
                     continue
                 }
                 // Authenticate and capture producer/subject from token
@@ -210,9 +224,9 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                     if pid, sid, j, err := k.au.Verify(ctx, token); err != nil {
                         globalMetricsBatcher.IncAuthDenied()
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "unauthenticated")
-                        logging.Warn("redis_auth_denied", logging.F("id", id), logging.F("redis_id", m.ID), logging.Err(err))
+                        ev.Auth("failure", "", "", false, fmt.Sprintf("token verification failed for event %s: %v", id, err))
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
-                            logging.Error("redis_ack_failed", logging.F("redis_id", m.ID), logging.Err(ackErr))
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack auth denied: %v", ackErr))
                         } else {
                             globalMetricsBatcher.IncRedisAck()
                         }
@@ -223,9 +237,12 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if producerID != "" {
                     if disabled, err := k.pg.IsProducerDisabled(ctx, producerID); err == nil && disabled {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_disabled")
-                        logging.Warn("redis_producer_disabled", logging.F("id", id))
-                        _ = k.rd.Ack(ctx, m.ID)
-                        globalMetricsBatcher.IncRedisAck()
+                        ev.Registration("disabled", "", producerID, "", "producer_disabled", "producer is disabled")
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack disabled producer: %v", ackErr))
+                        } else {
+                            globalMetricsBatcher.IncRedisAck()
+                        }
                         continue
                     }
                 }
@@ -240,27 +257,36 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 }
                 if err := json.Unmarshal(payload, &ev); err != nil || ev.EventID == "" || ev.TS == "" || ev.SubjectID == "" || len(ev.Payload) == 0 {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "bad_event_json")
-                    logging.Warn("redis_dlq_bad_event_json", logging.F("id", id))
+                    ev.Infra("error", "redis", "failed", fmt.Sprintf("bad event JSON for id: %s", id))
                     globalMetricsBatcher.IncRedisDLQ()
-                    _ = k.rd.Ack(ctx, m.ID)
-                    globalMetricsBatcher.IncRedisAck()
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack bad JSON: %v", ackErr))
+                    } else {
+                        globalMetricsBatcher.IncRedisAck()
+                    }
                     continue
                 }
                 // if token has sid, enforce match
                 if subjectIDFromToken != "" && !strings.EqualFold(subjectIDFromToken, ev.SubjectID) {
                     _ = k.rd.ToDLQ(ctx, dlq, id, payload, "subject_mismatch_token")
-                    logging.Warn("redis_subject_mismatch", logging.F("id", id))
-                            _ = k.rd.Ack(ctx, m.ID)
-                    globalMetricsBatcher.IncRedisAck()
+                    ev.Auth("failure", "", "", false, fmt.Sprintf("subject mismatch: token=%s,event=%s", subjectIDFromToken, ev.SubjectID))
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack subject mismatch: %v", ackErr))
+                    } else {
+                        globalMetricsBatcher.IncRedisAck()
+                    }
                     continue
                 }
                 // Verify producer-subject binding
                 if producerID != "" {
                     if ok, err := k.pg.CheckProducerSubject(ctx, producerID, ev.SubjectID); err != nil || !ok {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_subject_forbidden")
-                        logging.Warn("redis_producer_subject_forbidden", logging.F("id", id))
-                        _ = k.rd.Ack(ctx, m.ID)
-                        globalMetricsBatcher.IncRedisAck()
+                        ev.Auth("failure", "", "", false, fmt.Sprintf("producer-subject binding forbidden: producer=%s,subject=%s", producerID, ev.SubjectID))
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack forbidden binding: %v", ackErr))
+                        } else {
+                            globalMetricsBatcher.IncRedisAck()
+                        }
                         continue
                     }
                 }
@@ -276,20 +302,21 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                             ttl := time.Duration(k.cfg.Performance.SchemaCacheTTLSeconds) * time.Second
                             if ttl <= 0 { ttl = time.Hour }
                             _ = k.rd.SchemaCacheSet(ctx, ev.SubjectID, schemaID, ttl)
-                            logging.Info("schema_cache_backfilled", logging.F("subject_id", ev.SubjectID), logging.F("schema_id", schemaID))
                         }
                     }
                     if schemaID == "" {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "schema_missing")
-                        logging.Warn("redis_schema_missing", logging.F("subject_id", ev.SubjectID), logging.F("id", id))
-                        _ = k.rd.Ack(ctx, m.ID)
-                        globalMetricsBatcher.IncRedisAck()
+                        ev.Infra("error", "postgres", "failed", fmt.Sprintf("schema missing for subject: %s", ev.SubjectID))
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack schema missing: %v", ackErr))
+                        } else {
+                            globalMetricsBatcher.IncRedisAck()
+                        }
                         continue
                     }
                 }
                 // route for durable handling; ack will be done after persistence via router callback
                 k.rt.handleLeanEvent(m.ID, ev.EventID, ev.TS, ev.SubjectID, producerID, ev.Payload, ev.Tags, schemaID)
-                logging.Debug("redis_event_enqueued", logging.F("id", id))
             }
         }
     }
@@ -322,15 +349,28 @@ func (k *Kernel) sendSubjectResponse(ctx context.Context, producerID string, val
 // Message fields: pubkey, payload (canonical JSON), nonce, sig
 // Payload supports ops: set_current (default) and upgrade_auto
 func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
-    if k.rd == nil || k.pg == nil { return }
+    ev := logging.NewEventLogger()
+    
+    if k.rd == nil || k.pg == nil { 
+        ev.Infra("error", "redis", "failed", "subject register consumer disabled: dependencies unavailable")
+        return 
+    }
     stream := prefixed(k.cfg.Redis.KeyPrefix, "subject:register")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
+        if err := k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err(); err != nil {
+            if !strings.Contains(err.Error(), "BUSYGROUP") {
+                ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to create subject register consumer group: %v", err))
+            }
+        }
     }
     consumer := fmt.Sprintf("%s-subreg-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {
         res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
-        if err != nil && !errors.Is(err, redis.Nil) { time.Sleep(200 * time.Millisecond); continue }
+        if err != nil && !errors.Is(err, redis.Nil) { 
+            ev.Infra("read", "redis", "failed", fmt.Sprintf("subject register stream read error: %v", err))
+            time.Sleep(200 * time.Millisecond)
+            continue 
+        }
         if len(res) == 0 { continue }
         for _, s := range res {
             for _, m := range s.Messages {
@@ -338,13 +378,14 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 payloadStr, _ := m.Values["payload"].(string)
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
-                // Initial request log for visibility
                 fp0 := ""
                 if pubkey != "" { fp0 = sshFingerprint([]byte(pubkey)) }
-                logging.Info("subject_register_request", logging.F("id", m.ID), logging.F("fingerprint", fp0), logging.F("nonce", nonce), logging.F("payload_len", len(payloadStr)))
+                
                 if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
-                    logging.Warn("subject_register_missing_signature", logging.F("id", m.ID))
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Registration("invalid", fp0, "", "", "invalid_request", "missing required fields")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack missing fields: %v", ackErr))
+                    }
                     continue
                 }
                 // Verify signature and CA; ensure key approved; get producer_id
@@ -352,7 +393,13 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 {
                     fp := sshFingerprint([]byte(pubkey))
                     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
-                    if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
+                    if err != nil { 
+                        ev.Registration("invalid", fp, "", "", "invalid_request", fmt.Sprintf("pubkey parse error: %v", err))
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack parse error: %v", ackErr))
+                        }
+                        continue 
+                    }
                 if k.cfg.Auth.ProducerSSHCA != "" {
                         caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
                         if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
@@ -368,23 +415,27 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         }
                     }
                     if !okSig {
-                        logging.Warn("subject_register_bad_signature", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
+                        ev.Registration("invalid_sig", fp, "", "", "invalid_sig", "signature verification failed")
                         metrics.CanonicalVerifyFail.Inc()
                         // best-effort send error response if producer is known
                         if status, pidPtr, _ := k.pg.GetKeyStatus(ctx, fp); pidPtr != nil && *pidPtr != "" {
                             _ = status // status not used for this error
                             k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "invalid_sig", "reason": "signature_verification_failed"})
                         }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack bad signature: %v", ackErr))
+                        }
                         continue
                     }
                     status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
                     if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" {
-                        logging.Warn("subject_register_key_not_approved", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("status", status))
+                        ev.Registration("invalid", fp, "", "", "key_not_approved", fmt.Sprintf("status=%s", status))
                         if pidPtr != nil && *pidPtr != "" {
                             k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "key_not_approved", "status": status})
                         }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack not approved: %v", ackErr))
+                        }
                         continue
                     }
                     producerID = *pidPtr
@@ -395,21 +446,28 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         // SADD returns 1 if newly added, 0 if existed → treat 0 as replay
                         added, err := k.rd.C().SAdd(ctx, setKey, nonce).Result()
                         if err != nil {
-                            logging.Warn("subject_register_nonce_guard_error", logging.F("id", m.ID), logging.F("producer_id", producerID), logging.F("nonce", nonce), logging.Err(err))
+                            ev.Infra("error", "redis", "failed", fmt.Sprintf("subject register nonce guard error: %v", err))
                         } else if added == 0 {
-                            logging.Warn("subject_register_replay", logging.F("id", m.ID), logging.F("producer_id", producerID), logging.F("nonce", nonce))
+                            ev.Registration("replay", fp, producerID, "", "replay", "duplicate_nonce")
                             k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "replay"})
-                            _ = k.rd.Ack(ctx, m.ID)
+                            if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                                ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay: %v", ackErr))
+                            }
                             continue
                         } else {
                             // ensure TTL exists (best-effort)
-                            _ = k.rd.C().Expire(ctx, setKey, 10*time.Minute).Err()
+                            if expireErr := k.rd.C().Expire(ctx, setKey, 10*time.Minute).Err(); expireErr != nil {
+                                ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to set nonce TTL: %v", expireErr))
+                            }
                         }
                     }
                     if !k.checkRateLimit(ctx, "subject", producerID) {
+                        ev.Registration("rate_limited", fp, producerID, "", "rate_limited", "")
                         // best-effort notify client
                         k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "rate_limited"})
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack rate limited: %v", ackErr))
+                        }
                         continue
                     }
                 }
@@ -423,41 +481,55 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     AttrsDelta   json.RawMessage `json:"attrs_delta"`
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
-                    logging.Warn("subject_register_invalid_payload", logging.F("id", m.ID), logging.F("payload", payloadStr))
+                    ev.Registration("invalid", fp0, producerID, "", "invalid_payload", "payload parse error or missing subject_key")
                     if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload"}) }
-                    _ = k.rd.Ack(ctx, m.ID)
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid payload: %v", ackErr))
+                    }
                     continue 
                 }
                 // Strict op validation before any DB calls
                 switch strings.ToLower(strings.TrimSpace(req.Op)) {
                 case "register":
                     if strings.TrimSpace(req.SchemaName) == "" || len(req.SchemaBody) == 0 || strings.TrimSpace(string(req.SchemaBody)) == "" {
-                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "missing_schema_name_or_body"))
+                        ev.Registration("invalid", fp0, producerID, "", "invalid_payload", "missing_schema_name_or_body")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "register requires schema_name and schema_body"}) }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
+                        }
                         continue
                     }
                     if len(strings.TrimSpace(string(req.SchemaDelta))) > 0 || len(strings.TrimSpace(string(req.AttrsDelta))) > 0 {
+                        ev.Registration("invalid", fp0, producerID, "", "invalid_payload", "delta fields not allowed for register")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "delta fields not allowed for register"}) }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
+                        }
                         continue
                     }
                 case "upgrade":
                     if strings.TrimSpace(req.SchemaName) == "" || len(strings.TrimSpace(string(req.SchemaDelta))) == 0 {
-                        logging.Warn("subject_register_validation_failed", logging.F("id", m.ID), logging.F("reason", "missing_schema_name_or_delta"))
+                        ev.Registration("invalid", fp0, producerID, "", "invalid_payload", "missing_schema_name_or_delta")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "upgrade requires schema_name and schema_delta"}) }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
+                        }
                         continue
                     }
                     if len(strings.TrimSpace(string(req.SchemaBody))) > 0 {
+                        ev.Registration("invalid", fp0, producerID, "", "invalid_payload", "schema_body not allowed for upgrade")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "schema_body not allowed for upgrade"}) }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
+                        }
                         continue
                     }
                 default:
-                    logging.Warn("subject_register_unknown_op", logging.F("id", m.ID), logging.F("op", req.Op))
+                    ev.Registration("invalid", fp0, producerID, "", "invalid_payload", fmt.Sprintf("unknown_op: %s", req.Op))
                     if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "unknown_op", "op": req.Op}) }
-                    _ = k.rd.Ack(ctx, m.ID)
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack unknown op: %v", ackErr))
+                    }
                     continue
                 }
                 var sid string
@@ -471,9 +543,12 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     _ = unchanged
                     schemaName = req.SchemaName
                     if err != nil {
-                        logging.Warn("subject_register_upgrade_error", logging.F("id", m.ID), logging.Err(err))
+                        ev.Infra("write", "postgres", "failed", fmt.Sprintf("subject register upgrade error: %v", err))
+                        ev.Registration("error", fp0, producerID, "", "upgrade_failed", err.Error())
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "upgrade_failed", "reason": err.Error()}) }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack upgrade error: %v", ackErr))
+                        }
                         continue
                     }
                 case "register":
@@ -482,9 +557,12 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     _ = unchanged
                     schemaName = req.SchemaName
                     if err != nil {
-                        logging.Warn("subject_register_register_error", logging.F("id", m.ID), logging.Err(err))
+                        ev.Infra("write", "postgres", "failed", fmt.Sprintf("subject register error: %v", err))
+                        ev.Registration("error", fp0, producerID, "", "register_failed", err.Error())
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "register_failed", "reason": err.Error()}) }
-                        _ = k.rd.Ack(ctx, m.ID)
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack register error: %v", ackErr))
+                        }
                         continue
                     }
                 }
@@ -500,19 +578,13 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     if schemaName != "" { resp["schema_name"] = schemaName }
                     if schemaVersion > 0 { resp["schema_version"] = schemaVersion }
                     k.sendSubjectResponse(ctx, producerID, resp)
-                    logging.Info("subject_register_success",
-                        logging.F("producer_id", producerID),
-                        logging.F("subject_id", sid),
-                        logging.F("subject_key", req.SubjectKey),
-                        logging.F("attrs", coalesceJSON(req.Attrs)),
-                        logging.F("schema_id", schemaID),
-                        logging.F("schema_name", schemaName),
-                        logging.F("schema_version", schemaVersion),
-                    )
+                    ev.Registration("success", fp0, producerID, sid, "success", fmt.Sprintf("op=%s,schema=%s", req.Op, schemaName))
                 } else {
-                    logging.Warn("subject_register_no_producer", logging.F("id", m.ID))
+                    ev.Registration("error", fp0, "", "", "no_producer", "producer ID not found")
                 }
-                _ = k.rd.Ack(ctx, m.ID)
+                if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                    ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack subject register: %v", ackErr))
+                }
             }
         }
     }
@@ -520,36 +592,72 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
 
 // consumeTokenExchange handles token issuance/renewal via either approved pubkey signature or a valid existing token
 func (k *Kernel) consumeTokenExchange(ctx context.Context) {
-    if k.rd == nil || k.pg == nil || k.au == nil { return }
+    ev := logging.NewEventLogger()
+    
+    if k.rd == nil || k.pg == nil || k.au == nil { 
+        ev.Infra("error", "redis", "failed", "token exchange consumer disabled: dependencies unavailable")
+        return 
+    }
     stream := prefixed(k.cfg.Redis.KeyPrefix, "token:exchange")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
+        if err := k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err(); err != nil {
+            if !strings.Contains(err.Error(), "BUSYGROUP") {
+                ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to create token exchange consumer group: %v", err))
+            }
+        }
     }
     consumer := fmt.Sprintf("%s-token-%d", "kernel", time.Now().UnixNano())
+    
     for ctx.Err() == nil {
         res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
-        if err != nil && !errors.Is(err, redis.Nil) { time.Sleep(200 * time.Millisecond); continue }
-        if len(res) == 0 { continue }
+        if err != nil && !errors.Is(err, redis.Nil) { 
+            ev.Infra("read", "redis", "failed", fmt.Sprintf("token exchange stream read error: %v", err))
+            time.Sleep(200 * time.Millisecond)
+            continue 
+        }
+        if len(res) == 0 { 
+            continue 
+        }
+        
         for _, s := range res {
             for _, m := range s.Messages {
                 // Path 1: renewal with existing token
                 if tok, ok := m.Values["token"].(string); ok && tok != "" {
-                    if pid, _, _, err := k.au.Verify(ctx, tok); err == nil {
-                        // Deny renewal for disabled producers
-                        if disabled, derr := k.pg.IsProducerDisabled(ctx, pid); derr == nil && disabled {
-                            _ = k.rd.Ack(ctx, m.ID)
-                            continue
+                    pid, sid, jti, err := k.au.Verify(ctx, tok)
+                    if err != nil {
+                        ev.Token("verify", "", "", "", false, fmt.Sprintf("token verification failed: %v", err))
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack verify error: %v", ackErr))
                         }
-                        if t, _, exp, ierr := k.au.Issue(ctx, pid, time.Hour, "exchange", ""); ierr == nil {
-                            respStream := prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+pid)
-                            _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
+                        continue
+                    }
+                    // Deny renewal for disabled producers
+                    if disabled, derr := k.pg.IsProducerDisabled(ctx, pid); derr == nil && disabled {
+                        ev.Token("exchange", pid, sid, jti, false, "producer_disabled")
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack disabled producer: %v", ackErr))
+                        }
+                        continue
+                    }
+                    if t, newJti, exp, ierr := k.au.Issue(ctx, pid, time.Hour, "exchange", ""); ierr == nil {
+                        ev.Token("exchange", pid, sid, newJti, true, "")
+                        respStream := prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+pid)
+                        if err := k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, Values: map[string]any{"producer_id": pid, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err(); err != nil {
+                            ev.Infra("write", "redis", "failed", fmt.Sprintf("failed to write token response: %v", err))
+                        } else {
                             // Set TTL on token response stream to prevent accumulation of stale responses
                             ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
                             if ttl <= 0 { ttl = 5 * time.Minute }
-                            _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
+                            if expireErr := k.rd.C().Expire(ctx, respStream, ttl).Err(); expireErr != nil {
+                                ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to set TTL on token response stream: %v", expireErr))
+                            }
                         }
+                    } else {
+                        ev.Token("exchange", pid, sid, "", false, fmt.Sprintf("token issue failed: %v", ierr))
                     }
-                    _ = k.rd.Ack(ctx, m.ID)
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack token exchange: %v", ackErr))
+                    }
                     continue
                 }
                 // Path 2: new token via approved pubkey + signature
@@ -557,11 +665,23 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                 payloadStr, _ := m.Values["payload"].(string)
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
-                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { 
+                    ev.Token("exchange", "", "", "", false, "missing_fields")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack missing fields: %v", ackErr))
+                    }
+                    continue 
+                }
                 fp := sshFingerprint([]byte(pubkey))
                 // verify signature as in registration
                 parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
-                if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
+                if err != nil { 
+                    ev.Token("exchange", "", "", "", false, fmt.Sprintf("pubkey parse error: %v", err))
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack parse error: %v", ackErr))
+                    }
+                    continue 
+                }
                 if k.cfg.Auth.ProducerSSHCA != "" {
                     caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
                     if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
@@ -577,58 +697,82 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
                         if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
                     }
                 }
-                if !okSig { metrics.CanonicalVerifyFail.Inc(); _ = k.rd.Ack(ctx, m.ID); continue }
+                if !okSig { 
+                    metrics.CanonicalVerifyFail.Inc()
+                    ev.Token("exchange", "", "", "", false, "signature_verification_failed")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack signature error: %v", ackErr))
+                    }
+                    continue 
+                }
                 status, producerID, err := k.pg.GetKeyStatus(ctx, fp)
                 if err != nil {
-                    logging.Error("token_exchange_status_check_error", logging.F("fingerprint", fp), logging.Err(err))
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to get key status: %v", err))
+                    ev.Token("exchange", "", "", "", false, fmt.Sprintf("status_check_error: %v", err))
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack status error: %v", ackErr))
+                    }
                     continue
                 }
                 if status == "" {
-                    logging.Info("token_exchange_unknown_key", logging.F("fingerprint", fp))
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Token("exchange", "", "", "", false, "unknown_key")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack unknown key: %v", ackErr))
+                    }
                     continue
                 }
                 if status != "approved" {
-                    logging.Info("token_exchange_key_not_approved", logging.F("fingerprint", fp), logging.F("status", status))
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Token("exchange", "", "", "", false, fmt.Sprintf("key_not_approved: status=%s", status))
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack not approved: %v", ackErr))
+                    }
                     continue
                 }
                 if producerID == nil || *producerID == "" {
-                    logging.Info("token_exchange_no_producer", logging.F("fingerprint", fp))
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Token("exchange", "", "", "", false, "no_producer_id")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack no producer: %v", ackErr))
+                    }
                     continue
                 }
                 // Deny token issue when producer disabled
                 if disabled, derr := k.pg.IsProducerDisabled(ctx, *producerID); derr == nil && disabled {
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Token("exchange", *producerID, "", "", false, "producer_disabled")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack disabled: %v", ackErr))
+                    }
                     continue
                 }
 
                 // Rate limiting check for token exchange
                 if !k.checkRateLimit(ctx, "token", *producerID) {
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Token("exchange", *producerID, "", "", false, "rate_limited")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack rate limited: %v", ackErr))
+                    }
                     continue // silent drop for rate limited requests
                 }
 
                 if t, jti, exp, ierr := k.au.Issue(ctx, *producerID, time.Hour, "exchange", fp); ierr == nil {
-                    logging.Info("token_exchange_issued", logging.F("fingerprint", fp), logging.F("producer_id", *producerID), logging.F("jti", jti))
+                    ev.Token("exchange", *producerID, "", jti, true, "")
                     respStream := prefixed(k.cfg.Redis.KeyPrefix, "token:resp:"+*producerID)
                     err := k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, Values: map[string]any{"fingerprint": fp, "producer_id": *producerID, "token": t, "exp": exp.UTC().Format(time.RFC3339Nano)}}).Err()
                     if err != nil {
-                        logging.Error("token_exchange_response_error", logging.F("jti", jti), logging.F("producer_id", *producerID), logging.Err(err))
+                        ev.Infra("write", "redis", "failed", fmt.Sprintf("failed to write token response: %v", err))
                     } else {
                         // Set TTL on token response stream to prevent accumulation of stale responses
                         ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
                         if ttl <= 0 { ttl = 5 * time.Minute }
                         if expireErr := k.rd.C().Expire(ctx, respStream, ttl).Err(); expireErr != nil {
-                            logging.Warn("token_resp_ttl_error", logging.F("jti", jti), logging.F("producer_id", *producerID), logging.Err(expireErr))
+                            ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to set TTL on token response stream: %v", expireErr))
                         }
                     }
                 } else {
-                    logging.Info("token_exchange_issue_error", logging.F("fingerprint", fp), logging.Err(ierr))
+                    ev.Token("exchange", *producerID, "", "", false, fmt.Sprintf("token issue failed: %v", ierr))
                 }
-                _ = k.rd.Ack(ctx, m.ID)
+                if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                    ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack token exchange: %v", ackErr))
+                }
             }
         }
     }
@@ -638,15 +782,28 @@ func (k *Kernel) consumeTokenExchange(ctx context.Context) {
 // Stream: prefix+"schema:upgrade"; fields: pubkey, payload, nonce, sig
 // Payload: { subject_key, schema_name, schema_body, attrs? }
 func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
-    if k.rd == nil || k.pg == nil { return }
+    ev := logging.NewEventLogger()
+    
+    if k.rd == nil || k.pg == nil { 
+        ev.Infra("error", "redis", "failed", "schema upgrade consumer disabled: dependencies unavailable")
+        return 
+    }
     stream := prefixed(k.cfg.Redis.KeyPrefix, "schema:upgrade")
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
+        if err := k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err(); err != nil {
+            if !strings.Contains(err.Error(), "BUSYGROUP") {
+                ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to create schema upgrade consumer group: %v", err))
+            }
+        }
     }
     consumer := fmt.Sprintf("%s-schup-%d", "kernel", time.Now().UnixNano())
     for ctx.Err() == nil {
         res, err := k.rd.C().XReadGroup(ctx, &redis.XReadGroupArgs{Group: k.cfg.Redis.ConsumerGroup, Consumer: consumer, Streams: []string{stream, ">"}, Count: 50, Block: 5 * time.Second}).Result()
-        if err != nil && !errors.Is(err, redis.Nil) { time.Sleep(200 * time.Millisecond); continue }
+        if err != nil && !errors.Is(err, redis.Nil) { 
+            ev.Infra("read", "redis", "failed", fmt.Sprintf("schema upgrade stream read error: %v", err))
+            time.Sleep(200 * time.Millisecond)
+            continue 
+        }
         if len(res) == 0 { continue }
         for _, s := range res {
             for _, m := range s.Messages {
@@ -654,11 +811,23 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 payloadStr, _ := m.Values["payload"].(string)
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
-                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { 
+                    ev.Registration("invalid", "", "", "", "invalid_request", "missing required fields")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack missing fields: %v", ackErr))
+                    }
+                    continue 
+                }
                 // Verify signature and approved producer
                 fp := sshFingerprint([]byte(pubkey))
                 parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
-                if err != nil { _ = k.rd.Ack(ctx, m.ID); continue }
+                if err != nil { 
+                    ev.Registration("invalid", fp, "", "", "invalid_request", fmt.Sprintf("pubkey parse error: %v", err))
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack parse error: %v", ackErr))
+                    }
+                    continue 
+                }
                 if k.cfg.Auth.ProducerSSHCA != "" {
                     caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
                     if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) { parsedPub = cert.Key } else { parsedPub = nil }
@@ -674,23 +843,43 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                         if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) { okSig = true }
                     }
                 }
-                if !okSig { _ = k.rd.Ack(ctx, m.ID); continue }
+                if !okSig { 
+                    ev.Registration("invalid_sig", fp, "", "", "invalid_sig", "signature verification failed")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack bad signature: %v", ackErr))
+                    }
+                    continue 
+                }
                 // replay protection
                 if k.rd != nil && k.rd.C() != nil {
                     ok, err := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result()
                     if err != nil {
-                        logging.Warn("schema_upgrade_nonce_guard_error", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce), logging.Err(err))
+                        ev.Infra("error", "redis", "failed", fmt.Sprintf("schema upgrade nonce guard error: %v", err))
                         // allow on error
                     } else if !ok {
-                        logging.Warn("schema_upgrade_replay", logging.F("id", m.ID), logging.F("fingerprint", fp), logging.F("nonce", nonce))
-                        _ = k.rd.Ack(ctx, m.ID)
+                        ev.Registration("replay", fp, "", "", "replay", "duplicate_nonce")
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay: %v", ackErr))
+                        }
                         continue
                     }
                 }
                 status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
-                if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" { _ = k.rd.Ack(ctx, m.ID); continue }
+                if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" { 
+                    ev.Registration("invalid", fp, "", "", "key_not_approved", fmt.Sprintf("status=%s", status))
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack not approved: %v", ackErr))
+                    }
+                    continue 
+                }
                 producerID := *pidPtr
-                if !k.checkRateLimit(ctx, "schema", producerID) { _ = k.rd.Ack(ctx, m.ID); continue }
+                if !k.checkRateLimit(ctx, "schema", producerID) { 
+                    ev.Registration("rate_limited", fp, producerID, "", "rate_limited", "")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack rate limited: %v", ackErr))
+                    }
+                    continue 
+                }
 
                 // Parse payload
                 var req struct{
@@ -700,24 +889,40 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                     Attrs      json.RawMessage `json:"attrs"`
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" || req.SchemaName == "" || len(req.SchemaBody) == 0 {
-                    logging.Warn("schema_upgrade_invalid_payload", logging.F("id", m.ID))
-                    _ = k.rd.Ack(ctx, m.ID)
+                    ev.Registration("invalid", fp, producerID, "", "invalid_payload", "missing required fields")
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid payload: %v", ackErr))
+                    }
                     continue
                 }
                 // Perform atomic upgrade (auto-assign next version)
                 sid, schemaID, version, uerr := k.pg.UpgradeSubjectSchemaAuto(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)), true)
-                if uerr != nil { logging.Warn("schema_upgrade_error", logging.F("id", m.ID), logging.Err(uerr)); _ = k.rd.Ack(ctx, m.ID); continue }
+                if uerr != nil { 
+                    ev.Infra("write", "postgres", "failed", fmt.Sprintf("schema upgrade error: %v", uerr))
+                    ev.Registration("error", fp, producerID, "", "upgrade_failed", uerr.Error())
+                    if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack upgrade error: %v", ackErr))
+                    }
+                    continue 
+                }
                 _ = k.rd.SchemaCacheSet(ctx, sid, schemaID, time.Hour)
                 _ = k.pg.BindProducerSubject(ctx, producerID, sid)
                 // Respond via subject:resp:<producer_id>
                 resp := map[string]any{"subject_id": sid, "schema_id": schemaID, "schema_name": req.SchemaName, "schema_version": version}
                 respStream := prefixed(k.cfg.Redis.KeyPrefix, "subject:resp:"+producerID)
-                _ = k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, Values: resp}).Err()
-                ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
-                if ttl <= 0 { ttl = 5 * time.Minute }
-                _ = k.rd.C().Expire(ctx, respStream, ttl).Err()
-                logging.Info("schema_upgrade_success", logging.F("producer_id", producerID), logging.F("subject_id", sid), logging.F("schema_id", schemaID), logging.F("schema_name", req.SchemaName), logging.F("schema_version", version))
-                _ = k.rd.Ack(ctx, m.ID)
+                if err := k.rd.C().XAdd(ctx, &redis.XAddArgs{Stream: respStream, Values: resp}).Err(); err != nil {
+                    ev.Infra("write", "redis", "failed", fmt.Sprintf("failed to write schema upgrade response: %v", err))
+                } else {
+                    ttl := time.Duration(k.cfg.Auth.RegistrationResponseTTLSeconds) * time.Second
+                    if ttl <= 0 { ttl = 5 * time.Minute }
+                    if expireErr := k.rd.C().Expire(ctx, respStream, ttl).Err(); expireErr != nil {
+                        ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to set response TTL: %v", expireErr))
+                    }
+                }
+                ev.Registration("success", fp, producerID, sid, "success", fmt.Sprintf("schema_upgrade: %s", req.SchemaName))
+                if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                    ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack schema upgrade: %v", ackErr))
+                }
             }
         }
     }

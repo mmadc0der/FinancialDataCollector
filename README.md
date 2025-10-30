@@ -57,6 +57,7 @@ See `docs/architecture.md`, `docs/protocol.md`, and `docs/verification.md`.
   - Distributed rate limiting via Redis Lua token bucket per operation and identity (`op:id`).
   - Control-plane ops fail closed on Redis unavailability; data-plane uses DLQ on auth failures.
 - Observability:
+  - **Event-driven structured logging**: Security-compliant event schemas for API access, authentication, authorization, registration, tokens, admin actions, and infrastructure events. See `docs/logging.md` for details.
   - Security KPIs exported: admin mTLS denials, admin signature invalid, admin replays, canonical verify failures, rate limit allow/deny per op.
 
 ### Deployment hardening checklist

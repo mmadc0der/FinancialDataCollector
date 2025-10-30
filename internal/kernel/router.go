@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -211,6 +212,8 @@ type router struct {
 }
 
 func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) {
+    ev := logging.NewEventLogger()
+    
     r := &router{
         publishEnabled: cfg.Redis.PublishEnabled,
         pgBatchSize: cfg.Postgres.BatchSize,
@@ -233,7 +236,7 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
         r.spr = spill.NewReplayer("./spill", r.pg)
         r.spr.Start()
     } else {
-        logging.Error("postgres_init_error", logging.Err(err))
+        ev.Infra("init", "postgres", "failed", fmt.Sprintf("failed to initialize Postgres: %v", err))
         return nil, err
     }
     if rd, err := data.NewRedis(cfg.Redis); err == nil {
@@ -243,7 +246,7 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
         r.rdCh = make(chan rdMsg, q)
         go r.rdWorker()
     } else {
-        logging.Error("redis_init_error", logging.Err(err))
+        ev.Infra("init", "redis", "failed", fmt.Sprintf("failed to initialize Redis: %v", err))
         return nil, err
     }
     // spill disabled
@@ -276,6 +279,8 @@ type pgMsgLean struct {
 }
 
 func (r *router) pgWorkerBatch() {
+    ev := logging.NewEventLogger()
+    
     buf := make([]pgMsg, 0, r.pgBatchSize)
     timer := time.NewTimer(r.pgBatchWait)
     defer timer.Stop()
@@ -295,32 +300,36 @@ func (r *router) pgWorkerBatch() {
 
         // Check circuit breaker before executing
         if !r.pgCircuitBreaker.canExecute() {
-            logging.Warn("pg_circuit_breaker_open", logging.F("batch_size", len(events)))
+            ev.Infra("error", "postgres", "failed", fmt.Sprintf("circuit breaker open, batch_size=%d", len(events)))
             // Fall back to spill immediately when circuit is open
             if r.spw == nil {
-                if w, e := spill.NewWriter("./spill"); e == nil { r.spw = w } else { logging.Error("spill_init_error", logging.Err(e)) }
+                if w, e := spill.NewWriter("./spill"); e == nil { 
+                    r.spw = w 
+                } else { 
+                    ev.Infra("init", "spill", "failed", fmt.Sprintf("failed to initialize spill writer: %v", e))
+                }
             }
             if r.spw != nil {
                 // Use async spill write to avoid blocking the main thread
                 go func(events []map[string]any, redisIDs []string) {
                     if _, _, e := r.spw.Write(events); e == nil {
                         if r.ack != nil { r.ack(redisIDs...) }
-                        logging.Warn("pg_circuit_spilled", logging.F("count", len(events)))
+                        ev.Infra("write", "spill", "success", fmt.Sprintf("circuit breaker spill: count=%d", len(events)))
                     } else {
-                        logging.Error("spill_write_failed", logging.F("count", len(events)), logging.Err(e))
+                        ev.Infra("write", "spill", "failed", fmt.Sprintf("spill write failed: count=%d, error=%v", len(events), e))
                     }
                 }(events, redisIDs)
                 buf = buf[:0]
                 return
             }
-            logging.Error("pg_circuit_no_fallback", logging.F("buffer_len", len(buf)))
+            ev.Infra("error", "postgres", "failed", fmt.Sprintf("circuit breaker open, no fallback available, buffer_len=%d", len(buf)))
             return
         }
 
         err := r.pg.IngestEventsJSON(context.Background(), events)
         metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
         if err == nil {
-            logging.Info("pg_batch_commit", logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
+            ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit: batch_size=%d, duration_ms=%d", len(events), time.Since(t0).Milliseconds()))
             r.pgCircuitBreaker.onSuccess()
             if r.ack != nil { r.ack(redisIDs...) }
             buf = buf[:0]
@@ -328,7 +337,7 @@ func (r *router) pgWorkerBatch() {
         }
 
         r.pgCircuitBreaker.onFailure()
-        logging.Warn("pg_batch_error", logging.F("err", err.Error()), logging.F("batch_size", len(events)))
+        ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error: batch_size=%d, error=%v", len(events), err))
         // Retry with configurable exponential backoff and jitter
         maxRetries := 3 // Use default since we don't have access to Redis config here
         baseBackoff := time.Duration(200) * time.Millisecond
@@ -350,12 +359,12 @@ func (r *router) pgWorkerBatch() {
             time.Sleep(sleepTime)
             t1 := time.Now()
             if e := r.pg.IngestEventsJSON(context.Background(), events); e == nil {
-                logging.Info("pg_batch_commit_retry", logging.F("attempt", i), logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t1).Milliseconds()))
+                ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit retry: attempt=%d, batch_size=%d, duration_ms=%d", i, len(events), time.Since(t1).Milliseconds()))
                 if r.ack != nil { r.ack(redisIDs...) }
                 buf = buf[:0]
                 return
             } else {
-                logging.Warn("pg_batch_error_retry", logging.F("attempt", i), logging.F("err", e.Error()))
+                ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error retry: attempt=%d, error=%v", i, e))
                 lastErr = e
             }
         }
@@ -363,7 +372,11 @@ func (r *router) pgWorkerBatch() {
         if isConnectivityError(lastErr) {
             // write spill and ack Redis; router replayer will flush on reconnect
             if r.spw == nil {
-                if w, e := spill.NewWriter("./spill"); e == nil { r.spw = w } else { logging.Error("spill_init_error", logging.Err(e)) }
+                if w, e := spill.NewWriter("./spill"); e == nil { 
+                    r.spw = w 
+                } else { 
+                    ev.Infra("init", "spill", "failed", fmt.Sprintf("failed to initialize spill writer: %v", e))
+                }
             }
             if r.spw != nil {
                 // Build events once for spill
@@ -376,12 +389,12 @@ func (r *router) pgWorkerBatch() {
                 }
                 if _, _, e := r.spw.Write(events); e == nil {
                     if r.ack != nil { r.ack(redisIDs...) }
-                    logging.Warn("pg_connectivity_spilled", logging.F("count", len(events)))
+                    ev.Infra("write", "spill", "success", fmt.Sprintf("connectivity error spill: count=%d", len(events)))
                     buf = buf[:0]
                     return
                 }
             }
-            logging.Error("pg_connectivity_error_deferred", logging.F("buffer_len", len(buf)), logging.F("err", lastErr.Error()))
+            ev.Infra("error", "postgres", "failed", fmt.Sprintf("connectivity error deferred: buffer_len=%d, error=%v", len(buf), lastErr))
             return
         }
 
@@ -396,10 +409,12 @@ func (r *router) pgWorkerBatch() {
                 succeededIDs = append(succeededIDs, redisIDs[i])
             }
         }
-        if len(failed) > 0 { logging.Warn("pg_fallback_failed_count", logging.F("count", len(failed))) }
+        if len(failed) > 0 { 
+            ev.Infra("error", "postgres", "failed", fmt.Sprintf("fallback failed count: %d", len(failed)))
+        }
         if len(failed) == 0 { buf = buf[:0]; return }
         // Could not persist; rely on DB-level spill (ingest_spill) and retry next cycle; log as error
-        logging.Error("pg_persist_failed_non_connectivity", logging.F("buffer_len", len(buf)))
+        ev.Infra("error", "postgres", "failed", fmt.Sprintf("persist failed non-connectivity: buffer_len=%d", len(buf)))
     }
     for {
         select {
@@ -427,6 +442,8 @@ func (r *router) handleLeanEvent(redisID, eventID, ts, subjectID, producerID str
 }
 
 func (r *router) pgWorkerBatchLean() {
+    ev := logging.NewEventLogger()
+    
     buf := make([]pgMsgLean, 0, r.pgBatchSize)
     timer := time.NewTimer(r.pgBatchWait)
     defer timer.Stop()
@@ -463,12 +480,12 @@ func (r *router) pgWorkerBatchLean() {
         err := r.pg.IngestEventsJSON(context.Background(), events)
         metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
         if err == nil {
-            logging.Info("pg_batch_commit", logging.F("batch_size", len(events)), logging.F("duration_ms", time.Since(t0).Milliseconds()))
+            ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit: batch_size=%d, duration_ms=%d", len(events), time.Since(t0).Milliseconds()))
             if r.ack != nil { r.ack(redisIDs...) }
             buf = buf[:0]
             return
         }
-        logging.Warn("pg_batch_error", logging.F("err", err.Error()), logging.F("batch_size", len(events)))
+        ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error: batch_size=%d, error=%v", len(events), err))
         // per-row fallback with object pooling
         succeeded := make([]string, 0, len(buf))
         for i, m := range buf {

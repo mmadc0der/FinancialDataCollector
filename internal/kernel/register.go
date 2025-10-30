@@ -11,6 +11,7 @@ import (
     "time"
 
     "sync"
+    "strings"
 
     "github.com/example/data-kernel/internal/logging"
     "github.com/example/data-kernel/internal/metrics"
@@ -108,8 +109,10 @@ type regPayload struct {
 // Rate limiting check - returns true if request should be allowed
 // Uses Redis sliding window rate limiting per producer_id (fail-closed security)
 func (k *Kernel) checkRateLimit(ctx context.Context, op, producerID string) bool {
+    ev := logging.NewEventLogger()
+    
     if k.rd == nil || k.rd.C() == nil {
-        logging.Error("rate_limit_redis_unavailable")
+        ev.Infra("error", "redis", "failed", "rate limit check: redis unavailable")
         return false // deny if Redis unavailable (fail-closed)
     }
 
@@ -148,15 +151,10 @@ return allowed
     // Eval returns int64 1/0
     res, err := k.rd.C().Eval(ctx, lua, []string{rateKey}, burst, refill).Int()
     if err != nil {
-        logging.Warn("rate_limit_eval_error", logging.Err(err))
+        ev.Infra("error", "redis", "failed", fmt.Sprintf("rate limit eval error: %v", err))
         return false
     }
     if res == 0 {
-        logging.Info("rate_limited",
-            logging.F("op", op),
-            logging.F("producer_id", producerID),
-            logging.F("rpm", rpm),
-            logging.F("burst", burst))
         metrics.RegistrationRateLimited.Inc()
         metrics.RateLimitDeny.WithLabelValues(op).Inc()
         return false
@@ -168,21 +166,23 @@ return allowed
 
 // Check nonce replay prevention
 func (k *Kernel) checkNonceReplay(ctx context.Context, fingerprint, nonce string) bool {
+    ev := logging.NewEventLogger()
+    
     if k.rd == nil || k.rd.C() == nil {
+        ev.Infra("error", "redis", "failed", "nonce replay check: redis unavailable")
         return true // allow if Redis unavailable
     }
     
     nonceKey := prefixed(k.cfg.Redis.KeyPrefix, "reg:nonce:"+fingerprint+":"+nonce)
     ok, err := k.rd.C().SetNX(ctx, nonceKey, 1, time.Hour).Result()
     if err != nil {
-        logging.Info("registration_nonce_guard_error", logging.Err(err), logging.F("fingerprint", fingerprint))
+        ev.Infra("error", "redis", "failed", fmt.Sprintf("nonce guard error: %v", err))
         return true // allow on error
     }
     
     if !ok {
-        logging.Info("registration_nonce_replay", 
-            logging.F("fingerprint", fingerprint), 
-            logging.F("nonce", nonce))
+        // Replay detected - log as security event
+        ev.Registration("replay", fingerprint, "", "", "duplicate_nonce")
         return false
     }
     
@@ -191,30 +191,35 @@ func (k *Kernel) checkNonceReplay(ctx context.Context, fingerprint, nonce string
 
 // Verify certificate signature and TTL
 func (k *Kernel) verifyCertificate(pubkey string) (bool, string, time.Time, time.Time) {
+    ev := logging.NewEventLogger()
+    
     // Producer certificate is mandatory and must be signed by configured CA
-    if k.cfg.Auth.ProducerSSHCA == "" { return false, "", time.Time{}, time.Time{} }
+    if k.cfg.Auth.ProducerSSHCA == "" { 
+        ev.Infra("error", "auth", "failed", "certificate verification: ProducerSSHCA not configured")
+        return false, "", time.Time{}, time.Time{} 
+    }
     
     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
     if err != nil {
-        logging.Info("registration_cert_parse_error", logging.Err(err))
+        ev.Infra("error", "auth", "failed", fmt.Sprintf("certificate parse error: %v", err))
         return false, "", time.Time{}, time.Time{}
     }
     
     cert, ok := parsedPub.(*ssh.Certificate)
     if !ok {
-        logging.Info("registration_not_certificate")
+        ev.Infra("error", "auth", "failed", "pubkey is not a certificate")
         return false, "", time.Time{}, time.Time{}
     }
     
     // Check CA signature
     caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
     if err != nil || caPub == nil {
-        logging.Info("registration_ca_parse_error", logging.Err(err))
+        ev.Infra("error", "auth", "failed", fmt.Sprintf("CA pubkey parse error: %v", err))
         return false, "", time.Time{}, time.Time{}
     }
     
     if !bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
-        logging.Info("registration_ca_signature_invalid")
+        ev.Infra("error", "auth", "failed", "certificate signature does not match CA")
         return false, "", time.Time{}, time.Time{}
     }
     
@@ -223,36 +228,41 @@ func (k *Kernel) verifyCertificate(pubkey string) (bool, string, time.Time, time
     va := time.Unix(int64(cert.ValidAfter), 0)
     vb := time.Unix(int64(cert.ValidBefore), 0)
     if cert.ValidAfter != 0 && now.Before(time.Unix(int64(cert.ValidAfter), 0)) {
-        logging.Info("registration_cert_not_yet_valid", 
-            logging.F("valid_after", va))
+        ev.Infra("error", "auth", "failed", fmt.Sprintf("certificate not yet valid: valid_after=%v", va))
         return false, "", time.Time{}, time.Time{}
     }
     
     if cert.ValidBefore != 0 && now.After(time.Unix(int64(cert.ValidBefore), 0)) {
-        logging.Info("registration_cert_expired", 
-            logging.F("valid_before", vb))
+        ev.Infra("error", "auth", "failed", fmt.Sprintf("certificate expired: valid_before=%v", vb))
         return false, "", time.Time{}, time.Time{}
     }
 
-    // Do not log here to avoid duplicate events; caller will emit a single combined log
+    // Certificate verified successfully
+    ev.Infra("verify", "auth", "success", fmt.Sprintf("certificate verified: key_id=%s", cert.KeyId))
     return true, cert.KeyId, va, vb
 }
 
 // Verify signature over payload + nonce (certificate validity already verified)
 func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool {
+    ev := logging.NewEventLogger()
+    
     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
     if err != nil {
-        logging.Info("registration_pubkey_parse_error", logging.Err(err))
+        ev.Infra("error", "auth", "failed", fmt.Sprintf("signature verification: pubkey parse error: %v", err))
         return false
     }
     
     // Extract the raw key from certificate (certificate validity already verified)
     if k.cfg.Auth.ProducerSSHCA != "" {
-        caPub, _, _, _, _ := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+        caPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(k.cfg.Auth.ProducerSSHCA))
+        if err != nil {
+            ev.Infra("error", "auth", "failed", fmt.Sprintf("signature verification: CA parse error: %v", err))
+            return false
+        }
         if cert, ok := parsedPub.(*ssh.Certificate); ok && caPub != nil && bytes.Equal(cert.SignatureKey.Marshal(), caPub.Marshal()) {
             parsedPub = cert.Key
         } else {
-            logging.Info("registration_cert_invalid")
+            ev.Infra("error", "auth", "failed", "signature verification: certificate key extraction failed")
             return false
         }
     }
@@ -266,23 +276,25 @@ func (k *Kernel) verifySignature(pubkey, payloadStr, nonce, sigB64 string) bool 
                 sigBytes, _ = base64.StdEncoding.DecodeString(sigB64)
             }
             if len(sigBytes) == ed25519.SignatureSize && ed25519.Verify(edpk, msg, sigBytes) {
-                logging.Info("registration_sig_valid")
+                ev.Infra("verify", "auth", "success", "signature verified")
                 return true
             } else {
-                logging.Info("registration_sig_invalid")
+                ev.Infra("error", "auth", "failed", "signature verification failed: invalid signature")
                 return false
             }
         }
     }
     
-    logging.Info("registration_unsupported_key_type")
+    ev.Infra("error", "auth", "failed", "signature verification: unsupported key type")
     return false
 }
 
 // Send response to Redis stream
 func (k *Kernel) sendRegistrationResponse(ctx context.Context, nonce string, response map[string]any) {
+    ev := logging.NewEventLogger()
+    
     if k.rd == nil || k.rd.C() == nil {
-        logging.Error("registration_response_error", logging.F("error", "redis_unavailable"))
+        ev.Infra("error", "redis", "failed", "registration response: redis unavailable")
         return
     }
 
@@ -292,47 +304,44 @@ func (k *Kernel) sendRegistrationResponse(ctx context.Context, nonce string, res
         ttl = 5 * time.Minute // default
     }
 
-    // Log the response being sent for debugging
-    logging.Info("registration_response_sending",
-        logging.F("nonce", nonce),
-        logging.F("stream", respStream),
-        logging.F("status", response["status"]))
-
     err := k.rd.C().XAdd(ctx, &redis.XAddArgs{
         Stream: respStream,
         Values: response,
     }).Err()
 
     if err != nil {
-        logging.Info("registration_response_error", logging.Err(err), logging.F("stream", respStream))
+        ev.Infra("write", "redis", "failed", fmt.Sprintf("registration response write error: %v", err))
     } else {
         // Set TTL on response stream
         if expireErr := k.rd.C().Expire(ctx, respStream, ttl).Err(); expireErr != nil {
-            logging.Info("registration_response_ttl_error", logging.Err(expireErr), logging.F("stream", respStream))
+            ev.Infra("error", "redis", "failed", fmt.Sprintf("registration response TTL error: %v", expireErr))
         }
     }
 }
 
 // Main registration consumer with new state machine
 func (k *Kernel) consumeRegister(ctx context.Context) {
+    ev := logging.NewEventLogger()
+    
     if k.rd == nil { 
-        logging.Info("registration_consumer_disabled_no_redis")
+        ev.Infra("error", "redis", "failed", "registration consumer disabled: redis unavailable")
         return 
     }
     if k.pg == nil {
-        logging.Info("registration_consumer_disabled_no_pg")
+        ev.Infra("error", "postgres", "failed", "registration consumer disabled: postgres unavailable")
         return
     }
     
     stream := prefixed(k.cfg.Redis.KeyPrefix, "register")
-    // Ensure consumer group exists for the registration stream (ignore BUSYGROUP errors)
+    // Ensure consumer group exists for the registration stream
     if k.rd.C() != nil && k.cfg.Redis.ConsumerGroup != "" {
-        _ = k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err()
+        if err := k.rd.C().XGroupCreateMkStream(ctx, stream, k.cfg.Redis.ConsumerGroup, "0-0" ).Err(); err != nil {
+            // BUSYGROUP is expected if group already exists, but log other errors
+            if !strings.Contains(err.Error(), "BUSYGROUP") {
+                ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to create consumer group: %v", err))
+            }
+        }
     }
-    
-    logging.Info("register_consumer_start", 
-        logging.F("stream", stream), 
-        logging.F("group", k.cfg.Redis.ConsumerGroup))
     
     consumer := fmt.Sprintf("%s-reg-%d", "kernel", time.Now().UnixNano())
     
@@ -346,11 +355,13 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
         }).Result()
         
         if err != nil && !errors.Is(err, redis.Nil) {
-            logging.Info("register_read_error", logging.Err(err))
+            ev.Infra("read", "redis", "failed", fmt.Sprintf("registration stream read error: %v", err))
             time.Sleep(200 * time.Millisecond)
             continue
         }
-        if len(res) == 0 { continue }
+        if len(res) == 0 { 
+            continue 
+        }
         
         for _, s := range res {
             for _, m := range s.Messages {
@@ -362,6 +373,8 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
 
 // Process a single registration message
 func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, m redis.XMessage) {
+    ev := logging.NewEventLogger()
+    
     // Extract fields
     pubkey, _ := m.Values["pubkey"].(string)
     payloadStr, _ := m.Values["payload"].(string)
@@ -370,24 +383,23 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     action, _ := m.Values["action"].(string)
     
     if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
-        logging.Info("registration_missing_fields", logging.F("id", m.ID))
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        ev.Registration("attempt", "", "", "failed", "missing_fields")
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack message with missing fields: %v", err))
+        }
         return
     }
     
     fp := sshFingerprint([]byte(pubkey))
-    logging.Info("registration_received",
-        logging.F("id", m.ID),
-        logging.F("fingerprint", fp),
-        logging.F("action", action))
+    ev.Registration("attempt", fp, "", "", "")
 
     // Parse payload first to get producer_id for rate limiting
     var payload regPayload
     if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-        logging.Info("registration_payload_parse_error",
-            logging.F("fingerprint", fp),
-            logging.Err(err))
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        ev.Registration("attempt", fp, "", "failed", fmt.Sprintf("payload_parse_error: %v", err))
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack message with parse error: %v", err))
+        }
         return
     }
 
@@ -402,52 +414,67 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 
     // Rate limiting check per producer_id/fingerprint
     if !k.checkRateLimit(ctx, "reg", rateLimitID) {
+        ev.Registration("rate_limited", fp, "", "", "")
         // respond to client on same per-nonce response stream for consistency
         k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "rate_limited"})
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack rate-limited message: %v", err))
+        }
         return
     }
     
     // Check nonce replay
     if !k.checkNonceReplay(ctx, fp, nonce) {
         // Register producer key with audit record for replay
-        _, _ = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "replay", "duplicate_nonce")
+        producerID, err := k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "replay", "duplicate_nonce")
+        if err != nil {
+            ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for replay: %v", err))
+        }
+        ev.Registration("replay", fp, producerID, "replay", "duplicate_nonce")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "replay", "reason": "duplicate_nonce"})
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay message: %v", err))
+        }
         return
     }
     
     // Verify certificate first (before signature verification)
     certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
     if !certValid {
-        logging.Info("registration_cert_invalid", logging.F("fingerprint", fp))
         // Register producer key with audit record for invalid cert
-        _, _ = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed")
+        producerID, err := k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed")
+        if err != nil {
+            ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for invalid cert: %v", err))
+        }
+        ev.Registration("invalid_cert", fp, producerID, "invalid_cert", "certificate_verification_failed")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{
             "fingerprint": fp,
             "status": "invalid_cert",
             "reason": "certificate_verification_failed",
         })
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid cert message: %v", err))
+        }
         return
     }
-    logging.Info("registration_cert_verified",
-        logging.F("fingerprint", fp),
-        logging.F("cert_key_id", keyID),
-        logging.F("valid_after", validAfter),
-        logging.F("valid_before", validBefore))
+    // Certificate verified successfully - caller will log registration event
     
     // Verify signature (after certificate verification)
     if !k.verifySignature(pubkey, payloadStr, nonce, sigB64) {
-        logging.Info("registration_signature_invalid", logging.F("fingerprint", fp))
         // Register producer key with audit record for invalid signature
-        _, _ = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_sig", "signature_verification_failed")
+        producerID, err := k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_sig", "signature_verification_failed")
+        if err != nil {
+            ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for invalid sig: %v", err))
+        }
+        ev.Registration("invalid_sig", fp, producerID, "invalid_sig", "signature_verification_failed")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{
             "fingerprint": fp,
             "status": "invalid_sig",
             "reason": "signature_verification_failed",
         })
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid sig message: %v", err))
+        }
         return
     }
 
@@ -462,13 +489,13 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     var err error
     producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, status, "")
     if err != nil {
-        logging.Error("registration_producer_key_register_error",
-            logging.F("fingerprint", fp),
-            logging.Err(err))
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key: %v", err))
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack registration error: %v", err))
+        }
         return
     }
-    logging.Info("registration_producer_registered", logging.F("producer_id", producerID), logging.F("fingerprint", fp), logging.F("hint", payload.ProducerHint))
+    ev.Registration("attempt", fp, producerID, status, "")
 
     // Handle deregister action
     if action == "deregister" {
@@ -479,11 +506,10 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     // Check current key status (should exist now after RegisterProducerKey)
     status, statusProducerID, err := k.pg.GetKeyStatus(ctx, fp)
     if err != nil {
-        logging.Error("registration_status_check_error",
-            logging.F("producer_id", producerID),
-            logging.F("fingerprint", fp),
-            logging.Err(err))
-        _ = k.rd.AckStream(ctx, stream, m.ID)
+        ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to get key status: %v", err))
+        if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack status check error: %v", err))
+        }
         return
     }
     if statusProducerID != nil && *statusProducerID != "" {
@@ -503,23 +529,22 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         k.handleKnownDenied(ctx, stream, &producerID, fp, status, m.ID, nonce)
     default:
         // This shouldn't happen after RegisterProducerKey, but handle gracefully
-        logging.Info("registration_unknown_status", logging.F("producer_id", producerID), logging.F("status", status))
+        ev.Registration("attempt", fp, producerID, status, "unknown_status")
         k.handleNewProducer(ctx, stream, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID)
     }
 }
 
 // Handle deregister action
 func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
-    logging.Info("registration_deregister_received", logging.F("producer_id", producerID))
+    ev := logging.NewEventLogger()
+    
+    ev.Registration("attempt", fp, producerID, "deregister", "")
     
     err := k.pg.DisableProducer(ctx, producerID)
     if err != nil {
-        logging.Error("registration_deregister_error",
-            logging.F("producer_id", producerID),
-            logging.Err(err))
+        ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to disable producer: %v", err))
     } else {
-        logging.Info("registration_deregister_success",
-            logging.F("producer_id", producerID))
+        ev.Registration("attempt", fp, producerID, "deregistered", "")
     }
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
@@ -527,40 +552,44 @@ func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp st
         "producer_id": producerID,
         "status": "deregistered",
     })
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack deregister message: %v", err))
+    }
 }
 
 // Handle known approved key
 func (k *Kernel) handleKnownApproved(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
-    logging.Info("registration_known_approved", 
-        logging.F("producer_id", producerID), 
-        logging.F("fingerprint", fp))
+    ev := logging.NewEventLogger()
+    
+    ev.Registration("attempt", fp, producerID, "approved", "")
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
         "producer_id": producerID,
         "status": "approved",
     })
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack approved message: %v", err))
+    }
 }
 
 // Handle known pending key
 func (k *Kernel) handleKnownPending(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
-    logging.Info("registration_known_pending", 
-        logging.F("producer_id", producerID), 
-        logging.F("fingerprint", fp))
+    ev := logging.NewEventLogger()
     
     // Silent - no response for pending keys per protocol
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack pending message: %v", err))
+    }
 }
 
 // Handle known denied key
 func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerID *string, fp, status, msgID, nonce string) {
+    ev := logging.NewEventLogger()
+    
     var pid string
     if producerID != nil { pid = *producerID }
-    logging.Info("registration_known_denied",
-        logging.F("producer_id", pid),
-        logging.F("status", status))
+    ev.Registration("attempt", fp, pid, status, "")
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
@@ -568,19 +597,25 @@ func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerI
         "status": "denied",
         "reason": status,
     })
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack denied message: %v", err))
+    }
 }
 
 // Handle new producer registration (fallback - should not occur post-RegisterProducerKey)
 func (k *Kernel) handleNewProducer(ctx context.Context, stream, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
-    logging.Info("registration_new_producer", logging.F("producer_id", producerID))
+    ev := logging.NewEventLogger()
+    
+    ev.Registration("attempt", fp, producerID, "pending", "")
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
         "producer_id": producerID,
         "status": "pending",
     })
-    _ = k.rd.AckStream(ctx, stream, msgID)
+    if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+        ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack new producer message: %v", err))
+    }
 }
 
 func sshFingerprint(pubKeyData []byte) string {
