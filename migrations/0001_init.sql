@@ -452,13 +452,19 @@ END;
 $$;
 
 -- Function: Register new producer + key atomically (for first-time registration)
--- Creates a new producer, inserts the key row with producer_id binding, and returns producer_id
+-- Creates a new producer, inserts the key row with producer_id binding, and optionally creates audit record
+-- Returns the new producer_id
 CREATE OR REPLACE FUNCTION public.register_producer_key(
     _fingerprint TEXT,
     _pubkey TEXT,
     _producer_hint TEXT DEFAULT NULL,
     _contact TEXT DEFAULT NULL,
-    _meta JSONB DEFAULT NULL
+    _meta JSONB DEFAULT NULL,
+    _audit_payload JSONB DEFAULT NULL,
+    _audit_sig TEXT DEFAULT NULL,
+    _audit_nonce TEXT DEFAULT NULL,
+    _audit_status TEXT DEFAULT NULL,
+    _audit_reason TEXT DEFAULT NULL
 ) RETURNS UUID LANGUAGE plpgsql AS $$
 DECLARE 
     v_producer_id UUID;
@@ -506,6 +512,20 @@ BEGIN
     SET producer_id = v_producer_id, 
         pubkey = EXCLUDED.pubkey
     WHERE public.producer_keys.status NOT IN ('approved', 'revoked');
+    
+    -- Create audit record if audit parameters provided
+    IF _audit_payload IS NOT NULL AND _audit_sig IS NOT NULL AND _audit_nonce IS NOT NULL AND _audit_status IS NOT NULL THEN
+        INSERT INTO public.producer_registrations(reg_id, fingerprint, payload, sig, nonce, status, reason, reviewed_at, reviewer)
+        VALUES (gen_random_uuid(), _fingerprint, _audit_payload, _audit_sig, _audit_nonce, _audit_status, NULLIF(_audit_reason, ''), CASE WHEN _audit_status IN ('approved', 'rejected') THEN now() ELSE NULL END, NULL)
+        ON CONFLICT (fingerprint, nonce)
+        DO UPDATE SET
+            status = CASE
+                        WHEN public.producer_registrations.status IN ('replay','invalid_sig','invalid_cert') THEN public.producer_registrations.status
+                        ELSE EXCLUDED.status
+                     END,
+            reason = COALESCE(NULLIF(EXCLUDED.reason,''), public.producer_registrations.reason),
+            reviewed_at = CASE WHEN EXCLUDED.status IN ('approved', 'rejected') THEN now() ELSE public.producer_registrations.reviewed_at END;
+    END IF;
     
     RETURN v_producer_id;
 END;

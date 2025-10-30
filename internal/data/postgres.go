@@ -553,27 +553,12 @@ func (p *Postgres) GetProducerKey(ctx context.Context, fingerprint string) (exis
 	return true, st, pid
 }
 
+// CreateRegistration is deprecated - use RegisterProducerKey with audit parameters instead.
+// This method is kept temporarily for backwards compatibility but will be removed.
+// Deprecated: Use RegisterProducerKey with audit parameters.
 func (p *Postgres) CreateRegistration(ctx context.Context, fingerprint, payload, sig, nonce, status, reason, reviewer string) error {
-	if err := p.ensurePool(); err != nil {
-		return err
-	}
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-    _, err := p.pool.Exec(cctx,
-        `INSERT INTO public.producer_registrations(reg_id, fingerprint, payload, sig, nonce, status, reason, reviewed_at, reviewer)
-         VALUES (gen_random_uuid(), $1, $2::jsonb, $3, $4, $5, NULLIF($6,''), CASE WHEN $7<>'' THEN now() ELSE NULL END, NULLIF($7,''))
-         ON CONFLICT (fingerprint, nonce)
-         DO UPDATE SET
-            status = CASE
-                        WHEN public.producer_registrations.status IN ('replay','invalid_sig','invalid_cert') THEN public.producer_registrations.status
-                        ELSE EXCLUDED.status
-                     END,
-            reason = COALESCE(NULLIF(EXCLUDED.reason,''), public.producer_registrations.reason),
-            reviewed_at = CASE WHEN EXCLUDED.reviewer <> '' THEN now() ELSE public.producer_registrations.reviewed_at END,
-            reviewer = COALESCE(NULLIF(EXCLUDED.reviewer,''), public.producer_registrations.reviewer)`,
-        fingerprint, payload, sig, nonce, status, reason, reviewer,
-    )
-	return err
+	// No-op stub - functionality moved to RegisterProducerKey
+	return nil
 }
 
 // ApproveNewProducerKey approves a new producer key (case 1: new producer)
@@ -711,8 +696,9 @@ func (p *Postgres) EnsureProducerForFingerprint(ctx context.Context, fingerprint
 }
 
 // RegisterProducerKey atomically creates a producer and binds a fingerprint in a single Postgres transaction.
+// Optionally creates an audit record if audit parameters are provided.
 // Returns the new producer_id.
-func (p *Postgres) RegisterProducerKey(ctx context.Context, fingerprint, pubkey, producerHint, contact string, meta map[string]string) (string, error) {
+func (p *Postgres) RegisterProducerKey(ctx context.Context, fingerprint, pubkey, producerHint, contact string, meta map[string]string, auditPayload, auditSig, auditNonce, auditStatus, auditReason string) (string, error) {
 	if err := p.ensurePool(); err != nil {
 		return "", err
 	}
@@ -720,7 +706,21 @@ func (p *Postgres) RegisterProducerKey(ctx context.Context, fingerprint, pubkey,
 	defer cancel()
 	var producerID string
 	metaJSON, _ := json.Marshal(meta)
-	err := p.pool.QueryRow(cctx, `SELECT public.register_producer_key($1, $2, $3, $4, $5)`, fingerprint, pubkey, producerHint, contact, metaJSON).Scan(&producerID)
+	
+	// Prepare audit parameters
+	var auditPayloadJSON any
+	if auditPayload != "" {
+		var payloadMap map[string]any
+		if err := json.Unmarshal([]byte(auditPayload), &payloadMap); err == nil {
+			auditPayloadJSON = payloadMap
+		} else {
+			auditPayloadJSON = auditPayload
+		}
+	}
+	
+	err := p.pool.QueryRow(cctx, `SELECT public.register_producer_key($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, 
+		fingerprint, pubkey, producerHint, contact, metaJSON,
+		auditPayloadJSON, auditSig, auditNonce, auditStatus, auditReason).Scan(&producerID)
 	if err != nil {
 		return "", err
 	}

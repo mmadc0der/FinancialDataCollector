@@ -410,40 +410,38 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     
     // Check nonce replay
     if !k.checkNonceReplay(ctx, fp, nonce) {
-        // Create registration record for audit and notify client
-        _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "replay", "duplicate_nonce", "")
+        // Register producer key with audit record for replay
+        _, _ = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "replay", "duplicate_nonce")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "replay", "reason": "duplicate_nonce"})
         _ = k.rd.AckStream(ctx, stream, m.ID)
         return
     }
     
     // Verify certificate first (before signature verification)
-    if true {
-        certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
-        if !certValid {
-            logging.Info("registration_cert_invalid", logging.F("fingerprint", fp))
-            // Ensure producer_keys entry exists and is bound for FK constraint
-            _, _ = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta)
-            _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed", "")
-            k.sendRegistrationResponse(ctx, nonce, map[string]any{
-                "fingerprint": fp,
-                "status": "invalid_cert",
-                "reason": "certificate_verification_failed",
-            })
-            _ = k.rd.AckStream(ctx, stream, m.ID)
-            return
-        }
-        logging.Info("registration_cert_verified",
-            logging.F("fingerprint", fp),
-            logging.F("cert_key_id", keyID),
-            logging.F("valid_after", validAfter),
-            logging.F("valid_before", validBefore))
+    certValid, keyID, validAfter, validBefore := k.verifyCertificate(pubkey)
+    if !certValid {
+        logging.Info("registration_cert_invalid", logging.F("fingerprint", fp))
+        // Register producer key with audit record for invalid cert
+        _, _ = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed")
+        k.sendRegistrationResponse(ctx, nonce, map[string]any{
+            "fingerprint": fp,
+            "status": "invalid_cert",
+            "reason": "certificate_verification_failed",
+        })
+        _ = k.rd.AckStream(ctx, stream, m.ID)
+        return
     }
+    logging.Info("registration_cert_verified",
+        logging.F("fingerprint", fp),
+        logging.F("cert_key_id", keyID),
+        logging.F("valid_after", validAfter),
+        logging.F("valid_before", validBefore))
     
     // Verify signature (after certificate verification)
     if !k.verifySignature(pubkey, payloadStr, nonce, sigB64) {
         logging.Info("registration_signature_invalid", logging.F("fingerprint", fp))
-        k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, "invalid_sig", "signature_verification_failed", "")
+        // Register producer key with audit record for invalid signature
+        _, _ = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_sig", "signature_verification_failed")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{
             "fingerprint": fp,
             "status": "invalid_sig",
@@ -453,10 +451,10 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         return
     }
 
-    // Atomically create producer and bind fingerprint for first-time registration
+    // Atomically create producer and bind fingerprint for first-time registration with audit record
     var producerID string
     var err error
-    producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta)
+    producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, status, "")
     if err != nil {
         logging.Error("registration_producer_key_register_error",
             logging.F("fingerprint", fp),
@@ -487,8 +485,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         producerID = *statusProducerID
     }
 
-    // Create pending registration record for audit
-    _ = k.pg.CreateRegistration(ctx, fp, payloadStr, sigB64, nonce, status, "", "")
+    // Audit record already created by RegisterProducerKey call above
 
     // State machine based on current status
     switch status {
