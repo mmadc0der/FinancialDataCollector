@@ -452,6 +452,12 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     }
 
     // Atomically create producer and bind fingerprint for first-time registration with audit record
+    // Get current status first (or use "pending" as default for new registrations)
+    status, _, _ := k.pg.GetKeyStatus(ctx, fp)
+    if status == "" {
+        status = "pending" // Default for new registrations
+    }
+    
     var producerID string
     var err error
     producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, status, "")
