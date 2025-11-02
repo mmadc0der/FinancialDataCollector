@@ -61,7 +61,16 @@ func TestProducerExample_EndToEnd(t *testing.T) {
         Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 50, 50, ""),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
-        Auth: kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: base64.RawStdEncoding.EncodeToString(issuerPriv), PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(issuerPub)}},
+        Auth: kernelcfg.AuthConfig{
+            RequireToken: true,
+            Issuer: "it",
+            Audience: "it",
+            KeyID: "k",
+            PrivateKey: base64.RawStdEncoding.EncodeToString(issuerPriv),
+            PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(issuerPub)},
+            ProducerSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it",
+            AdminSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it",
+        },
     }
     cancelKernel := itutil.StartKernel(t, cfg)
     defer cancelKernel()
