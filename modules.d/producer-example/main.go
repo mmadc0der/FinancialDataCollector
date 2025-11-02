@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,6 +20,8 @@ import (
 	"golang.org/x/crypto/sha3"
 	ssh "golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
+    
+    "github.com/example/data-kernel/internal/logging"
 )
 
 // Minimal JWT-like structs for debug logging of tokens
@@ -86,10 +87,11 @@ type Config struct {
 }
 
 func loadConfig(path string) Config {
+    ev := logging.NewEventLogger()
     b, err := os.ReadFile(path)
-    if err != nil { log.Fatal(err) }
+    if err != nil { ev.Infra("config", "producer", "failed", "read_config_error: "+err.Error()); os.Exit(1) }
     var c Config
-    if err := yaml.Unmarshal(b, &c); err != nil { log.Fatal(err) }
+    if err := yaml.Unmarshal(b, &c); err != nil { ev.Infra("config", "producer", "failed", "yaml_unmarshal_error: "+err.Error()); os.Exit(1) }
     return c
 }
 
@@ -187,6 +189,7 @@ func readResponseOnce(ctx context.Context, rdb *redis.Client, stream string, las
 // sendSubjectOpSigned sends a signed subject operation and waits for a response.
 // It retries with a fresh nonce and signature on timeout to avoid nonce replays.
 func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Signer, pubForRegistration string, cfg Config, producerID string) (string, string, int, error) {
+    ev := logging.NewEventLogger()
     subjectKey := cfg.Producer.SubjectKey
     if subjectKey == "" { subjectKey = "DEMO-1" }
     // Always use register operation - it's idempotent and will create subject/schema if needed
@@ -218,7 +221,7 @@ func sendSubjectOpSigned(ctx context.Context, rdb *redis.Client, signer ssh.Sign
         nonce, e := randNonce(); if e != nil { return "", "", 0, e }
         sig, e := signPayloadNonce(signer, payload, nonce); if e != nil { return "", "", 0, e }
         if sid, se := rdb.XAdd(ctx, &redis.XAddArgs{Stream: subjStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payload, "nonce": nonce, "sig": sig}}).Result(); se == nil {
-            log.Printf("subject_register_sent attempt=%d id=%s stream=%s subject_key=%s op=%v", i, sid, subjStream, subjectKey, baseReq["op"]) 
+            ev.Infra("write", "redis", "success", fmt.Sprintf("subject_register_sent attempt=%d id=%s stream=%s subject_key=%s op=%v", i, sid, subjStream, subjectKey, baseReq["op"])) 
         } else {
             return "", "", 0, se
         }
@@ -260,28 +263,28 @@ func main() {
     ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
     defer cancel()
 
+    ev := logging.NewEventLogger()
     rdb := redis.NewClient(&redis.Options{Addr: cfg.Redis.Addr, Username: cfg.Redis.Username, Password: cfg.Redis.Password, DB: cfg.Redis.DB})
-    if err := rdb.Ping(ctx).Err(); err != nil { log.Fatalf("redis_ping_error: %v", err) }
-    log.Printf("producer_start addr=%s prefix=%s interval_ms=%d",
-        cfg.Redis.Addr, cfg.Redis.KeyPrefix, cfg.Producer.SendIntervalMs)
+    if err := rdb.Ping(ctx).Err(); err != nil { ev.Infra("connect", "redis", "failed", fmt.Sprintf("ping_error: %v", err)); os.Exit(1) }
+    ev.Infra("start", "producer", "success", fmt.Sprintf("addr=%s prefix=%s interval_ms=%d", cfg.Redis.Addr, cfg.Redis.KeyPrefix, cfg.Producer.SendIntervalMs))
 
     // Load keys and cert (required)
     if cfg.Producer.SSHPublicKeyFile == "" || cfg.Producer.SSHPrivateKeyFile == "" || cfg.Producer.SSHCertFile == "" {
-        log.Fatalf("missing required key/cert files: ssh_private_key_file, ssh_public_key_file, ssh_cert_file must be set")
+        ev.Infra("config", "producer", "failed", "missing required key/cert files: ssh_private_key_file, ssh_public_key_file, ssh_cert_file must be set"); os.Exit(1)
     }
     var signer ssh.Signer
-    if _, err := readTrim(cfg.Producer.SSHPublicKeyFile); err != nil { log.Fatalf("read_public_key: %v", err) }
-    if s, err := loadSignerFromKeyFile(cfg.Producer.SSHPrivateKeyFile); err == nil { signer = s } else { log.Fatalf("read_private_key_signer: %v", err) }
+    if _, err := readTrim(cfg.Producer.SSHPublicKeyFile); err != nil { ev.Infra("config", "producer", "failed", fmt.Sprintf("read_public_key: %v", err)); os.Exit(1) }
+    if s, err := loadSignerFromKeyFile(cfg.Producer.SSHPrivateKeyFile); err == nil { signer = s } else { ev.Infra("config", "producer", "failed", fmt.Sprintf("read_private_key_signer: %v", err)); os.Exit(1) }
     // Send cert line as pubkey in registration (server unwraps cert and enforces CA)
     pubForRegistration := func() string {
         certLine, e := readTrim(cfg.Producer.SSHCertFile)
         if e == nil { return certLine }
-        log.Fatalf("read_cert_file: %v", e)
+        ev.Infra("config", "producer", "failed", fmt.Sprintf("read_cert_file: %v", e)); os.Exit(1)
         return ""
     }()
     // fingerprint is not used client-side; server computes and matches as needed
     fp := computeFingerprint(pubForRegistration)
-    log.Printf("registration_prepare fingerprint=%s pubkey_len=%d", fp, len(pubForRegistration))
+    ev.Infra("init", "producer", "success", fmt.Sprintf("registration_prepare fingerprint=%s pubkey_len=%d", fp, len(pubForRegistration)))
 
     // send registration (repeat until producer_id acquired)
     payload := map[string]any{
@@ -297,32 +300,32 @@ func main() {
     regStream := cfg.Redis.KeyPrefix + "register"
     // Send registration ONCE, then wait on the same response stream until approved/denied
     var producerID string
-    nonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
-    log.Printf("registration_signing stream=%s nonce=%s payload_len=%d", regStream, nonce, len(payloadStr))
-    sigB64, e := signPayloadNonce(signer, payloadStr, nonce); if e != nil { log.Fatalf("sign_error: %v", e) }
+    nonce, e := randNonce(); if e != nil { ev.Infra("init", "producer", "failed", fmt.Sprintf("nonce_error: %v", e)); os.Exit(1) }
+    ev.Infra("init", "producer", "success", fmt.Sprintf("registration_signing stream=%s nonce=%s payload_len=%d", regStream, nonce, len(payloadStr)))
+    sigB64, e := signPayloadNonce(signer, payloadStr, nonce); if e != nil { ev.Infra("init", "producer", "failed", fmt.Sprintf("sign_error: %v", e)); os.Exit(1) }
     if id, e := rdb.XAdd(ctx, &redis.XAddArgs{Stream: regStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": payloadStr, "nonce": nonce, "sig": sigB64}}).Result(); e == nil {
-        log.Printf("register_sent id=%s stream=%s fp=%s", id, regStream, fp)
-    } else { log.Fatalf("register_send_error: %v", e) }
+        ev.Infra("write", "redis", "success", fmt.Sprintf("register_sent id=%s stream=%s fp=%s", id, regStream, fp))
+    } else { ev.Infra("write", "redis", "failed", fmt.Sprintf("register_send_error: %v", e)); os.Exit(1) }
     respStream := cfg.Redis.KeyPrefix + "register:resp:" + nonce
-    log.Printf("registration_waiting resp_stream=%s", respStream)
+    ev.Infra("read", "redis", "success", fmt.Sprintf("registration_waiting resp_stream=%s", respStream))
     for producerID == "" {
         if msg, _, e := readResponseOnce(ctx, rdb, respStream, "", 60*time.Second); e == nil {
-            log.Printf("registration_response id=%s values=%v", msg.ID, msg.Values)
+            ev.Infra("read", "redis", "success", fmt.Sprintf("registration_response id=%s values=%v", msg.ID, msg.Values))
             if pid, ok := msg.Values["producer_id"].(string); ok { producerID = pid }
             if status, ok := msg.Values["status"].(string); ok {
                 switch status {
                 case "approved":
-                    log.Printf("registration_approved producer_id=%s fp=%s", producerID, fp)
+                    ev.Infra("read", "redis", "success", fmt.Sprintf("registration_approved producer_id=%s fp=%s", producerID, fp))
                 case "pending":
                     // keep waiting for admin approval notification pushed by kernel
-                    if producerID != "" { log.Printf("registration_pending producer_id=%s", producerID) } else { log.Printf("registration_pending") }
+                    if producerID != "" { ev.Infra("read", "redis", "success", fmt.Sprintf("registration_pending producer_id=%s", producerID)) } else { ev.Infra("read", "redis", "success", "registration_pending") }
                 case "denied", "invalid_sig", "invalid_cert":
                     if reason, ok := msg.Values["reason"].(string); ok {
-                        log.Printf("registration_denied status=%s reason=%s", status, reason)
+                        ev.Infra("read", "redis", "failed", fmt.Sprintf("registration_denied status=%s reason=%s", status, reason))
                     } else {
-                        log.Printf("registration_denied status=%s", status)
+                        ev.Infra("read", "redis", "failed", fmt.Sprintf("registration_denied status=%s", status))
                     }
-                    log.Fatalf("registration_denied: %s", status)
+                    os.Exit(1)
                 }
             }
         } else if e == context.DeadlineExceeded || e == context.Canceled {
@@ -330,42 +333,42 @@ func main() {
             if e == context.Canceled { return }
         }
     }
-    log.Printf("registered producer_id=%s fp=%s", producerID, fp)
+    ev.Infra("init", "producer", "success", fmt.Sprintf("registered producer_id=%s fp=%s", producerID, fp))
 
     // token exchange: request short-lived token using pubkey path
     exchPayload := canonicalJSON(map[string]any{"purpose":"exchange"})
-    nonceEx, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
-    sigEx, e := signPayloadNonce(signer, exchPayload, nonceEx); if e != nil { log.Fatalf("sign_error: %v", e) }
+    nonceEx, e := randNonce(); if e != nil { ev.Infra("init", "producer", "failed", fmt.Sprintf("nonce_error: %v", e)); os.Exit(1) }
+    sigEx, e := signPayloadNonce(signer, exchPayload, nonceEx); if e != nil { ev.Infra("init", "producer", "failed", fmt.Sprintf("sign_error: %v", e)); os.Exit(1) }
     exchStream := cfg.Redis.KeyPrefix+"token:exchange"
     if xid, xe := rdb.XAdd(ctx, &redis.XAddArgs{Stream: exchStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": exchPayload, "nonce": nonceEx, "sig": sigEx}}).Result(); xe == nil {
-        log.Printf("token_exchange_sent id=%s stream=%s nonce=%s fp=%s", xid, exchStream, nonceEx, fp)
+        ev.Infra("write", "redis", "success", fmt.Sprintf("token_exchange_sent id=%s stream=%s nonce=%s fp=%s", xid, exchStream, nonceEx, fp))
     } else {
-        log.Fatalf("token_exchange_send_error: %v", xe)
+        ev.Infra("write", "redis", "failed", fmt.Sprintf("token_exchange_send_error: %v", xe)); os.Exit(1)
     }
     // wait on per-producer token response - read from new messages only
     var lastTokenID string
     tokenRespStream := cfg.Redis.KeyPrefix+"token:resp:"+producerID
-    log.Printf("token_exchange_waiting resp_stream=%s", tokenRespStream)
+    ev.Infra("read", "redis", "success", fmt.Sprintf("token_exchange_waiting resp_stream=%s", tokenRespStream))
     tokMsg, lastTokenID, e := readResponseOnce(ctx, rdb, tokenRespStream, lastTokenID, 15*time.Second)
-    if e != nil { log.Fatalf("token_exchange_timeout: %v", e) }
-    log.Printf("token_exchange_response id=%s values=%v", tokMsg.ID, tokMsg.Values)
+    if e != nil { ev.Infra("read", "redis", "failed", fmt.Sprintf("token_exchange_timeout: %v", e)); os.Exit(1) }
+    ev.Infra("read", "redis", "success", fmt.Sprintf("token_exchange_response id=%s values=%v", tokMsg.ID, tokMsg.Values))
     token, _ := tokMsg.Values["token"].(string)
-    if token == "" { log.Fatalf("token_exchange_empty") }
+    if token == "" { ev.Infra("read", "redis", "failed", "token_exchange_empty"); os.Exit(1) }
     if h, c, pe := parseTokenUnsafe(token); pe == nil {
         exp := time.Unix(c.Exp, 0).UTC().Format(time.RFC3339Nano)
-        log.Printf("token_received producer_id=%s jti=%s kid=%s exp=%s fp=%s preview=%s", producerID, c.Jti, h.Kid, exp, c.Fp, tokenPreview(token))
+        ev.Infra("init", "producer", "success", fmt.Sprintf("token_received producer_id=%s jti=%s kid=%s exp=%s fp=%s preview=%s", producerID, c.Jti, h.Kid, exp, c.Fp, tokenPreview(token)))
     } else {
-        log.Printf("token_received producer_id=%s token_len=%d preview=%s", producerID, len(token), tokenPreview(token))
+        ev.Infra("init", "producer", "success", fmt.Sprintf("token_received producer_id=%s token_len=%d preview=%s", producerID, len(token), tokenPreview(token)))
     }
 
     // subject set_current: signed op on subject:register
     subjectID, schemaIDFromResp, version, e := sendSubjectOpSigned(ctx, rdb, signer, pubForRegistration, cfg, producerID)
-    if e != nil { log.Fatalf("subject_register_error: %v", e) }
+    if e != nil { ev.Infra("write", "redis", "failed", fmt.Sprintf("subject_register_error: %v", e)); os.Exit(1) }
     if schemaIDFromResp != "" { cfg.Producer.SchemaID = schemaIDFromResp }
     if version > 0 {
-        log.Printf("subject_provisioned subject_id=%s schema_id=%s version=%d", subjectID, cfg.Producer.SchemaID, version)
+        ev.Infra("write", "redis", "success", fmt.Sprintf("subject_provisioned subject_id=%s schema_id=%s version=%d", subjectID, cfg.Producer.SchemaID, version))
     } else {
-        log.Printf("subject_provisioned subject_id=%s schema_id=%s", subjectID, cfg.Producer.SchemaID)
+        ev.Infra("write", "redis", "success", fmt.Sprintf("subject_provisioned subject_id=%s schema_id=%s", subjectID, cfg.Producer.SchemaID))
     }
 
     // dedicated schema upgrade: send only if schema_name and schema_body provided
@@ -376,13 +379,13 @@ func main() {
             "schema_body": json.RawMessage(cfg.Producer.SchemaBody),
         }
         upPayload := canonicalJSON(upReq)
-        upNonce, e := randNonce(); if e != nil { log.Fatalf("nonce_error: %v", e) }
-        upSig, e := signPayloadNonce(signer, upPayload, upNonce); if e != nil { log.Fatalf("sign_error: %v", e) }
+        upNonce, e := randNonce(); if e != nil { ev.Infra("init", "producer", "failed", fmt.Sprintf("nonce_error: %v", e)); os.Exit(1) }
+        upSig, e := signPayloadNonce(signer, upPayload, upNonce); if e != nil { ev.Infra("init", "producer", "failed", fmt.Sprintf("sign_error: %v", e)); os.Exit(1) }
         upStream := cfg.Redis.KeyPrefix+"schema:upgrade"
         if uid, ue := rdb.XAdd(ctx, &redis.XAddArgs{Stream: upStream, Values: map[string]any{"pubkey": pubForRegistration, "payload": upPayload, "nonce": upNonce, "sig": upSig}}).Result(); ue == nil {
-            log.Printf("schema_upgrade_sent id=%s stream=%s", uid, upStream)
+            ev.Infra("write", "redis", "success", fmt.Sprintf("schema_upgrade_sent id=%s stream=%s", uid, upStream))
         } else {
-            log.Printf("schema_upgrade_send_error: %v", ue)
+            ev.Infra("write", "redis", "failed", fmt.Sprintf("schema_upgrade_send_error: %v", ue))
         }
     }
 
@@ -398,21 +401,21 @@ func main() {
             // lean event payload
             // UUIDv7 event id for time-ordered ingestion
             eid, _ := uuid.NewV7()
-            ev := map[string]any{"event_id": eid.String(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
-            evB, _ := json.Marshal(ev)
-            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"events", Values: map[string]any{"id": ev["event_id"], "payload": string(evB), "token": token}}).Result()
+            eventObj := map[string]any{"event_id": eid.String(), "ts": time.Now().UTC().Format(time.RFC3339Nano), "subject_id": subjectID, "payload": map[string]any{"kind":"status","source": cfg.Producer.Name, "symbol":"DEMO"}}
+            evB, _ := json.Marshal(eventObj)
+            id, err := rdb.XAdd(ctx, &redis.XAddArgs{Stream: cfg.Redis.KeyPrefix+"events", Values: map[string]any{"id": eventObj["event_id"], "payload": string(evB), "token": token}}).Result()
             if err != nil { 
-                log.Printf("event_xadd_error: %v", err) 
+                ev.Infra("write", "redis", "failed", fmt.Sprintf("event_xadd_error: %v", err)) 
             } else { 
                 eventsSent++
                 if eventsSent == 1 {
-                    log.Printf("event_sending_started events_total=1 id=%s", id)
+                    logging.NewEventLogger().Infra("write", "redis", "success", fmt.Sprintf("event_sending_started events_total=1 id=%s", id))
                 } else if eventsSent % 1000 == 0 {
-                    log.Printf("event_sent_progress events_total=%d id=%s", eventsSent, id)
+                    logging.NewEventLogger().Infra("write", "redis", "success", fmt.Sprintf("event_sent_progress events_total=%d id=%s", eventsSent, id))
                 }
             }
         case <-ctx.Done():
-            log.Printf("producer_stop")
+            ev.Infra("disconnect", "producer", "success", "producer_stop")
             // send deregister on shutdown
 			if nonce, e := randNonce(); e == nil {
 				// Sign the exact payload we send; kernel verifies signature over payload+nonce
