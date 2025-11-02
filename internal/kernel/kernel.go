@@ -238,7 +238,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
                 if producerID != "" {
                     if disabled, err := k.pg.IsProducerDisabled(ctx, producerID); err == nil && disabled {
                         _ = k.rd.ToDLQ(ctx, dlq, id, payload, "producer_disabled")
-                        ev.Registration("disabled", "", producerID, "producer_disabled", "producer is disabled")
+                        ev.Authorization("deny", producerID, "ingest", "producer_disabled")
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack disabled producer: %v", ackErr))
                         } else {
@@ -383,7 +383,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 if pubkey != "" { fp0 = sshFingerprint([]byte(pubkey)) }
                 
                 if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
-                    ev.Registration("invalid", fp0, "", "invalid_request", "missing required fields")
+                    ev.Registration("attempt", fp0, "", "", "missing_fields")
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack missing fields: %v", ackErr))
                     }
@@ -395,7 +395,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     fp := sshFingerprint([]byte(pubkey))
                     parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
                     if err != nil { 
-                        ev.Registration("invalid", fp, "", "invalid_request", fmt.Sprintf("pubkey parse error: %v", err))
+                        ev.Registration("attempt", fp, "", "", fmt.Sprintf("pubkey_parse_error: %v", err))
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack parse error: %v", ackErr))
                         }
@@ -430,7 +430,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                     status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
                     if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" {
-                        ev.Registration("invalid", fp, "", "key_not_approved", fmt.Sprintf("status=%s", status))
+                        ev.Registration("attempt", fp, "", "", "key_not_approved")
                         if pidPtr != nil && *pidPtr != "" {
                             k.sendSubjectResponse(ctx, *pidPtr, map[string]any{"error": "key_not_approved", "status": status})
                         }
@@ -444,7 +444,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     if k.rd != nil && k.rd.C() != nil {
                         // Use per-producer SET to track nonces: key fdc:subject:nonce:<producer_id>
                         setKey := prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+producerID)
-                        // SADD returns 1 if newly added, 0 if existed → treat 0 as replay
+                        // SADD returns 1 if newly added, 0 if existed ? treat 0 as replay
                         added, err := k.rd.C().SAdd(ctx, setKey, nonce).Result()
                         if err != nil {
                             ev.Infra("error", "redis", "failed", fmt.Sprintf("subject register nonce guard error: %v", err))
@@ -482,7 +482,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     AttrsDelta   json.RawMessage `json:"attrs_delta"`
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" { 
-                    ev.Registration("invalid", fp0, producerID, "invalid_payload", "payload parse error or missing subject_key")
+                    ev.Registration("attempt", fp0, producerID, "", "invalid_payload")
                     if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload"}) }
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid payload: %v", ackErr))
@@ -493,7 +493,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                 switch strings.ToLower(strings.TrimSpace(req.Op)) {
                 case "register":
                     if strings.TrimSpace(req.SchemaName) == "" || len(req.SchemaBody) == 0 || strings.TrimSpace(string(req.SchemaBody)) == "" {
-                        ev.Registration("invalid", fp0, producerID, "invalid_payload", "missing_schema_name_or_body")
+                        ev.Registration("attempt", fp0, producerID, "", "missing_schema_name_or_body")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "register requires schema_name and schema_body"}) }
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
@@ -501,7 +501,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         continue
                     }
                     if len(strings.TrimSpace(string(req.SchemaDelta))) > 0 || len(strings.TrimSpace(string(req.AttrsDelta))) > 0 {
-                        ev.Registration("invalid", fp0, producerID, "invalid_payload", "delta fields not allowed for register")
+                        ev.Registration("attempt", fp0, producerID, "", "delta_fields_not_allowed_for_register")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "delta fields not allowed for register"}) }
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
@@ -510,7 +510,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     }
                 case "upgrade":
                     if strings.TrimSpace(req.SchemaName) == "" || len(strings.TrimSpace(string(req.SchemaDelta))) == 0 {
-                        ev.Registration("invalid", fp0, producerID, "invalid_payload", "missing_schema_name_or_delta")
+                        ev.Registration("attempt", fp0, producerID, "", "missing_schema_name_or_delta")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "upgrade requires schema_name and schema_delta"}) }
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
@@ -518,7 +518,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         continue
                     }
                     if len(strings.TrimSpace(string(req.SchemaBody))) > 0 {
-                        ev.Registration("invalid", fp0, producerID, "invalid_payload", "schema_body not allowed for upgrade")
+                        ev.Registration("attempt", fp0, producerID, "", "schema_body_not_allowed_for_upgrade")
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "invalid_payload", "details": "schema_body not allowed for upgrade"}) }
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack validation error: %v", ackErr))
@@ -526,7 +526,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                         continue
                     }
                 default:
-                    ev.Registration("invalid", fp0, producerID, "invalid_payload", fmt.Sprintf("unknown_op: %s", req.Op))
+                    ev.Registration("attempt", fp0, producerID, "", fmt.Sprintf("unknown_op: %s", req.Op))
                     if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "unknown_op", "op": req.Op}) }
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack unknown op: %v", ackErr))
@@ -545,7 +545,6 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     schemaName = req.SchemaName
                     if err != nil {
                         ev.Infra("write", "postgres", "failed", fmt.Sprintf("subject register upgrade error: %v", err))
-                        ev.Registration("error", fp0, producerID, "upgrade_failed", err.Error())
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "upgrade_failed", "reason": err.Error()}) }
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack upgrade error: %v", ackErr))
@@ -559,7 +558,6 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     schemaName = req.SchemaName
                     if err != nil {
                         ev.Infra("write", "postgres", "failed", fmt.Sprintf("subject register error: %v", err))
-                        ev.Registration("error", fp0, producerID, "register_failed", err.Error())
                         if producerID != "" { k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "register_failed", "reason": err.Error()}) }
                         if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack register error: %v", ackErr))
@@ -581,7 +579,7 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     k.sendSubjectResponse(ctx, producerID, resp)
                     ev.Registration("success", fp0, producerID, "success", fmt.Sprintf("op=%s,schema=%s", req.Op, schemaName))
                 } else {
-                    ev.Registration("error", fp0, "", "no_producer", "producer ID not found")
+                    ev.Infra("error", "kernel", "failed", "no_producer")
                 }
                 if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                     ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack subject register: %v", ackErr))
@@ -813,7 +811,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 nonce, _ := m.Values["nonce"].(string)
                 sigB64, _ := m.Values["sig"].(string)
                 if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" { 
-                    ev.Registration("invalid", "", "", "invalid_request", "missing required fields")
+                    ev.Registration("attempt", "", "", "", "missing_fields")
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack missing fields: %v", ackErr))
                     }
@@ -823,7 +821,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 fp := sshFingerprint([]byte(pubkey))
                 parsedPub, _, _, _, err := ssh.ParseAuthorizedKey([]byte(pubkey))
                 if err != nil { 
-                    ev.Registration("invalid", fp, "", "invalid_request", fmt.Sprintf("pubkey parse error: %v", err))
+                    ev.Registration("attempt", fp, "", "", fmt.Sprintf("pubkey_parse_error: %v", err))
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack parse error: %v", ackErr))
                     }
@@ -867,7 +865,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 }
                 status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
                 if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" { 
-                    ev.Registration("invalid", fp, "", "key_not_approved", fmt.Sprintf("status=%s", status))
+                    ev.Registration("attempt", fp, "", "", "key_not_approved")
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack not approved: %v", ackErr))
                     }
@@ -890,7 +888,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                     Attrs      json.RawMessage `json:"attrs"`
                 }
                 if payloadStr == "" || json.Unmarshal([]byte(payloadStr), &req) != nil || req.SubjectKey == "" || req.SchemaName == "" || len(req.SchemaBody) == 0 {
-                    ev.Registration("invalid", fp, producerID, "invalid_payload", "missing required fields")
+                    ev.Registration("attempt", fp, producerID, "", "invalid_payload")
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid payload: %v", ackErr))
                     }
@@ -900,7 +898,6 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                 sid, schemaID, version, uerr := k.pg.UpgradeSubjectSchemaAuto(ctx, req.SubjectKey, req.SchemaName, []byte(coalesceJSON(req.SchemaBody)), []byte(coalesceJSON(req.Attrs)), true)
                 if uerr != nil { 
                     ev.Infra("write", "postgres", "failed", fmt.Sprintf("schema upgrade error: %v", uerr))
-                    ev.Registration("error", fp, producerID, "upgrade_failed", uerr.Error())
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                         ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack upgrade error: %v", ackErr))
                     }
