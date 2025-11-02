@@ -40,10 +40,14 @@ func TestProducerExample_EndToEnd(t *testing.T) {
     rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
+    // Ensure Postgres is accepting connections before migrations
+    itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
+
     // Prepare DB & apply migrations
     pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
+    itutil.WaitForMigrations(t, pg, 10*time.Second)
     pool := pg.Pool()
 
     // Kernel issuer keys (for token issuance)
