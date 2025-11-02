@@ -41,7 +41,7 @@ func TestProducerExample_EndToEnd(t *testing.T) {
     defer rc.Terminate(context.Background())
 
     // Prepare DB & apply migrations
-    pg, err := data.NewPostgres(context.Background(), kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: true})
+    pg, err := data.NewPostgres(context.Background(), itutil.NewPostgresConfig(dsn))
     if err != nil { t.Fatalf("pg: %v", err) }
     defer pg.Close()
     pool := pg.Pool()
@@ -54,7 +54,7 @@ func TestProducerExample_EndToEnd(t *testing.T) {
     port := itutil.FreePort(t)
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
-        Postgres: kernelcfg.PostgresConfig{DSN: dsn, ApplyMigrations: false, BatchSize: 50, BatchMaxWaitMs: 50},
+        Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 50, 50, ""),
         Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{RequireToken: true, Issuer: "it", Audience: "it", KeyID: "k", PrivateKey: base64.RawStdEncoding.EncodeToString(issuerPriv), PublicKeys: map[string]string{"k": base64.RawStdEncoding.EncodeToString(issuerPub)}},
