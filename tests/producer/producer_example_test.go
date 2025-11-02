@@ -59,7 +59,7 @@ func TestProducerExample_EndToEnd(t *testing.T) {
     cfg := kernelcfg.Config{
         Server: kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 50, 50, ""),
-        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events"},
+        Redis: kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerGroup: "kernel"},
         Logging: kernelcfg.LoggingConfig{Level: "error"},
         Auth: kernelcfg.AuthConfig{
             RequireToken: true,
@@ -75,6 +75,26 @@ func TestProducerExample_EndToEnd(t *testing.T) {
     cancelKernel := itutil.StartKernel(t, cfg)
     defer cancelKernel()
     itutil.WaitHTTPReady(t, "http://127.0.0.1:"+strconv.Itoa(port)+"/readyz", 15*time.Second)
+    
+    // Wait for consumer groups to be ready
+    time.Sleep(600 * time.Millisecond)
+    rcli := redis.NewClient(&redis.Options{Addr: addr})
+    regStream := cfg.Redis.KeyPrefix + "register"
+    endWait := time.Now().Add(5 * time.Second)
+    for time.Now().Before(endWait) {
+        groups, _ := rcli.XInfoGroups(context.Background(), regStream).Result()
+        ready := false
+        for _, g := range groups {
+            if g.Name == cfg.Redis.ConsumerGroup {
+                ready = true
+                break
+            }
+        }
+        if ready {
+            break
+        }
+        time.Sleep(100 * time.Millisecond)
+    }
 
     // Generate producer ed25519 keys using ssh-keygen into temp dir
     dir := t.TempDir()
@@ -116,7 +136,6 @@ func TestProducerExample_EndToEnd(t *testing.T) {
     go io.Copy(io.Discard, stderr)
 
     // Wait for token issuance and first event persisted
-    rcli := redis.NewClient(&redis.Options{Addr: addr})
     // token response stream is per producer id; ensure at least one message
     itutil.WaitStreamLen(t, rcli, cfg.Redis.KeyPrefix + "token:resp:"+producerID, 1, 15*time.Second)
 
