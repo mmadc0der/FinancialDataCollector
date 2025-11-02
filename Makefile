@@ -2,6 +2,7 @@
 
 APP:=kernel
 BIN:=bin/$(APP)
+TIMEOUT?=30m
 
 # Optional package selector for tests, e.g. `make unit PKG=./internal/protocol`
 # When empty, unit tests run across all packages except integration tests under ./internal/it
@@ -36,11 +37,11 @@ endif
 
 # Run integration tests (requires Docker). Set RUN_IT=1 to enable tests.
 it:
-	RUN_IT=1 go test -tags=integration -race -v -cover -covermode=atomic -coverpkg=./... ./tests/integration
+	RUN_IT=1 go test -tags=integration -race -v -cover -covermode=atomic -coverpkg=./... -timeout $(TIMEOUT) ./tests/integration
 
 # Run producer-side integration tests (requires Docker). Set RUN_IT=1 RUN_PRODUCER=1.
 it-producer:
-	RUN_IT=1 RUN_PRODUCER=1 go test -tags="integration producer" -race -v -cover -covermode=atomic -coverpkg=./... ./tests/producer
+	RUN_IT=1 RUN_PRODUCER=1 go test -tags="integration producer" -race -v -cover -covermode=atomic -coverpkg=./... -timeout $(TIMEOUT) ./tests/producer
 
 # Aggregate coverage using Go's coverage data directories (Go 1.20+).
 # - Produces coverage.out (text) and coverage.html (HTML report).
@@ -51,8 +52,8 @@ ifeq ($(strip $(PKG)),)
 else
 	GOCOVERDIR=coverage go test -race -cover -covermode=atomic $(PKG)
 endif
-	RUN_IT=1 GOCOVERDIR=coverage go test -tags=integration -race -cover -covermode=atomic -coverpkg=./... ./tests/integration || true
-	RUN_IT=1 RUN_PRODUCER=1 GOCOVERDIR=coverage go test -tags="integration producer" -race -cover -covermode=atomic -coverpkg=./... ./tests/producer || true
+	RUN_IT=1 GOCOVERDIR=coverage go test -tags=integration -race -cover -covermode=atomic -coverpkg=./... -timeout $(TIMEOUT) ./tests/integration || true
+	RUN_IT=1 RUN_PRODUCER=1 GOCOVERDIR=coverage go test -tags="integration producer" -race -cover -covermode=atomic -coverpkg=./... -timeout $(TIMEOUT) ./tests/producer || true
 	go tool covdata textfmt -i=coverage -o coverage.out
 	@echo "Wrote coverage.out"
 	go tool cover -html=coverage.out -o coverage.html
