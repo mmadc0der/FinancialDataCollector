@@ -28,25 +28,7 @@ import (
 	ssh "golang.org/x/crypto/ssh"
 )
 
-// Context pool for reducing context creation overhead
-var contextPool = sync.Pool{
-	New: func() interface{} {
-		return context.Background()
-	},
-}
-
-// GetContext gets a context from the pool or creates a new one
-func getContext() context.Context {
-	return contextPool.Get().(context.Context)
-}
-
-// PutContext returns a context to the pool
-func putContext(ctx context.Context) {
-	// Only pool background contexts to avoid issues with cancelled contexts
-	if ctx == context.Background() {
-		contextPool.Put(ctx)
-	}
-}
+// context pooling removed; use standard contexts
 
 type Kernel struct {
 	cfg *kernelcfg.Config
@@ -442,24 +424,17 @@ func (k *Kernel) consumeSubjectRegister(ctx context.Context) {
                     producerID = *pidPtr
                     // replay protection - check after we have producer ID
                     if k.rd != nil && k.rd.C() != nil {
-                        // Use per-producer SET to track nonces: key fdc:subject:nonce:<producer_id>
-                        setKey := prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+producerID)
-                        // SADD returns 1 if newly added, 0 if existed ? treat 0 as replay
-                        added, err := k.rd.C().SAdd(ctx, setKey, nonce).Result()
+                        key := prefixed(k.cfg.Redis.KeyPrefix, "nonce:subject:"+producerID+":"+nonce)
+                        ok, err := k.rd.C().SetNX(ctx, key, 1, 10*time.Minute).Result()
                         if err != nil {
                             ev.Infra("error", "redis", "failed", fmt.Sprintf("subject register nonce guard error: %v", err))
-                        } else if added == 0 {
+                        } else if !ok {
                             ev.Registration("replay", fp, producerID, "replay", "duplicate_nonce")
                             k.sendSubjectResponse(ctx, producerID, map[string]any{"error": "replay"})
                             if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
                                 ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay: %v", ackErr))
                             }
                             continue
-                        } else {
-                            // ensure TTL exists (best-effort)
-                            if expireErr := k.rd.C().Expire(ctx, setKey, 10*time.Minute).Err(); expireErr != nil {
-                                ev.Infra("error", "redis", "failed", fmt.Sprintf("failed to set nonce TTL: %v", expireErr))
-                            }
                         }
                     }
                     if !k.checkRateLimit(ctx, "subject", producerID) {
@@ -849,20 +824,7 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                     }
                     continue 
                 }
-                // replay protection
-                if k.rd != nil && k.rd.C() != nil {
-                    ok, err := k.rd.C().SetNX(ctx, prefixed(k.cfg.Redis.KeyPrefix, "subject:nonce:"+fp+":"+nonce), "1", 5*time.Minute).Result()
-                    if err != nil {
-                        ev.Infra("error", "redis", "failed", fmt.Sprintf("schema upgrade nonce guard error: %v", err))
-                        // allow on error
-                    } else if !ok {
-                        ev.Registration("replay", fp, "", "replay", "duplicate_nonce")
-                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
-                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay: %v", ackErr))
-                        }
-                        continue
-                    }
-                }
+                // replay protection moved to after producer resolution
                 status, pidPtr, err := k.pg.GetKeyStatus(ctx, fp)
                 if err != nil || status != "approved" || pidPtr == nil || *pidPtr == "" { 
                     ev.Registration("attempt", fp, "", "", "key_not_approved")
@@ -872,6 +834,21 @@ func (k *Kernel) consumeSchemaUpgrade(ctx context.Context) {
                     continue 
                 }
                 producerID := *pidPtr
+                // replay protection (after producerID known)
+                if k.rd != nil && k.rd.C() != nil {
+                    key := prefixed(k.cfg.Redis.KeyPrefix, "nonce:schema:"+producerID+":"+nonce)
+                    ok, err := k.rd.C().SetNX(ctx, key, 1, 10*time.Minute).Result()
+                    if err != nil {
+                        ev.Infra("error", "redis", "failed", fmt.Sprintf("schema upgrade nonce guard error: %v", err))
+                        // allow on error
+                    } else if !ok {
+                        ev.Registration("replay", fp, producerID, "replay", "duplicate_nonce")
+                        if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {
+                            ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay: %v", ackErr))
+                        }
+                        continue
+                    }
+                }
                 if !k.checkRateLimit(ctx, "schema", producerID) { 
                     ev.Registration("rate_limited", fp, producerID, "rate_limited", "")
                     if ackErr := k.rd.Ack(ctx, m.ID); ackErr != nil {

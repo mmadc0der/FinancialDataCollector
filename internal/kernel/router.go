@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -143,23 +144,31 @@ func newCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
     }
 }
 
-func (cb *CircuitBreaker) canExecute() bool {
-    cb.mu.RLock()
-    defer cb.mu.RUnlock()
+func init() {
+    rand.Seed(time.Now().UnixNano())
+}
 
-    switch cb.state {
+func (cb *CircuitBreaker) canExecute() bool {
+    // Snapshot state under read lock to avoid holding locks while doing time checks
+    cb.mu.RLock()
+    state := cb.state
+    lastFail := cb.lastFailTime
+    timeout := cb.timeout
+    cb.mu.RUnlock()
+
+    switch state {
     case circuitClosed:
         return true
     case circuitOpen:
-        if time.Since(cb.lastFailTime) > cb.timeout {
-            cb.mu.RUnlock()
+        if time.Since(lastFail) > timeout {
+            // Attempt to transition to half-open under write lock
             cb.mu.Lock()
             if cb.state == circuitOpen && time.Since(cb.lastFailTime) > cb.timeout {
                 cb.state = circuitHalfOpen
             }
+            newState := cb.state
             cb.mu.Unlock()
-            cb.mu.RLock()
-            return cb.state == circuitHalfOpen
+            return newState == circuitHalfOpen
         }
         return false
     case circuitHalfOpen:
@@ -228,8 +237,7 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
         r.pg = pg
         q := cfg.Postgres.QueueSize
         if q <= 0 { q = 1024 }
-        r.pgCh = make(chan pgMsg, q)
-        go r.pgWorkerBatch()
+        // legacy envelope worker disabled; lean path only
         r.pgChLean = make(chan pgMsgLean, q)
         go r.pgWorkerBatchLean()
         // start replayer
@@ -344,17 +352,13 @@ func (r *router) pgWorkerBatch() {
         maxBackoff := time.Duration(5000) * time.Millisecond
         lastErr := err
         for i := 1; i <= maxRetries; i++ {
-            // Calculate exponential backoff with jitter (±25% randomization)
+            // Exponential backoff with bounded jitter in [0.75, 1.25]
             backoff := time.Duration(float64(baseBackoff) * float64(uint(1)<<uint(i-1)))
             if backoff > maxBackoff {
                 backoff = maxBackoff
             }
-            // Add jitter (±25%)
-            jitter := time.Duration(float64(backoff) * 0.25 * float64(2.0*time.Now().UnixNano()%2 - 1.0))
-            sleepTime := backoff + jitter
-            if sleepTime < 0 {
-                sleepTime = backoff / 2
-            }
+            jitterFactor := 0.75 + rand.Float64()*0.5
+            sleepTime := time.Duration(float64(backoff) * jitterFactor)
 
             time.Sleep(sleepTime)
             t1 := time.Now()
@@ -398,23 +402,10 @@ func (r *router) pgWorkerBatch() {
             return
         }
 
-        // Batch failed after retries (non-connectivity); try per-row fallback and track failures (still via ingest)
-        failed := make([]pgMsg, 0, len(buf))
-        succeededIDs := make([]string, 0, len(buf))
-        for i, m := range buf {
-            // legacy per-row fallback not used for envelope path now
-            if e := r.pg.IngestEventsJSON(context.Background(), []map[string]any{}); e != nil {
-                failed = append(failed, m)
-            } else {
-                succeededIDs = append(succeededIDs, redisIDs[i])
-            }
-        }
-        if len(failed) > 0 { 
-            ev.Infra("error", "postgres", "failed", fmt.Sprintf("fallback failed count: %d", len(failed)))
-        }
-        if len(failed) == 0 { buf = buf[:0]; return }
-        // Could not persist; rely on DB-level spill (ingest_spill) and retry next cycle; log as error
-        ev.Infra("error", "postgres", "failed", fmt.Sprintf("persist failed non-connectivity: buffer_len=%d", len(buf)))
+        // Batch failed after retries (non-connectivity). Legacy envelope path lacks
+        // sufficient data for safe per-row fallback. Do NOT ack; keep buffer for retry.
+        ev.Infra("error", "postgres", "failed", fmt.Sprintf("persist failed non-connectivity (legacy path): buffer_len=%d; deferring without ack", len(buf)))
+        return
     }
     for {
         select {
@@ -449,17 +440,15 @@ func (r *router) pgWorkerBatchLean() {
     defer timer.Stop()
     flush := func() {
         if len(buf) == 0 { return }
-        // Use pooled objects to reduce GC pressure
-        events := eventsSlicePool.Get().([]map[string]any)[:0]
+        // Allocate fresh objects to avoid stale data contamination
+        events := make([]map[string]any, 0, len(buf))
         redisIDs := make([]string, 0, len(buf))
         for _, m := range buf {
-            // Reuse pooled map for payload
-            payload := jsonMapPool.Get().(map[string]any)
+            var payload map[string]any
             _ = json.Unmarshal(m.Payload, &payload)
 
             var tags []map[string]string
             if len(m.Tags) > 0 {
-                tags = tagsSlicePool.Get().([]map[string]string)[:0]
                 _ = json.Unmarshal(m.Tags, &tags)
             }
 
@@ -486,16 +475,14 @@ func (r *router) pgWorkerBatchLean() {
             return
         }
         ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error: batch_size=%d, error=%v", len(events), err))
-        // per-row fallback with object pooling
+        // per-row fallback with fresh allocations
         succeeded := make([]string, 0, len(buf))
         for i, m := range buf {
-            // Reuse pooled map for payload
-            payload := jsonMapPool.Get().(map[string]any)
+            var payload map[string]any
             _ = json.Unmarshal(m.Payload, &payload)
 
             var tags []map[string]string
             if len(m.Tags) > 0 {
-                tags = tagsSlicePool.Get().([]map[string]string)[:0]
                 _ = json.Unmarshal(m.Tags, &tags)
             }
 

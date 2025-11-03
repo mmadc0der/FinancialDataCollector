@@ -7,7 +7,6 @@ import (
     "encoding/base64"
     "encoding/json"
     "io"
-    "io/ioutil"
     "net/http"
     "strings"
     "time"
@@ -894,7 +893,7 @@ func (k *Kernel) isAdmin(r *http.Request) bool {
     // Build canonical string: canonicalJSON(body)+"\n"+method+"\n"+path+"\n"+nonce
     var bodyBytes []byte
     if r.Body != nil {
-        bodyBytes, _ = ioutil.ReadAll(r.Body)
+        bodyBytes, _ = io.ReadAll(r.Body)
         r.Body.Close()
         r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
     }
