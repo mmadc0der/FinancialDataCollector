@@ -107,9 +107,9 @@ func TestSubjectRegister_ReplayProtection_ResponseAndTTL(t *testing.T) {
         t.Fatalf("expected error=replay, got %v", last[0].Values)
     }
 
-    // TTL on per-producer set key exists
-    setKey := cfg.Redis.KeyPrefix+"subject:nonce:"+producerID
-    if ttl, _ := r.TTL(context.Background(), setKey).Result(); ttl <= 0 { t.Fatalf("expected nonce set TTL > 0, got %v", ttl) }
+    // TTL on nonce key exists
+    nonceKey := cfg.Redis.KeyPrefix+"nonce:subject:"+producerID+":"+nonce
+    if ttl, _ := r.TTL(context.Background(), nonceKey).Result(); ttl <= 0 { t.Fatalf("expected nonce TTL > 0, got %v", ttl) }
 }
 
 
