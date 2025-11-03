@@ -120,151 +120,161 @@ var globalMetricsBatcher = newMetricsBatcher()
 
 // CircuitBreaker implements circuit breaker pattern for database operations
 type CircuitBreaker struct {
-    mu           sync.RWMutex
-    failureCount int
-    lastFailTime time.Time
-    state        circuitState
-    threshold    int
-    timeout      time.Duration
+	mu           sync.RWMutex
+	failureCount int
+	lastFailTime time.Time
+	state        circuitState
+	threshold    int
+	timeout      time.Duration
 }
 
 type circuitState int
 
 const (
-    circuitClosed circuitState = iota
-    circuitOpen
-    circuitHalfOpen
+	circuitClosed circuitState = iota
+	circuitOpen
+	circuitHalfOpen
 )
 
 func newCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
-    return &CircuitBreaker{
-        threshold: threshold,
-        timeout:   timeout,
-        state:     circuitClosed,
-    }
+	return &CircuitBreaker{
+		threshold: threshold,
+		timeout:   timeout,
+		state:     circuitClosed,
+	}
 }
 
 func init() {
-    rand.Seed(time.Now().UnixNano())
+	rand.Seed(time.Now().UnixNano())
 }
 
 func (cb *CircuitBreaker) canExecute() bool {
-    // Snapshot state under read lock to avoid holding locks while doing time checks
-    cb.mu.RLock()
-    state := cb.state
-    lastFail := cb.lastFailTime
-    timeout := cb.timeout
-    cb.mu.RUnlock()
+	// Snapshot state under read lock to avoid holding locks while doing time checks
+	cb.mu.RLock()
+	state := cb.state
+	lastFail := cb.lastFailTime
+	timeout := cb.timeout
+	cb.mu.RUnlock()
 
-    switch state {
-    case circuitClosed:
-        return true
-    case circuitOpen:
-        if time.Since(lastFail) > timeout {
-            // Attempt to transition to half-open under write lock
-            cb.mu.Lock()
-            if cb.state == circuitOpen && time.Since(cb.lastFailTime) > cb.timeout {
-                cb.state = circuitHalfOpen
-            }
-            newState := cb.state
-            cb.mu.Unlock()
-            return newState == circuitHalfOpen
-        }
-        return false
-    case circuitHalfOpen:
-        return true
-    default:
-        return false
-    }
+	switch state {
+	case circuitClosed:
+		return true
+	case circuitOpen:
+		if time.Since(lastFail) > timeout {
+			// Attempt to transition to half-open under write lock
+			cb.mu.Lock()
+			if cb.state == circuitOpen && time.Since(cb.lastFailTime) > cb.timeout {
+				cb.state = circuitHalfOpen
+			}
+			newState := cb.state
+			cb.mu.Unlock()
+			return newState == circuitHalfOpen
+		}
+		return false
+	case circuitHalfOpen:
+		return true
+	default:
+		return false
+	}
 }
 
 func (cb *CircuitBreaker) onSuccess() {
-    cb.mu.Lock()
-    defer cb.mu.Unlock()
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
 
-    cb.failureCount = 0
-    if cb.state == circuitHalfOpen {
-        cb.state = circuitClosed
-    }
+	cb.failureCount = 0
+	if cb.state == circuitHalfOpen {
+		cb.state = circuitClosed
+	}
 }
 
 func (cb *CircuitBreaker) onFailure() {
-    cb.mu.Lock()
-    defer cb.mu.Unlock()
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
 
-    cb.failureCount++
-    cb.lastFailTime = time.Now()
+	cb.failureCount++
+	cb.lastFailTime = time.Now()
 
-    if cb.failureCount >= cb.threshold {
-        cb.state = circuitOpen
-    }
+	if cb.failureCount >= cb.threshold {
+		cb.state = circuitOpen
+	}
 }
 
 type router struct {
-    pg   *data.Postgres
-    rd   *data.Redis
-    spw  *spill.Writer
-    spr  *spill.Replayer
-    ack  func(ids ...string)
-    pgCh chan pgMsg
-    pgChLean chan pgMsgLean
-    rdCh chan rdMsg
-    publishEnabled bool
-    // batching
-    pgBatchSize int
-    pgBatchWait time.Duration
-    // ingest config (producer/schema ids are not defaulted for lean events)
-    prodID string
-    schID  string
-    // circuit breaker for database operations
-    pgCircuitBreaker *CircuitBreaker
+	pg             *data.Postgres
+	rd             *data.Redis
+	spw            *spill.Writer
+	spr            *spill.Replayer
+	ack            func(ids ...string)
+	pgCh           chan pgMsg
+	pgChLean       chan pgMsgLean
+	rdCh           chan rdMsg
+	publishEnabled bool
+	// batching
+	pgBatchSize int
+	pgBatchWait time.Duration
+	// ingest config (producer/schema ids are not defaulted for lean events)
+	prodID string
+	schID  string
+	// circuit breaker for database operations
+	pgCircuitBreaker *CircuitBreaker
 }
 
 func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) {
-    ev := logging.NewEventLogger()
-    
-    r := &router{
-        publishEnabled: cfg.Redis.PublishEnabled,
-        pgBatchSize: cfg.Postgres.BatchSize,
-        pgBatchWait: time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond,
-        ack: ack,
-        pgCircuitBreaker: newCircuitBreaker(cfg.Postgres.CircuitBreakerThreshold, time.Duration(cfg.Postgres.CircuitBreakerTimeoutSeconds)*time.Second),
-    }
-    // pick defaults from config, may be empty which signals NULL in DB
-    r.prodID = cfg.Postgres.DefaultProducerID
-    r.schID = ""
-    if pg, err := data.NewPostgres(context.Background(), cfg.Postgres); err == nil {
-        r.pg = pg
-        q := cfg.Postgres.QueueSize
-        if q <= 0 { q = 1024 }
-        // legacy envelope worker disabled; lean path only
-        r.pgChLean = make(chan pgMsgLean, q)
-        go r.pgWorkerBatchLean()
-        // start replayer
-        r.spr = spill.NewReplayer("./spill", r.pg)
-        r.spr.Start()
-    } else {
-        ev.Infra("init", "postgres", "failed", fmt.Sprintf("failed to initialize Postgres: %v", err))
-        return nil, err
-    }
-    if rd, err := data.NewRedis(cfg.Redis); err == nil {
-        r.rd = rd
-        q := cfg.Redis.QueueSize
-        if q <= 0 { q = 2048 }
-        r.rdCh = make(chan rdMsg, q)
-        go r.rdWorker()
-    } else {
-        ev.Infra("init", "redis", "failed", fmt.Sprintf("failed to initialize Redis: %v", err))
-        return nil, err
-    }
-    // spill disabled
-    return r, nil
+	ev := logging.NewEventLogger()
+
+	r := &router{
+		publishEnabled:   cfg.Redis.PublishEnabled,
+		pgBatchSize:      cfg.Postgres.BatchSize,
+		pgBatchWait:      time.Duration(cfg.Postgres.BatchMaxWaitMs) * time.Millisecond,
+		ack:              ack,
+		pgCircuitBreaker: newCircuitBreaker(cfg.Postgres.CircuitBreakerThreshold, time.Duration(cfg.Postgres.CircuitBreakerTimeoutSeconds)*time.Second),
+	}
+	// pick defaults from config, may be empty which signals NULL in DB
+	r.prodID = cfg.Postgres.DefaultProducerID
+	r.schID = ""
+	if pg, err := data.NewPostgres(context.Background(), cfg.Postgres); err == nil {
+		r.pg = pg
+		q := cfg.Postgres.QueueSize
+		if q <= 0 {
+			q = 1024
+		}
+		// legacy envelope worker disabled; lean path only
+		r.pgChLean = make(chan pgMsgLean, q)
+		go r.pgWorkerBatchLean()
+		// start replayer
+		r.spr = spill.NewReplayer("./spill", r.pg)
+		r.spr.Start()
+	} else {
+		ev.Infra("init", "postgres", "failed", fmt.Sprintf("failed to initialize Postgres: %v", err))
+		return nil, err
+	}
+	if rd, err := data.NewRedis(cfg.Redis); err == nil {
+		r.rd = rd
+		q := cfg.Redis.QueueSize
+		if q <= 0 {
+			q = 2048
+		}
+		r.rdCh = make(chan rdMsg, q)
+		go r.rdWorker()
+	} else {
+		ev.Infra("init", "redis", "failed", fmt.Sprintf("failed to initialize Redis: %v", err))
+		return nil, err
+	}
+	// spill disabled
+	return r, nil
 }
 
 func (r *router) close() {
-    if r.spr != nil { r.spr.Stop() }
-    if r.pg != nil { r.pg.Close() }
-    if r.rd != nil { _ = r.rd.Close() }
+	if r.spr != nil {
+		r.spr.Stop()
+	}
+	if r.pg != nil {
+		r.pg.Close()
+	}
+	if r.rd != nil {
+		_ = r.rd.Close()
+	}
 }
 
 // handleRedis enqueues a message coming from Redis for durable processing and optional re-publish
@@ -272,289 +282,339 @@ func (r *router) handleRedis(redisID string, _ any) { /* removed for lean path *
 
 // routeRaw is no longer used for WS; kept for compatibility if needed.
 
-type pgMsg struct { RedisID string; Env any }
+type pgMsg struct {
+	RedisID string
+	Env     any
+}
 
 // Lean event message (no envelope)
 type pgMsgLean struct {
-    RedisID   string
-    EventID   string
-    TS        string
-    SubjectID string
-    ProducerID string
-    SchemaID  string
-    Payload   []byte
-    Tags      []byte
+	RedisID    string
+	EventID    string
+	TS         string
+	SubjectID  string
+	ProducerID string
+	SchemaID   string
+	Payload    []byte
+	Tags       []byte
 }
 
 func (r *router) pgWorkerBatch() {
-    ev := logging.NewEventLogger()
-    
-    buf := make([]pgMsg, 0, r.pgBatchSize)
-    timer := time.NewTimer(r.pgBatchWait)
-    defer timer.Stop()
-    flush := func() {
-        if len(buf) == 0 { return }
-        // Build events array for ingest_events(jsonb)
-        events := make([]map[string]any, 0, len(buf))
-        redisIDs := make([]string, 0, len(buf))
-        for _, m := range buf {
-            // legacy envelope path removed; ignore pgMsg.Env contents for lean protocol
-            ev := map[string]any{}
-            events = append(events, ev)
-            redisIDs = append(redisIDs, m.RedisID)
-        }
-        metrics.PGBatchSize.Observe(float64(len(events)))
-        t0 := time.Now()
+	ev := logging.NewEventLogger()
 
-        // Check circuit breaker before executing
-        if !r.pgCircuitBreaker.canExecute() {
-            ev.Infra("error", "postgres", "failed", fmt.Sprintf("circuit breaker open, batch_size=%d", len(events)))
-            // Fall back to spill immediately when circuit is open
-            if r.spw == nil {
-                if w, e := spill.NewWriter("./spill"); e == nil { 
-                    r.spw = w 
-                } else { 
-                    ev.Infra("init", "spill", "failed", fmt.Sprintf("failed to initialize spill writer: %v", e))
-                }
-            }
-            if r.spw != nil {
-                // Use async spill write to avoid blocking the main thread
-                go func(events []map[string]any, redisIDs []string) {
-                    if _, _, e := r.spw.Write(events); e == nil {
-                        if r.ack != nil { r.ack(redisIDs...) }
-                        ev.Infra("write", "spill", "success", fmt.Sprintf("circuit breaker spill: count=%d", len(events)))
-                    } else {
-                        ev.Infra("write", "spill", "failed", fmt.Sprintf("spill write failed: count=%d, error=%v", len(events), e))
-                    }
-                }(events, redisIDs)
-                buf = buf[:0]
-                return
-            }
-            ev.Infra("error", "postgres", "failed", fmt.Sprintf("circuit breaker open, no fallback available, buffer_len=%d", len(buf)))
-            return
-        }
+	buf := make([]pgMsg, 0, r.pgBatchSize)
+	timer := time.NewTimer(r.pgBatchWait)
+	defer timer.Stop()
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		// Build events array for ingest_events(jsonb)
+		events := make([]map[string]any, 0, len(buf))
+		redisIDs := make([]string, 0, len(buf))
+		for _, m := range buf {
+			// legacy envelope path removed; ignore pgMsg.Env contents for lean protocol
+			ev := map[string]any{}
+			events = append(events, ev)
+			redisIDs = append(redisIDs, m.RedisID)
+		}
+		metrics.PGBatchSize.Observe(float64(len(events)))
+		t0 := time.Now()
 
-        err := r.pg.IngestEventsJSON(context.Background(), events)
-        metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
-        if err == nil {
-            ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit: batch_size=%d, duration_ms=%d", len(events), time.Since(t0).Milliseconds()))
-            r.pgCircuitBreaker.onSuccess()
-            if r.ack != nil { r.ack(redisIDs...) }
-            buf = buf[:0]
-            return
-        }
+		// Check circuit breaker before executing
+		if !r.pgCircuitBreaker.canExecute() {
+			ev.Infra("error", "postgres", "failed", fmt.Sprintf("circuit breaker open, batch_size=%d", len(events)))
+			// Fall back to spill immediately when circuit is open
+			if r.spw == nil {
+				if w, e := spill.NewWriter("./spill"); e == nil {
+					r.spw = w
+				} else {
+					ev.Infra("init", "spill", "failed", fmt.Sprintf("failed to initialize spill writer: %v", e))
+				}
+			}
+			if r.spw != nil {
+				// Use async spill write to avoid blocking the main thread
+				go func(events []map[string]any, redisIDs []string) {
+					if _, _, e := r.spw.Write(events); e == nil {
+						if r.ack != nil {
+							r.ack(redisIDs...)
+						}
+						ev.Infra("write", "spill", "success", fmt.Sprintf("circuit breaker spill: count=%d", len(events)))
+					} else {
+						ev.Infra("write", "spill", "failed", fmt.Sprintf("spill write failed: count=%d, error=%v", len(events), e))
+					}
+				}(events, redisIDs)
+				buf = buf[:0]
+				return
+			}
+			ev.Infra("error", "postgres", "failed", fmt.Sprintf("circuit breaker open, no fallback available, buffer_len=%d", len(buf)))
+			return
+		}
 
-        r.pgCircuitBreaker.onFailure()
-        ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error: batch_size=%d, error=%v", len(events), err))
-        // Retry with configurable exponential backoff and jitter
-        maxRetries := 3 // Use default since we don't have access to Redis config here
-        baseBackoff := time.Duration(200) * time.Millisecond
-        maxBackoff := time.Duration(5000) * time.Millisecond
-        lastErr := err
-        for i := 1; i <= maxRetries; i++ {
-            // Exponential backoff with bounded jitter in [0.75, 1.25]
-            backoff := time.Duration(float64(baseBackoff) * float64(uint(1)<<uint(i-1)))
-            if backoff > maxBackoff {
-                backoff = maxBackoff
-            }
-            jitterFactor := 0.75 + rand.Float64()*0.5
-            sleepTime := time.Duration(float64(backoff) * jitterFactor)
+		err := r.pg.IngestEventsJSON(context.Background(), events)
+		metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
+		if err == nil {
+			ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit: batch_size=%d, duration_ms=%d", len(events), time.Since(t0).Milliseconds()))
+			r.pgCircuitBreaker.onSuccess()
+			if r.ack != nil {
+				r.ack(redisIDs...)
+			}
+			buf = buf[:0]
+			return
+		}
 
-            time.Sleep(sleepTime)
-            t1 := time.Now()
-            if e := r.pg.IngestEventsJSON(context.Background(), events); e == nil {
-                ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit retry: attempt=%d, batch_size=%d, duration_ms=%d", i, len(events), time.Since(t1).Milliseconds()))
-                if r.ack != nil { r.ack(redisIDs...) }
-                buf = buf[:0]
-                return
-            } else {
-                ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error retry: attempt=%d, error=%v", i, e))
-                lastErr = e
-            }
-        }
-        // If this looks like a connectivity error, spill to filesystem (as last resort)
-        if isConnectivityError(lastErr) {
-            // write spill and ack Redis; router replayer will flush on reconnect
-            if r.spw == nil {
-                if w, e := spill.NewWriter("./spill"); e == nil { 
-                    r.spw = w 
-                } else { 
-                    ev.Infra("init", "spill", "failed", fmt.Sprintf("failed to initialize spill writer: %v", e))
-                }
-            }
-            if r.spw != nil {
-                // Build events once for spill
-                events := make([]map[string]any, 0, len(buf))
-                redisIDs := make([]string, 0, len(buf))
-                for _, m := range buf {
-                    ev := map[string]any{}
-                    events = append(events, ev)
-                    redisIDs = append(redisIDs, m.RedisID)
-                }
-                if _, _, e := r.spw.Write(events); e == nil {
-                    if r.ack != nil { r.ack(redisIDs...) }
-                    ev.Infra("write", "spill", "success", fmt.Sprintf("connectivity error spill: count=%d", len(events)))
-                    buf = buf[:0]
-                    return
-                }
-            }
-            ev.Infra("error", "postgres", "failed", fmt.Sprintf("connectivity error deferred: buffer_len=%d, error=%v", len(buf), lastErr))
-            return
-        }
+		r.pgCircuitBreaker.onFailure()
+		ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error: batch_size=%d, error=%v", len(events), err))
+		// Retry with configurable exponential backoff and jitter
+		maxRetries := 3 // Use default since we don't have access to Redis config here
+		baseBackoff := time.Duration(200) * time.Millisecond
+		maxBackoff := time.Duration(5000) * time.Millisecond
+		lastErr := err
+		for i := 1; i <= maxRetries; i++ {
+			// Exponential backoff with bounded jitter in [0.75, 1.25]
+			backoff := time.Duration(float64(baseBackoff) * float64(uint(1)<<uint(i-1)))
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			jitterFactor := 0.75 + rand.Float64()*0.5
+			sleepTime := time.Duration(float64(backoff) * jitterFactor)
 
-        // Batch failed after retries (non-connectivity). Legacy envelope path lacks
-        // sufficient data for safe per-row fallback. Do NOT ack; keep buffer for retry.
-        ev.Infra("error", "postgres", "failed", fmt.Sprintf("persist failed non-connectivity (legacy path): buffer_len=%d; deferring without ack", len(buf)))
-        return
-    }
-    for {
-        select {
-        case m, ok := <-r.pgCh:
-            if !ok { flush(); return }
-            buf = append(buf, m)
-            if len(buf) >= r.pgBatchSize { flush(); if !timer.Stop() { <-timer.C }; timer.Reset(r.pgBatchWait) }
-        case <-timer.C:
-            flush()
-            timer.Reset(r.pgBatchWait)
-        }
-    }
+			time.Sleep(sleepTime)
+			t1 := time.Now()
+			if e := r.pg.IngestEventsJSON(context.Background(), events); e == nil {
+				ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit retry: attempt=%d, batch_size=%d, duration_ms=%d", i, len(events), time.Since(t1).Milliseconds()))
+				if r.ack != nil {
+					r.ack(redisIDs...)
+				}
+				buf = buf[:0]
+				return
+			} else {
+				ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error retry: attempt=%d, error=%v", i, e))
+				lastErr = e
+			}
+		}
+		// If this looks like a connectivity error, spill to filesystem (as last resort)
+		if isConnectivityError(lastErr) {
+			// write spill and ack Redis; router replayer will flush on reconnect
+			if r.spw == nil {
+				if w, e := spill.NewWriter("./spill"); e == nil {
+					r.spw = w
+				} else {
+					ev.Infra("init", "spill", "failed", fmt.Sprintf("failed to initialize spill writer: %v", e))
+				}
+			}
+			if r.spw != nil {
+				// Build events once for spill
+				events := make([]map[string]any, 0, len(buf))
+				redisIDs := make([]string, 0, len(buf))
+				for _, m := range buf {
+					ev := map[string]any{}
+					events = append(events, ev)
+					redisIDs = append(redisIDs, m.RedisID)
+				}
+				if _, _, e := r.spw.Write(events); e == nil {
+					if r.ack != nil {
+						r.ack(redisIDs...)
+					}
+					ev.Infra("write", "spill", "success", fmt.Sprintf("connectivity error spill: count=%d", len(events)))
+					buf = buf[:0]
+					return
+				}
+			}
+			ev.Infra("error", "postgres", "failed", fmt.Sprintf("connectivity error deferred: buffer_len=%d, error=%v", len(buf), lastErr))
+			return
+		}
+
+		// Batch failed after retries (non-connectivity). Legacy envelope path lacks
+		// sufficient data for safe per-row fallback. Do NOT ack; keep buffer for retry.
+		ev.Infra("error", "postgres", "failed", fmt.Sprintf("persist failed non-connectivity (legacy path): buffer_len=%d; deferring without ack", len(buf)))
+		return
+	}
+	for {
+		select {
+		case m, ok := <-r.pgCh:
+			if !ok {
+				flush()
+				return
+			}
+			buf = append(buf, m)
+			if len(buf) >= r.pgBatchSize {
+				flush()
+				if !timer.Stop() {
+					<-timer.C
+				}
+				timer.Reset(r.pgBatchWait)
+			}
+		case <-timer.C:
+			flush()
+			timer.Reset(r.pgBatchWait)
+		}
+	}
 }
 
 // handleLeanEvent enqueues a lean event (already validated and enriched) for DB ingest
 func (r *router) handleLeanEvent(redisID, eventID, ts, subjectID, producerID string, payloadJSON, tagsJSON []byte, schemaID string) {
-    if r.pgChLean != nil {
-        select {
-        case r.pgChLean <- pgMsgLean{RedisID: redisID, EventID: eventID, TS: ts, SubjectID: subjectID, ProducerID: producerID, SchemaID: schemaID, Payload: payloadJSON, Tags: tagsJSON}:
-        default:
-        }
-    } else {
-        if r.ack != nil { r.ack(redisID) }
-    }
+	if r.pgChLean != nil {
+		select {
+		case r.pgChLean <- pgMsgLean{RedisID: redisID, EventID: eventID, TS: ts, SubjectID: subjectID, ProducerID: producerID, SchemaID: schemaID, Payload: payloadJSON, Tags: tagsJSON}:
+		default:
+		}
+	} else {
+		if r.ack != nil {
+			r.ack(redisID)
+		}
+	}
 }
 
 func (r *router) pgWorkerBatchLean() {
-    ev := logging.NewEventLogger()
-    
-    buf := make([]pgMsgLean, 0, r.pgBatchSize)
-    timer := time.NewTimer(r.pgBatchWait)
-    defer timer.Stop()
-    flush := func() {
-        if len(buf) == 0 { return }
-        // Allocate fresh objects to avoid stale data contamination
-        events := make([]map[string]any, 0, len(buf))
-        redisIDs := make([]string, 0, len(buf))
-        for _, m := range buf {
-            var payload map[string]any
-            _ = json.Unmarshal(m.Payload, &payload)
+	ev := logging.NewEventLogger()
 
-            var tags []map[string]string
-            if len(m.Tags) > 0 {
-                _ = json.Unmarshal(m.Tags, &tags)
-            }
+	buf := make([]pgMsgLean, 0, r.pgBatchSize)
+	timer := time.NewTimer(r.pgBatchWait)
+	defer timer.Stop()
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		// Allocate fresh objects to avoid stale data contamination
+		events := make([]map[string]any, 0, len(buf))
+		redisIDs := make([]string, 0, len(buf))
+		for _, m := range buf {
+			var payload map[string]any
+			_ = json.Unmarshal(m.Payload, &payload)
 
-            ev := map[string]any{
-                "event_id":   m.EventID,
-                "ts":         m.TS,
-                "subject_id": m.SubjectID,
-                "producer_id": m.ProducerID,
-                "schema_id":  m.SchemaID,
-                "payload":    payload,
-                "tags":       tags,
-            }
-            events = append(events, ev)
-            redisIDs = append(redisIDs, m.RedisID)
-        }
-        metrics.PGBatchSize.Observe(float64(len(events)))
-        t0 := time.Now()
-        err := r.pg.IngestEventsJSON(context.Background(), events)
-        metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
-        if err == nil {
-            ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit: batch_size=%d, duration_ms=%d", len(events), time.Since(t0).Milliseconds()))
-            if r.ack != nil { r.ack(redisIDs...) }
-            buf = buf[:0]
-            return
-        }
-        ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error: batch_size=%d, error=%v", len(events), err))
-        // per-row fallback with fresh allocations
-        succeeded := make([]string, 0, len(buf))
-        for i, m := range buf {
-            var payload map[string]any
-            _ = json.Unmarshal(m.Payload, &payload)
+			var tags []map[string]string
+			if len(m.Tags) > 0 {
+				_ = json.Unmarshal(m.Tags, &tags)
+			}
 
-            var tags []map[string]string
-            if len(m.Tags) > 0 {
-                _ = json.Unmarshal(m.Tags, &tags)
-            }
+			ev := map[string]any{
+				"event_id":    m.EventID,
+				"ts":          m.TS,
+				"subject_id":  m.SubjectID,
+				"producer_id": m.ProducerID,
+				"schema_id":   m.SchemaID,
+				"payload":     payload,
+				"tags":        tags,
+			}
+			events = append(events, ev)
+			redisIDs = append(redisIDs, m.RedisID)
+		}
+		metrics.PGBatchSize.Observe(float64(len(events)))
+		t0 := time.Now()
+		err := r.pg.IngestEventsJSON(context.Background(), events)
+		metrics.PGBatchDuration.Observe(time.Since(t0).Seconds())
+		if err == nil {
+			ev.Infra("write", "postgres", "success", fmt.Sprintf("batch commit: batch_size=%d, duration_ms=%d", len(events), time.Since(t0).Milliseconds()))
+			if r.ack != nil {
+				r.ack(redisIDs...)
+			}
+			buf = buf[:0]
+			return
+		}
+		ev.Infra("write", "postgres", "failed", fmt.Sprintf("batch error: batch_size=%d, error=%v", len(events), err))
+		// per-row fallback with fresh allocations
+		succeeded := make([]string, 0, len(buf))
+		for i, m := range buf {
+			var payload map[string]any
+			_ = json.Unmarshal(m.Payload, &payload)
 
-            ev := []map[string]any{{
-                "event_id":   m.EventID,
-                "ts":         m.TS,
-                "subject_id": m.SubjectID,
-                "producer_id": m.ProducerID,
-                "schema_id":  m.SchemaID,
-                "payload":    payload,
-                "tags":       tags,
-            }}
-            if e := r.pg.IngestEventsJSON(context.Background(), ev); e == nil {
-                succeeded = append(succeeded, redisIDs[i])
-            }
-        }
-        if len(succeeded) > 0 && r.ack != nil { r.ack(succeeded...) }
-        buf = buf[:0]
-    }
-    for {
-        select {
-        case m, ok := <-r.pgChLean:
-            if !ok { flush(); return }
-            buf = append(buf, m)
-            if len(buf) >= r.pgBatchSize { flush(); if !timer.Stop() { <-timer.C }; timer.Reset(r.pgBatchWait) }
-        case <-timer.C:
-            flush()
-            timer.Reset(r.pgBatchWait)
-        }
-    }
+			var tags []map[string]string
+			if len(m.Tags) > 0 {
+				_ = json.Unmarshal(m.Tags, &tags)
+			}
+
+			ev := []map[string]any{{
+				"event_id":    m.EventID,
+				"ts":          m.TS,
+				"subject_id":  m.SubjectID,
+				"producer_id": m.ProducerID,
+				"schema_id":   m.SchemaID,
+				"payload":     payload,
+				"tags":        tags,
+			}}
+			if e := r.pg.IngestEventsJSON(context.Background(), ev); e == nil {
+				succeeded = append(succeeded, redisIDs[i])
+			}
+		}
+		if len(succeeded) > 0 && r.ack != nil {
+			r.ack(succeeded...)
+		}
+		buf = buf[:0]
+	}
+	for {
+		select {
+		case m, ok := <-r.pgChLean:
+			if !ok {
+				flush()
+				return
+			}
+			buf = append(buf, m)
+			if len(buf) >= r.pgBatchSize {
+				flush()
+				if !timer.Stop() {
+					<-timer.C
+				}
+				timer.Reset(r.pgBatchWait)
+			}
+		case <-timer.C:
+			flush()
+			timer.Reset(r.pgBatchWait)
+		}
+	}
 }
 
 type rdMsg struct {
-    ID string
-    Payload []byte
+	ID      string
+	Payload []byte
 }
 
 func (r *router) rdWorker() {
-    for m := range r.rdCh {
-        _ = r.rd.XAdd(context.Background(), m.ID, m.Payload)
-    }
+	for m := range r.rdCh {
+		_ = r.rd.XAdd(context.Background(), m.ID, m.Payload)
+	}
 }
 
 // helpers to provide producer/schema ids (may return nil to signal missing)
 func (r *router) producerID() any {
-    if r.prodID == "" { return nil }
-    return r.prodID
+	if r.prodID == "" {
+		return nil
+	}
+	return r.prodID
 }
 func (r *router) schemaID() any {
-    if r.schID == "" { return nil }
-    return r.schID
+	if r.schID == "" {
+		return nil
+	}
+	return r.schID
 }
 
 // isConnectivityError attempts to detect network/connection-level failures where the database is unreachable,
 // to decide whether to fallback to filesystem spill as a last resort.
 func isConnectivityError(err error) bool {
-    if err == nil { return false }
-    if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) { return true }
-    if errors.Is(err, io.EOF) { return true }
-    var ne net.Error
-    if errors.As(err, &ne) { return true }
-    // best-effort string checks (driver error strings)
-    s := strings.ToLower(err.Error())
-    switch {
-    case strings.Contains(s, "connection refused"),
-        strings.Contains(s, "broken pipe"),
-        strings.Contains(s, "connection reset"),
-        strings.Contains(s, "no such host"),
-        strings.Contains(s, "server closed the connection"),
-        strings.Contains(s, "i/o timeout"):
-        return true
-    }
-    return false
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		return true
+	}
+	// best-effort string checks (driver error strings)
+	s := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(s, "connection refused"),
+		strings.Contains(s, "broken pipe"),
+		strings.Contains(s, "connection reset"),
+		strings.Contains(s, "no such host"),
+		strings.Contains(s, "server closed the connection"),
+		strings.Contains(s, "i/o timeout"):
+		return true
+	}
+	return false
 }
-
