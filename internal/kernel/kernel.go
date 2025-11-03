@@ -1,11 +1,11 @@
 package kernel
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
-    "crypto/tls"
-    "crypto/x509"
-    "os"
+	"os"
 
 	"bytes"
 	"crypto/ed25519"
@@ -15,15 +15,14 @@ import (
 	"strings"
 
 	"context"
-	"sync"
 	"time"
 
 	"github.com/example/data-kernel/internal/auth"
 	"github.com/example/data-kernel/internal/data"
 	"github.com/example/data-kernel/internal/kernelcfg"
 	"github.com/example/data-kernel/internal/logging"
-    "github.com/example/data-kernel/internal/metrics"
-    "github.com/example/data-kernel/internal/protocol"
+	"github.com/example/data-kernel/internal/metrics"
+	"github.com/example/data-kernel/internal/protocol"
 	"github.com/redis/go-redis/v9"
 	ssh "golang.org/x/crypto/ssh"
 )
