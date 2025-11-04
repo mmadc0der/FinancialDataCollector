@@ -84,22 +84,25 @@ Logs all authentication attempts, successes, and failures. **Required for securi
 
 **Fields:**
 - `event`: "auth"
-- `action`: "login" | "logout" | "verify" | "failure"
-- `subject`: Authenticated principal (SSH certificate principal, producer ID, etc.)
-- `ip`: Remote IP address
-- `status`: "success" | "failed"
-- `reason`: Failure reason (if failed)
+- `component`: "auth"
+- `stage`: Always `authentication`
+- `action`: Normalized verb (for example: `login`, `logout`, `verify`, `failure`)
+- `outcome`: `success` | `failed`
+- `subject` *(optional)*: Authenticated principal (SSH certificate principal, producer ID, etc.)
+- `ip` *(optional)*: Remote IP address
+- `reason_code` *(optional)*: Normalized error code (derived from `reason` argument)
+- `details` *(optional)*: Free-form context extracted from the `reason`
 
 **Severity:**
-- `success`: DEBUG
-- `failed`: WARN
-- `failure` action: ERROR
+- `outcome=success`: INFO
+- `outcome=failed`: WARN
+- `action=failure` and `outcome=failed`: ERROR
 
 **Example:**
 ```go
 ev := logging.NewEventLogger()
 ev.Auth("verify", principal, logging.RemoteAddr(r), true, "")
-ev.Auth("failure", "", logging.RemoteAddr(r), false, "certificate expired")
+ev.Auth("failure", "", logging.RemoteAddr(r), false, "certificate_expired")
 ```
 
 #### 3. Authorization Events (`Authorization`)
@@ -125,28 +128,42 @@ ev.Authorization("deny", principal, "/admin/revoke", "insufficient_privileges")
 
 #### 4. Registration Events (`Registration`)
 
-Logs producer registration attempts, approvals, rejections, and security violations.
+Logs producer key onboarding, subject registration, schema upgrades, and security violations.
 
-**Fields:**
+**Fields (core):**
 - `event`: "registration"
-- `action`: "attempt" | "approve" | "reject" | "replay" | "invalid_cert" | "invalid_sig" | "rate_limited" | "success" | "error"
+- `component`: "registration"
+- `stage`: Workflow segment (for example `request`, `request_validation`, `payload_validation`, `nonce_guard`, `certificate_validation`, `signature_verification`, `status`, `registration`)
+- `action`: Normalized action token such as:
+  - `message_received`, `message_invalid`
+  - `payload_invalid`
+  - `rate_limited`
+  - `nonce_replay`
+  - `certificate_invalid`
+  - `signature_invalid`
+  - `status_check`, `status_pending`, `status_denied`, `status_unknown`, `status_approved`
+  - `deregister_request`, `deregistered`
+  - `success`
+- `outcome`: `attempt` | `success` | `failed` | `denied` | `pending`
+
+**Additional fields (when available):**
 - `fingerprint`: SSH key fingerprint
-- `producer_id`: Producer UUID (if available)
-- `subject_id`: Subject ID (for subject registration)
-- `status`: Registration status
-- `reason`: Action reason
+- `producer_id`: Producer UUID
+- `subject_id`: Subject UUID (for subject flows)
+- `status`: Raw status returned by upstream systems (only when it differs from `outcome`)
+- `reason_code` / `details`: Structured reason extracted from the call-site `reason`
 
 **Severity:**
-- `attempt`: DEBUG
-- `approve`: INFO (security event)
-- `reject` | `replay` | `invalid_cert` | `invalid_sig` | `rate_limited`: WARN
-- `error`: ERROR
+- `outcome=attempt` | `pending`: INFO (visibility into live registration traffic)
+- `outcome=success`: INFO
+- `outcome=denied` | `failed`: WARN
 
 **Example:**
 ```go
 ev := logging.NewEventLogger()
-ev.Registration("invalid_cert", fingerprint, producerID, "", "certificate_expired", "certificate expired")
-ev.Registration("success", fingerprint, producerID, subjectID, "success", "registration completed")
+ev.Registration("message_received", fingerprint, "", "attempt", "received: action=register nonce=123")
+ev.Registration("certificate_invalid", fingerprint, producerID, "failed", "certificate_verification_failed")
+ev.Registration("success", fingerprint, producerID, "success", "completed: op=register schema=customers")
 ```
 
 #### 5. Token Events (`Token`)
@@ -155,17 +172,18 @@ Logs token lifecycle events (issuance, exchange, revocation, verification).
 
 **Fields:**
 - `event`: "token"
-- `action`: "issue" | "exchange" | "revoke" | "verify"
-- `producer_id`: Producer UUID
-- `subject_id`: Subject ID (if applicable)
-- `jti`: JWT ID (JTI)
-- `status`: "success" | "failed"
-- `reason`: Failure reason (if failed)
+- `component`: "auth"
+- `stage`: `token_issue` | `token_exchange` | `token_revoke` | `token_verify`
+- `action`: Normalized action (for example `issue`, `exchange`, `revoke`, `verify`)
+- `outcome`: `success` | `failed`
+- `producer_id`, `subject_id`, `jti` *(optional)*
+- `status`: Present only when the caller supplies an explicit status value distinct from `outcome`
+- `reason_code` / `details`: Included on failures
 
 **Severity:**
-- `success` (verify): DEBUG
-- `success` (other): INFO
-- `failed`: WARN
+- `action=verify` and `outcome=success`: DEBUG (to avoid log spam)
+- Other `outcome=success`: INFO
+- `outcome=failed`: WARN
 
 **Example:**
 ```go
@@ -203,16 +221,18 @@ Logs infrastructure operations (database connections, Redis operations, spill wr
 
 **Fields:**
 - `event`: "infra"
-- `action`: "connect" | "disconnect" | "read" | "write" | "ack" | "init" | "migrate" | "error" | "retry" | "start" | "config"
-- `component`: "redis" | "postgres" | "spill" | "kernel" | "auth" | "http"
-- `status`: "success" | "failed"
-- `details`: Detailed message
+- `component`: Normalized component name (for example `redis`, `postgres`, `kernel`, `spill`)
+- `stage`: Derived from component/action (for example `redis_read`, `postgres_write`, `kernel_start`)
+- `action`: Normalized action such as `start`, `config`, `init`, `connect`, `disconnect`, `read`, `write`, `ack`, `retry`, `error`
+- `outcome`: `success` | `failed` | `retry` | `denied` | `skipped`
+- `status`: Raw status when supplied by the caller and different from `outcome`
+- `details`: Free-form context message
 
 **Severity:**
-- `success` (connect/disconnect): DEBUG
-- `success` (other): INFO
-- `failed` | `error`: ERROR
-- `retry`: WARN
+- `outcome=success` for startup/config actions: INFO
+- `outcome=success` for steady-state operations: DEBUG
+- `outcome=retry` | `outcome=denied` | `outcome=skipped`: WARN
+- `outcome=failed`: ERROR
 
 **Example:**
 ```go
@@ -252,14 +272,14 @@ ev.Auth("failure", "", logging.RemoteAddr(r), false, "certificate_expired")
 #### Logging Registration Events
 
 ```go
-// Registration attempt
-ev.Registration("attempt", fingerprint, "", "", "pending", "")
+// Inbound registration message
+ev.Registration("message_received", fingerprint, "", "attempt", "received: action=register nonce=abc123")
 
-// Invalid certificate
-ev.Registration("invalid_cert", fingerprint, producerID, "", "invalid_cert", "certificate expired")
+// Certificate validation failure
+ev.Registration("certificate_invalid", fingerprint, producerID, "failed", "certificate_verification_failed")
 
-// Successful registration
-ev.Registration("success", fingerprint, producerID, subjectID, "success", "")
+// Successful registration (subject/schema assign)
+ev.Registration("success", fingerprint, producerID, "success", "completed: op=register schema=customers")
 ```
 
 #### Logging Token Events
