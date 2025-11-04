@@ -182,7 +182,7 @@ func (k *Kernel) checkNonceReplay(ctx context.Context, fingerprint, nonce string
     
     if !ok {
         // Replay detected - log as security event
-        ev.Registration("replay", fingerprint, "", "", "duplicate_nonce")
+        ev.Registration("nonce_replay", fingerprint, "", "failed", "duplicate_nonce")
         return false
     }
     
@@ -383,7 +383,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     action, _ := m.Values["action"].(string)
     
     if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
-        ev.Registration("attempt", "", "", "failed", "missing_fields")
+        ev.Registration("message_invalid", "", "", "failed", fmt.Sprintf("missing_fields: stream=%s id=%s", stream, m.ID))
         if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack message with missing fields: %v", err))
         }
@@ -391,12 +391,12 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
     }
     
     fp := sshFingerprint([]byte(pubkey))
-    ev.Registration("attempt", fp, "", "", "")
+    ev.Registration("message_received", fp, "", "attempt", fmt.Sprintf("received: action=%s nonce=%s", strings.TrimSpace(action), nonce))
 
     // Parse payload first to get producer_id for rate limiting
     var payload regPayload
     if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-        ev.Registration("attempt", fp, "", "failed", fmt.Sprintf("payload_parse_error: %v", err))
+        ev.Registration("payload_invalid", fp, "", "failed", fmt.Sprintf("payload_parse_error: %v", err))
         if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack message with parse error: %v", err))
         }
@@ -414,7 +414,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 
     // Rate limiting check per producer_id/fingerprint
     if !k.checkRateLimit(ctx, "reg", rateLimitID) {
-        ev.Registration("rate_limited", fp, "", "", "")
+        ev.Registration("rate_limited", fp, "", "denied", fmt.Sprintf("rate_limited: key=%s", rateLimitID))
         // respond to client on same per-nonce response stream for consistency
         k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "rate_limited"})
         if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
@@ -430,7 +430,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         if err != nil {
             ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for replay: %v", err))
         }
-        ev.Registration("replay", fp, producerID, "replay", "duplicate_nonce")
+        ev.Registration("nonce_replay", fp, producerID, "failed", "duplicate_nonce")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "replay", "reason": "duplicate_nonce"})
         if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
             ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay message: %v", err))
@@ -446,7 +446,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         if err != nil {
             ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for invalid cert: %v", err))
         }
-        ev.Registration("invalid_cert", fp, producerID, "invalid_cert", "certificate_verification_failed")
+        ev.Registration("certificate_invalid", fp, producerID, "failed", "certificate_verification_failed")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{
             "fingerprint": fp,
             "status": "invalid_cert",
@@ -466,7 +466,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         if err != nil {
             ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for invalid sig: %v", err))
         }
-        ev.Registration("invalid_sig", fp, producerID, "invalid_sig", "signature_verification_failed")
+        ev.Registration("signature_invalid", fp, producerID, "failed", "signature_verification_failed")
         k.sendRegistrationResponse(ctx, nonce, map[string]any{
             "fingerprint": fp,
             "status": "invalid_sig",
@@ -495,7 +495,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         }
         return
     }
-    ev.Registration("attempt", fp, producerID, status, "")
+    ev.Registration("status_check", fp, producerID, status, "")
 
     // Handle deregister action
     if action == "deregister" {
@@ -529,7 +529,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
         k.handleKnownDenied(ctx, stream, &producerID, fp, status, m.ID, nonce)
     default:
         // This shouldn't happen after RegisterProducerKey, but handle gracefully
-        ev.Registration("attempt", fp, producerID, status, "unknown_status")
+        ev.Registration("status_unknown", fp, producerID, status, fmt.Sprintf("status_unknown: %s", status))
         k.handleNewProducer(ctx, stream, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID)
     }
 }
@@ -538,13 +538,13 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
     ev := logging.NewEventLogger()
     
-    ev.Registration("attempt", fp, producerID, "deregister", "")
+    ev.Registration("deregister_request", fp, producerID, "pending", fmt.Sprintf("deregister_request: nonce=%s", nonce))
     
     err := k.pg.DisableProducer(ctx, producerID)
     if err != nil {
         ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to disable producer: %v", err))
     } else {
-        ev.Registration("attempt", fp, producerID, "deregistered", "")
+        ev.Registration("deregistered", fp, producerID, "success", "")
     }
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
@@ -561,7 +561,7 @@ func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp st
 func (k *Kernel) handleKnownApproved(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
     ev := logging.NewEventLogger()
     
-    ev.Registration("attempt", fp, producerID, "approved", "")
+    ev.Registration("status_approved", fp, producerID, "approved", "")
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
@@ -589,7 +589,7 @@ func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerI
     
     var pid string
     if producerID != nil { pid = *producerID }
-    ev.Registration("attempt", fp, pid, status, "")
+    ev.Registration("status_denied", fp, pid, status, "")
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,
@@ -606,7 +606,7 @@ func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerI
 func (k *Kernel) handleNewProducer(ctx context.Context, stream, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
     ev := logging.NewEventLogger()
     
-    ev.Registration("attempt", fp, producerID, "pending", "")
+    ev.Registration("status_pending", fp, producerID, "pending", "")
     
     k.sendRegistrationResponse(ctx, nonce, map[string]any{
         "fingerprint": fp,

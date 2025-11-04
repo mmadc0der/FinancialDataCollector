@@ -76,18 +76,28 @@ func appendReason(fields []Field, reason string, detailsSet bool) ([]Field, bool
 
 func registrationStage(action string) string {
 	switch action {
-	case "attempt":
+	case "attempt", "message_received":
 		return "request"
-	case "approve", "reject":
+	case "message_invalid":
+		return "request_validation"
+	case "payload_invalid", "payload_validated":
+		return "payload_validation"
+	case "approve", "reject", "status_approved":
 		return "approval"
-	case "replay":
+	case "replay", "nonce_replay":
 		return "nonce_guard"
-	case "invalid_cert":
+	case "invalid_cert", "certificate_invalid":
 		return "certificate_validation"
-	case "invalid_sig":
+	case "invalid_sig", "signature_invalid":
 		return "signature_verification"
 	case "rate_limited":
 		return "rate_limiting"
+	case "status_check", "status_pending", "status_denied", "status_unknown":
+		return "status"
+	case "record_persisted":
+		return "persistence"
+	case "deregister_request", "deregistered":
+		return "deregistration"
 	case "success":
 		return "registration"
 	default:
@@ -135,7 +145,7 @@ func registrationOutcome(action, status string) string {
 func registrationLevel(outcome string) Level {
 	switch outcome {
 	case "attempt", "pending":
-		return DebugLevel
+		return InfoLevel
 	case "success":
 		return InfoLevel
 	case "denied":
