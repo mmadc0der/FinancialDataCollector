@@ -10,128 +10,228 @@ type EventLogger struct {
 	log func(level Level, msg string, fields ...Field)
 }
 
-// --- helpers to map legacy inputs to minimal schema ---
-func mapRegStage(action string) string {
-    switch strings.ToLower(action) {
-    case "invalid_cert":
-        return "certificate_validation"
-    case "invalid_sig":
-        return "signature_verification"
-    case "replay":
-        return "nonce_check"
-    case "approve", "reject":
-        return "approval_decision"
-    case "rate_limited":
-        return "rate_limit"
-    case "success":
-        return "registration"
-    default:
-        Error("infra", F("event", "infra"), F("component", "logging"), F("stage", "mapping"), F("action", "map_reg_stage"), F("outcome", "failed"), F("reason_code", "unknown_action"), F("details", "action="+action))
-        return "request"
-    }
+var keyReplacer = strings.NewReplacer(" ", "_", "-", "_", "/", "_", ".", "_", ":", "_")
+
+func normalizeToken(v string) string {
+	return strings.ToLower(strings.TrimSpace(v))
 }
 
-func mapRegVerb(action string) string {
-    switch strings.ToLower(action) {
-    case "invalid_cert":
-        return "validate"
-    case "invalid_sig":
-        return "verify"
-    case "replay":
-        return "check"
-    case "approve":
-        return "approve"
-    case "reject":
-        return "reject"
-    case "rate_limited":
-        return "throttle"
-    case "success":
-        return "register"
-    case "attempt":
-        return "request"
-    default:
-        Error("infra", F("event", "infra"), F("component", "logging"), F("stage", "mapping"), F("action", "map_reg_verb"), F("outcome", "failed"), F("reason_code", "unknown_action"), F("details", "action="+action))
-        return strings.ToLower(action)
-    }
+func normalizeKey(v string) string {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return ""
+	}
+	lower := strings.ToLower(trimmed)
+	sanitized := keyReplacer.Replace(lower)
+	for strings.Contains(sanitized, "__") {
+		sanitized = strings.ReplaceAll(sanitized, "__", "_")
+	}
+	sanitized = strings.Trim(sanitized, "_")
+	if sanitized == "" {
+		return lower
+	}
+	return sanitized
 }
 
-func mapRegOutcome(action, status string) string {
-    a := strings.ToLower(action)
-    s := strings.ToLower(status)
-    if a == "attempt" { return "attempt" }
-    if a == "approve" || a == "success" || s == "approved" || s == "success" { return "success" }
-    if a == "rate_limited" { return "denied" }
-    if a == "replay" || a == "invalid_cert" || a == "invalid_sig" || a == "invalid" || a == "error" { return "failed" }
-    if s == "pending" || s == "deregister" || s == "deregistered" { return "skipped" }
-    Error("infra", F("event", "infra"), F("component", "logging"), F("stage", "mapping"), F("action", "map_reg_outcome"), F("outcome", "failed"), F("reason_code", "unknown_outcome_mapping"), F("details", "action="+action+",status="+status))
-    return "failed"
+func httpStatusLabel(code int) string {
+	if code == 0 {
+		return ""
+	}
+	return normalizeToken(http.StatusText(code))
 }
 
-func mapTokenStage(action string) string {
-    switch strings.ToLower(action) {
-    case "issue":
-        return "token_issue"
-    case "exchange":
-        return "token_exchange"
-    case "revoke":
-        return "token_revoke"
-    case "verify":
-        return "token_verify"
-    default:
-        Error("infra", F("event", "infra"), F("component", "logging"), F("stage", "mapping"), F("action", "map_token_stage"), F("outcome", "failed"), F("reason_code", "unknown_action"), F("details", "action="+action))
-        return "token"
-    }
+func appendReason(fields []Field, reason string, detailsSet bool) ([]Field, bool) {
+	trimmed := strings.TrimSpace(reason)
+	if trimmed == "" {
+		return fields, detailsSet
+	}
+	code := normalizeKey(trimmed)
+	detail := ""
+	if idx := strings.Index(trimmed, ":"); idx != -1 {
+		head := strings.TrimSpace(trimmed[:idx])
+		tail := strings.TrimSpace(trimmed[idx+1:])
+		if head != "" {
+			code = normalizeKey(head)
+		}
+		detail = tail
+	}
+	if code == "" {
+		fields = append(fields, F("reason_code", trimmed))
+		if detail != "" && !detailsSet {
+			fields = append(fields, F("details", detail))
+			detailsSet = true
+		}
+		return fields, detailsSet
+	}
+	fields = append(fields, F("reason_code", code))
+	if detail != "" && !detailsSet {
+		fields = append(fields, F("details", detail))
+		detailsSet = true
+	} else if detail == "" && !detailsSet && trimmed != code && strings.ContainsAny(trimmed, " \t") {
+		fields = append(fields, F("details", trimmed))
+		detailsSet = true
+	}
+	return fields, detailsSet
 }
 
-func mapAdminStage(action string) string {
-    switch strings.ToLower(action) {
-    case "review", "approve", "deny":
-        return "approval_decision"
-    case "revoke":
-        return "revocation"
-    case "access":
-        return "access"
-    default:
-        Error("infra", F("event", "infra"), F("component", "logging"), F("stage", "mapping"), F("action", "map_admin_stage"), F("outcome", "failed"), F("reason_code", "unknown_action"), F("details", "action="+action))
-        return "admin"
-    }
+func registrationStage(action string) string {
+	switch action {
+	case "attempt":
+		return "request"
+	case "approve", "reject":
+		return "approval"
+	case "replay":
+		return "nonce_guard"
+	case "invalid_cert":
+		return "certificate_validation"
+	case "invalid_sig":
+		return "signature_verification"
+	case "rate_limited":
+		return "rate_limiting"
+	case "success":
+		return "registration"
+	default:
+		if action == "" {
+			return "registration"
+		}
+		return action
+	}
 }
 
-func mapInfraStage(action string) string {
-    switch strings.ToLower(action) {
-    case "connect", "disconnect":
-        return "connection"
-    case "read", "write", "ack":
-        return "io"
-    case "retry":
-        return "recovery"
-    case "start", "config", "init", "migrate":
-        return "initialization"
-    case "error":
-        return "processing"
-    default:
-        Error("infra", F("event", "infra"), F("component", "logging"), F("stage", "mapping"), F("action", "map_infra_stage"), F("outcome", "failed"), F("reason_code", "unknown_action"), F("details", "action="+action))
-        return strings.ToLower(action)
-    }
+func registrationOutcome(action, status string) string {
+	switch status {
+	case "success", "approved", "ok":
+		return "success"
+	case "failed", "error", "invalid", "invalid_sig", "invalid_cert":
+		return "failed"
+	case "rate_limited", "denied":
+		return "denied"
+	case "pending", "waiting":
+		return "pending"
+	case "deregister", "deregistered":
+		return "pending"
+	case "attempt":
+		return "attempt"
+	}
+	switch action {
+	case "attempt":
+		return "attempt"
+	case "approve", "success":
+		return "success"
+	case "reject", "rate_limited":
+		return "denied"
+	case "replay", "invalid_cert", "invalid_sig", "error":
+		return "failed"
+	}
+	if status != "" {
+		return status
+	}
+	if action != "" {
+		return action
+	}
+	return "unknown"
 }
 
-func mapInfraOutcome(status string) string {
-    switch strings.ToLower(status) {
-    case "success":
-        return "success"
-    case "failed":
-        return "failed"
-    case "empty":
-        return "skipped"
-    default:
-        Error("infra", F("event", "infra"), F("component", "logging"), F("stage", "mapping"), F("action", "map_infra_outcome"), F("outcome", "failed"), F("reason_code", "unknown_status"), F("details", "status="+status))
-        return strings.ToLower(status)
-    }
+func registrationLevel(outcome string) Level {
+	switch outcome {
+	case "attempt", "pending":
+		return DebugLevel
+	case "success":
+		return InfoLevel
+	case "denied":
+		return WarnLevel
+	case "failed":
+		return WarnLevel
+	default:
+		return InfoLevel
+	}
 }
 
-func httpStatusStr(code int) string {
-    if code == 0 { return "" }
-    return "http=" + strings.TrimSpace(strings.ToLower(http.StatusText(code)))
+func tokenStage(action string) string {
+	if action == "" {
+		return "token"
+	}
+	return "token_" + action
+}
+
+func adminStage(action string) string {
+	if action == "" {
+		return "admin"
+	}
+	return "admin_" + action
+}
+
+func infraStage(component, action string) string {
+	switch {
+	case component == "" && action == "":
+		return "infra"
+	case component == "":
+		return action
+	case action == "":
+		return component
+	default:
+		return component + "_" + action
+	}
+}
+
+func infraOutcome(status, action string) string {
+	switch status {
+	case "success", "ok", "ready":
+		return "success"
+	case "failed", "error", "timeout":
+		return "failed"
+	case "empty", "skipped", "noop":
+		return "skipped"
+	case "rate_limited", "denied":
+		return "denied"
+	case "retry":
+		return "retry"
+	case "":
+		// fall through
+	default:
+		if status != "" {
+			return status
+		}
+	}
+	switch action {
+	case "retry":
+		return "retry"
+	case "error", "failed":
+		return "failed"
+	case "start", "config", "init", "migrate":
+		return "success"
+	}
+	return "unknown"
+}
+
+func isStartupAction(action string) bool {
+	switch action {
+	case "start", "config", "init", "migrate":
+		return true
+	default:
+		return false
+	}
+}
+
+func infraLevel(action, outcome string) Level {
+	switch outcome {
+	case "failed":
+		return ErrorLevel
+	case "retry":
+		return WarnLevel
+	case "skipped", "denied":
+		return WarnLevel
+	case "success":
+		if isStartupAction(action) {
+			return InfoLevel
+		}
+		return DebugLevel
+	default:
+		if action == "error" {
+			return ErrorLevel
+		}
+		return InfoLevel
+	}
 }
 
 // NewEventLogger creates a new EventLogger backed by the global logging functions
@@ -145,123 +245,232 @@ func NewEventLogger() *EventLogger {
 // action: get|post|put|delete|patch|head|options
 // status: success|failed
 func (e *EventLogger) APIAccess(action, from, subject, object, status, reason string, httpCode int) {
-    // Minimal schema: event, component, stage, action, outcome, reason_code, details(optional)
-    level := InfoLevel
-    if status == "failed" {
-        if httpCode >= 500 { level = ErrorLevel } else if httpCode >= 400 { level = WarnLevel }
-    } else if status == "success" {
-        level = DebugLevel // successful API calls are noisy; keep at debug
+    actionKey := normalizeKey(action)
+    if actionKey == "" {
+        actionKey = "unknown"
+    }
+    statusKey := normalizeKey(status)
+    outcome := statusKey
+    if outcome == "" {
+        outcome = "success"
     }
 
-    outcome := status
-    if outcome == "" { outcome = "success" }
+    level := InfoLevel
+    switch outcome {
+    case "success":
+        level = DebugLevel
+    case "failed":
+        if httpCode >= 500 {
+            level = ErrorLevel
+        } else {
+            level = WarnLevel
+        }
+    default:
+        if httpCode >= 500 {
+            level = ErrorLevel
+        } else if httpCode >= 400 {
+            level = WarnLevel
+        }
+    }
+
     fields := []Field{
         F("event", "api"),
         F("component", "api"),
         F("stage", "request"),
-        F("action", strings.ToLower(action)),
+        F("action", actionKey),
         F("outcome", outcome),
     }
-    if reason != "" { fields = append(fields, F("reason_code", reason)) }
-    // Optional, compact details only if helpful
-    if object != "" || httpCode != 0 { fields = append(fields, F("details", strings.Trim(strings.Join([]string{object, httpStatusStr(httpCode)}, " "), " "))) }
+    if from = strings.TrimSpace(from); from != "" {
+        fields = append(fields, F("from", from))
+    }
+    if subject = strings.TrimSpace(subject); subject != "" {
+        fields = append(fields, F("subject", subject))
+    }
+    if object = strings.TrimSpace(object); object != "" {
+        fields = append(fields, F("object", object))
+    }
+    if statusKey != "" && statusKey != outcome {
+        fields = append(fields, F("status", statusKey))
+    }
+    if httpCode != 0 {
+        fields = append(fields, F("http_code", httpCode))
+        if label := httpStatusLabel(httpCode); label != "" {
+            fields = append(fields, F("http_status", label))
+        }
+    }
+    fields, _ = appendReason(fields, reason, false)
     e.log(level, "api", fields...)
 }
 
 // Auth logs authentication events
 // action: login|logout|verify|failure
 func (e *EventLogger) Auth(action, subject, ip string, success bool, reason string) {
+    actionKey := normalizeKey(action)
+    if actionKey == "" {
+        actionKey = "unknown"
+    }
+
+    outcome := "success"
     level := InfoLevel
-    if success { level = DebugLevel } else { if action == "failure" { level = ErrorLevel } else { level = WarnLevel } }
-    outcome := "success"; if !success { outcome = "failed" }
+    if success {
+        level = DebugLevel
+    } else {
+        outcome = "failed"
+        if actionKey == "failure" {
+            level = ErrorLevel
+        } else {
+            level = WarnLevel
+        }
+    }
+
     fields := []Field{
         F("event", "auth"),
         F("component", "auth"),
         F("stage", "authentication"),
-        F("action", strings.ToLower(action)),
+        F("action", actionKey),
         F("outcome", outcome),
     }
-    if reason != "" { fields = append(fields, F("reason_code", reason)) }
+    if subject = strings.TrimSpace(subject); subject != "" {
+        fields = append(fields, F("subject", subject))
+    }
+    if ip = strings.TrimSpace(ip); ip != "" {
+        fields = append(fields, F("ip", ip))
+    }
+    fields, _ = appendReason(fields, reason, false)
     e.log(level, "auth", fields...)
 }
 
 // Authorization logs authorization events
 // action: allow|deny
 func (e *EventLogger) Authorization(action, subject, object, reason string) {
-    level := InfoLevel
+    actionKey := normalizeKey(action)
+    if actionKey == "" {
+        actionKey = "unknown"
+    }
+
     outcome := "success"
-    if action == "deny" { level = WarnLevel; outcome = "denied" }
+    level := InfoLevel
+    if actionKey == "deny" {
+        outcome = "denied"
+        level = WarnLevel
+    }
+
     fields := []Field{
         F("event", "authorization"),
         F("component", "auth"),
         F("stage", "authorization"),
-        F("action", strings.ToLower(action)),
+        F("action", actionKey),
         F("outcome", outcome),
     }
-    if reason != "" { fields = append(fields, F("reason_code", reason)) }
+    if subject = strings.TrimSpace(subject); subject != "" {
+        fields = append(fields, F("subject", subject))
+    }
+    if object = strings.TrimSpace(object); object != "" {
+        fields = append(fields, F("object", object))
+    }
+    fields, _ = appendReason(fields, reason, false)
     e.log(level, "authorization", fields...)
 }
 
 // Registration logs registration events
 // action: attempt|approve|reject|replay|invalid_cert|invalid_sig|rate_limited
 func (e *EventLogger) Registration(action, fingerprint, producerID, status, reason string) {
-    // Map legacy action/status into minimal schema
-    stage := mapRegStage(action)
-    verb := mapRegVerb(action)
-    outcome := mapRegOutcome(action, status)
-    level := InfoLevel
-    switch outcome {
-    case "attempt", "skipped":
-        level = DebugLevel
-    case "success":
-        level = InfoLevel
-    default:
-        level = WarnLevel
-    }
+    actionKey := normalizeKey(action)
+    statusKey := normalizeKey(status)
+
+    stage := registrationStage(actionKey)
+    outcome := registrationOutcome(actionKey, statusKey)
+    level := registrationLevel(outcome)
+
     fields := []Field{
         F("event", "registration"),
         F("component", "registration"),
         F("stage", stage),
-        F("action", verb),
+        F("action", actionKey),
         F("outcome", outcome),
     }
-    if reason != "" { fields = append(fields, F("reason_code", reason)) } else if action != "" { fields = append(fields, F("reason_code", action)) }
+    if fingerprint = strings.TrimSpace(fingerprint); fingerprint != "" {
+        fields = append(fields, F("fingerprint", fingerprint))
+    }
+    if producerID = strings.TrimSpace(producerID); producerID != "" {
+        fields = append(fields, F("producer_id", producerID))
+    }
+    if statusKey != "" && statusKey != outcome {
+        fields = append(fields, F("status", statusKey))
+    }
+    if reason != "" {
+        fields, _ = appendReason(fields, reason, false)
+    } else if actionKey != "" && actionKey != outcome {
+        fields = append(fields, F("reason_code", actionKey))
+    }
     e.log(level, "registration", fields...)
 }
 
 // Token logs token lifecycle events
 // action: issue|exchange|revoke|verify
 func (e *EventLogger) Token(action, producerID, subjectID, jti string, success bool, reason string) {
-    // Minimal schema, map to stage/action/outcome
-    stage := mapTokenStage(action)
-    outcome := "success"; if !success { outcome = "failed" }
+    actionKey := normalizeKey(action)
+    stage := tokenStage(actionKey)
+
+    outcome := "success"
     level := InfoLevel
-    if action == "verify" && success { level = DebugLevel } else if !success { level = WarnLevel } else { level = InfoLevel }
+    if actionKey == "verify" && success {
+        level = DebugLevel
+    } else if !success {
+        outcome = "failed"
+        level = WarnLevel
+    }
+
     fields := []Field{
         F("event", "token"),
         F("component", "auth"),
         F("stage", stage),
-        F("action", strings.ToLower(action)),
+        F("action", actionKey),
         F("outcome", outcome),
     }
-    if reason != "" { fields = append(fields, F("reason_code", reason)) }
+    if producerID = strings.TrimSpace(producerID); producerID != "" {
+        fields = append(fields, F("producer_id", producerID))
+    }
+    if subjectID = strings.TrimSpace(subjectID); subjectID != "" {
+        fields = append(fields, F("subject_id", subjectID))
+    }
+    if jti = strings.TrimSpace(jti); jti != "" {
+        fields = append(fields, F("jti", jti))
+    }
+    if !success {
+        fields = append(fields, F("status", "failed"))
+    }
+    fields, _ = appendReason(fields, reason, false)
     e.log(level, "token", fields...)
 }
 
 // Admin logs admin action events
 // action: review|approve|deny|revoke|access
 func (e *EventLogger) Admin(action, adminPrincipal, target, reason string, success bool) {
+    actionKey := normalizeKey(action)
+    stage := adminStage(actionKey)
+
+    outcome := "success"
     level := InfoLevel
-    if !success { level = ErrorLevel }
-    outcome := "success"; if !success { outcome = "failed" }
+    if !success {
+        outcome = "failed"
+        level = ErrorLevel
+    }
+
     fields := []Field{
         F("event", "admin"),
         F("component", "admin"),
-        F("stage", mapAdminStage(action)),
-        F("action", strings.ToLower(action)),
+        F("stage", stage),
+        F("action", actionKey),
         F("outcome", outcome),
     }
-    if reason != "" { fields = append(fields, F("reason_code", reason)) }
+    if adminPrincipal = strings.TrimSpace(adminPrincipal); adminPrincipal != "" {
+        fields = append(fields, F("admin_principal", adminPrincipal))
+    }
+    if target = strings.TrimSpace(target); target != "" {
+        fields = append(fields, F("target", target))
+    }
+    fields, _ = appendReason(fields, reason, false)
     e.log(level, "admin", fields...)
 }
 
@@ -270,26 +479,27 @@ func (e *EventLogger) Admin(action, adminPrincipal, target, reason string, succe
 // component: redis|postgres|http
 // status: success|failed|empty
 func (e *EventLogger) Infra(action, component, status, details string) {
-    // Map to minimal schema
-    outcome := mapInfraOutcome(status)
-    stage := mapInfraStage(action)
-    level := DebugLevel
-    switch outcome {
-    case "failed":
-        level = ErrorLevel
-    case "skipped":
-        level = WarnLevel
-    case "success":
-        if action == "start" || action == "config" || action == "init" || action == "migrate" { level = InfoLevel } else { level = DebugLevel }
-    }
+    actionKey := normalizeKey(action)
+    componentKey := normalizeKey(component)
+    statusKey := normalizeKey(status)
+
+    outcome := infraOutcome(statusKey, actionKey)
+    stage := infraStage(componentKey, actionKey)
+    level := infraLevel(actionKey, outcome)
+
     fields := []Field{
         F("event", "infra"),
-        F("component", component),
+        F("component", componentKey),
         F("stage", stage),
-        F("action", strings.ToLower(action)),
+        F("action", actionKey),
         F("outcome", outcome),
     }
-    if details != "" { fields = append(fields, F("details", details)) }
+    if statusKey != "" && statusKey != outcome {
+        fields = append(fields, F("status", statusKey))
+    }
+    if details = strings.TrimSpace(details); details != "" {
+        fields = append(fields, F("details", details))
+    }
     e.log(level, "infra", fields...)
 }
 
