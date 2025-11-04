@@ -20,7 +20,7 @@ func TestMetrics_Endpoint_ExposesCoreCounters(t *testing.T) {
     if os.Getenv("RUN_IT") == "" { t.Skip("integration test; set RUN_IT=1 to run") }
     pgc, dsn := itutil.StartPostgres(t)
     defer pgc.Terminate(context.Background())
-    rc, _ := itutil.StartRedis(t) // metrics available regardless of traffic
+    rc, addr := itutil.StartRedis(t)
     defer rc.Terminate(context.Background())
 
     itutil.WaitForPostgresReady(t, dsn, 10*time.Second)
@@ -32,7 +32,7 @@ func TestMetrics_Endpoint_ExposesCoreCounters(t *testing.T) {
     cfg := kernelcfg.Config{
         Server:   kernelcfg.ServerConfig{Listen: ":" + strconv.Itoa(port)},
         Postgres: itutil.NewPostgresConfigNoMigrations(dsn, 10, 50, ""),
-        Redis:    kernelcfg.RedisConfig{Addr: "127.0.0.1:0", KeyPrefix: "fdc:", Stream: "events"}, // invalid redis is fine for metrics only
+        Redis:    kernelcfg.RedisConfig{Addr: addr, KeyPrefix: "fdc:", Stream: "events", ConsumerGroup: "kernel"},
         Logging:  kernelcfg.LoggingConfig{Level: "error"},
         Auth:     kernelcfg.AuthConfig{Issuer: "it", Audience: "it", KeyID: "k", ProducerSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestProducerCA test@it", AdminSSHCA: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestAdminCA test@it"},
     }
