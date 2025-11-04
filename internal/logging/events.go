@@ -375,20 +375,25 @@ func (e *EventLogger) Authorization(action, subject, object, reason string) {
 // Registration logs registration events
 // action: attempt|approve|reject|replay|invalid_cert|invalid_sig|rate_limited
 func (e *EventLogger) Registration(action, fingerprint, producerID, status, reason string) {
-	actionKey := normalizeKey(action)
-	statusKey := normalizeKey(status)
+    actionKey := normalizeKey(action)
+    statusKey := normalizeKey(status)
 
-	stage := registrationStage(actionKey)
-	outcome := registrationOutcome(actionKey, statusKey)
-	level := registrationLevel(outcome)
+    stage := registrationStage(actionKey)
+    outcome := registrationOutcome(actionKey, statusKey)
+    level := registrationLevel(outcome)
 
-	fields := []Field{
-		F("event", "registration"),
-		F("component", "registration"),
-		F("stage", stage),
-		F("action", actionKey),
-		F("outcome", outcome),
-	}
+    actionField := actionKey
+    if actionField == "" {
+        actionField = "unknown"
+    }
+
+    fields := []Field{
+        F("event", "registration"),
+        F("component", "registration"),
+        F("stage", stage),
+        F("action", actionField),
+        F("outcome", outcome),
+    }
 	if fingerprint = strings.TrimSpace(fingerprint); fingerprint != "" {
 		fields = append(fields, F("fingerprint", fingerprint))
 	}
@@ -398,10 +403,10 @@ func (e *EventLogger) Registration(action, fingerprint, producerID, status, reas
 	if statusKey != "" && statusKey != outcome {
 		fields = append(fields, F("status", statusKey))
 	}
-	if reason != "" {
+    if reason != "" {
 		fields, _ = appendReason(fields, reason, false)
-	} else if actionKey != "" && actionKey != outcome {
-		fields = append(fields, F("reason_code", actionKey))
+    } else if actionKey != "" && actionKey != outcome {
+        fields = append(fields, F("reason_code", actionKey))
 	}
 	e.log(level, "registration", fields...)
 }
@@ -409,25 +414,30 @@ func (e *EventLogger) Registration(action, fingerprint, producerID, status, reas
 // Token logs token lifecycle events
 // action: issue|exchange|revoke|verify
 func (e *EventLogger) Token(action, producerID, subjectID, jti string, success bool, reason string) {
-	actionKey := normalizeKey(action)
-	stage := tokenStage(actionKey)
+    actionKey := normalizeKey(action)
+    stage := tokenStage(actionKey)
 
-	outcome := "success"
-	level := InfoLevel
-	if actionKey == "verify" && success {
-		level = DebugLevel
-	} else if !success {
-		outcome = "failed"
-		level = WarnLevel
-	}
+    outcome := "success"
+    level := InfoLevel
+    if actionKey == "verify" && success {
+        level = DebugLevel
+    } else if !success {
+        outcome = "failed"
+        level = WarnLevel
+    }
 
-	fields := []Field{
-		F("event", "token"),
-		F("component", "auth"),
-		F("stage", stage),
-		F("action", actionKey),
-		F("outcome", outcome),
-	}
+    actionField := actionKey
+    if actionField == "" {
+        actionField = "unknown"
+    }
+
+    fields := []Field{
+        F("event", "token"),
+        F("component", "auth"),
+        F("stage", stage),
+        F("action", actionField),
+        F("outcome", outcome),
+    }
 	if producerID = strings.TrimSpace(producerID); producerID != "" {
 		fields = append(fields, F("producer_id", producerID))
 	}
@@ -447,23 +457,28 @@ func (e *EventLogger) Token(action, producerID, subjectID, jti string, success b
 // Admin logs admin action events
 // action: review|approve|deny|revoke|access
 func (e *EventLogger) Admin(action, adminPrincipal, target, reason string, success bool) {
-	actionKey := normalizeKey(action)
-	stage := adminStage(actionKey)
+    actionKey := normalizeKey(action)
+    stage := adminStage(actionKey)
 
-	outcome := "success"
-	level := InfoLevel
-	if !success {
-		outcome = "failed"
-		level = ErrorLevel
-	}
+    outcome := "success"
+    level := InfoLevel
+    if !success {
+        outcome = "failed"
+        level = ErrorLevel
+    }
 
-	fields := []Field{
-		F("event", "admin"),
-		F("component", "admin"),
-		F("stage", stage),
-		F("action", actionKey),
-		F("outcome", outcome),
-	}
+    actionField := actionKey
+    if actionField == "" {
+        actionField = "unknown"
+    }
+
+    fields := []Field{
+        F("event", "admin"),
+        F("component", "admin"),
+        F("stage", stage),
+        F("action", actionField),
+        F("outcome", outcome),
+    }
 	if adminPrincipal = strings.TrimSpace(adminPrincipal); adminPrincipal != "" {
 		fields = append(fields, F("admin_principal", adminPrincipal))
 	}
@@ -479,21 +494,30 @@ func (e *EventLogger) Admin(action, adminPrincipal, target, reason string, succe
 // component: redis|postgres|http
 // status: success|failed|empty
 func (e *EventLogger) Infra(action, component, status, details string) {
-	actionKey := normalizeKey(action)
-	componentKey := normalizeKey(component)
-	statusKey := normalizeKey(status)
+    actionKey := normalizeKey(action)
+    componentKey := normalizeKey(component)
+    statusKey := normalizeKey(status)
 
-	outcome := infraOutcome(statusKey, actionKey)
-	stage := infraStage(componentKey, actionKey)
-	level := infraLevel(actionKey, outcome)
+    outcome := infraOutcome(statusKey, actionKey)
+    stage := infraStage(componentKey, actionKey)
+    level := infraLevel(actionKey, outcome)
 
-	fields := []Field{
-		F("event", "infra"),
-		F("component", componentKey),
-		F("stage", stage),
-		F("action", actionKey),
-		F("outcome", outcome),
-	}
+    actionField := actionKey
+    if actionField == "" {
+        actionField = "unknown"
+    }
+    componentField := componentKey
+    if componentField == "" {
+        componentField = "infra"
+    }
+
+    fields := []Field{
+        F("event", "infra"),
+        F("component", componentField),
+        F("stage", stage),
+        F("action", actionField),
+        F("outcome", outcome),
+    }
 	if statusKey != "" && statusKey != outcome {
 		fields = append(fields, F("status", statusKey))
 	}
