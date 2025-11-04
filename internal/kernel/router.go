@@ -233,22 +233,34 @@ func newRouter(cfg *kernelcfg.Config, ack func(ids ...string)) (*router, error) 
 	// pick defaults from config, may be empty which signals NULL in DB
 	r.prodID = cfg.Postgres.DefaultProducerID
 	r.schID = ""
-	if pg, err := data.NewPostgres(context.Background(), cfg.Postgres); err == nil {
-		r.pg = pg
-		q := cfg.Postgres.QueueSize
-		if q <= 0 {
-			q = 1024
-		}
-		// legacy envelope worker disabled; lean path only
-		r.pgChLean = make(chan pgMsgLean, q)
-		go r.pgWorkerBatchLean()
-		// start replayer
-		r.spr = spill.NewReplayer("./spill", r.pg)
-		r.spr.Start()
-	} else {
-		ev.Infra("init", "postgres", "failed", fmt.Sprintf("failed to initialize Postgres: %v", err))
-		return nil, err
-	}
+    var pg *data.Postgres
+    var err error
+    lowerRefused := "connection refused"
+    for attempt := 0; attempt < 10; attempt++ {
+        if pg, err = data.NewPostgres(context.Background(), cfg.Postgres); err == nil {
+            break
+        }
+        msg := strings.ToLower(err.Error())
+        if !strings.Contains(msg, lowerRefused) && !strings.Contains(msg, "dial error") {
+            break
+        }
+        time.Sleep(200*time.Millisecond + time.Duration(attempt)*200*time.Millisecond)
+    }
+    if err != nil {
+        ev.Infra("init", "postgres", "failed", fmt.Sprintf("failed to initialize Postgres: %v", err))
+        return nil, err
+    }
+    r.pg = pg
+    q := cfg.Postgres.QueueSize
+    if q <= 0 {
+        q = 1024
+    }
+    // legacy envelope worker disabled; lean path only
+    r.pgChLean = make(chan pgMsgLean, q)
+    go r.pgWorkerBatchLean()
+    // start replayer
+    r.spr = spill.NewReplayer("./spill", r.pg)
+    r.spr.Start()
 	if rd, err := data.NewRedis(cfg.Redis); err == nil {
 		r.rd = rd
 		q := cfg.Redis.QueueSize
