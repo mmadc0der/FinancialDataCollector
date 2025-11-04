@@ -322,9 +322,7 @@ func (e *EventLogger) Auth(action, subject, ip string, success bool, reason stri
 
 	outcome := "success"
 	level := InfoLevel
-	if success {
-		level = DebugLevel
-	} else {
+	if !success {
 		outcome = "failed"
 		if actionKey == "failure" {
 			level = ErrorLevel
