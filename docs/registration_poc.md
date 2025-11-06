@@ -131,6 +131,7 @@ Flags:
 - `--host` (required): kernel base URL.
 - `--payload`: JSON string or `@file.json`. Use `action=approve|deny|revoke`.
 - `--path` / `--method`: override for `/auth` (GET) or `/auth/revoke`.
+- `--port`: optional port override if the host string omits one.
 - `--mtls-cert` / `--mtls-key`: client TLS certificate/private key (defaults to `~/.ssh/admin-mtls*.pem`).
 - `--admin-cert` / `--admin-key`: OpenSSH admin certificate and matching Ed25519 private key.
 - `--prompt-passphrase`: securely prompt for the Ed25519 key passphrase when encrypted.

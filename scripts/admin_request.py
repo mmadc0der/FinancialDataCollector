@@ -2,6 +2,7 @@
 import argparse
 import base64
 import json
+import os
 import sys
 from pathlib import Path
 from getpass import getpass
@@ -34,6 +35,7 @@ def main():
     parser = argparse.ArgumentParser(description="Send admin requests to the kernel with detached Ed25519 signature.")
     parser.add_argument("--host", required=True, help="Kernel base URL (e.g. https://kernel.example.com:7600)")
     parser.add_argument("--path", default="/auth/review", help="Request path (default: /auth/review)")
+    parser.add_argument("--port", type=int, default=443, help="Port to use for the request (default: 443)")
     parser.add_argument("--method", default="POST", help="HTTP method (default: POST)")
     parser.add_argument("--payload", required=True, help="JSON payload string or @file.json")
     parser.add_argument("--nonce", required=False, help="Optional pre-generated nonce (hex).")
@@ -57,7 +59,7 @@ def main():
     if args.nonce:
         nonce = args.nonce
     else:
-        nonce = Path("/dev/urandom").read_bytes(16).hex()
+        nonce = os.urandom(16).hex()
 
     signing_string = build_signing_string(canon_payload, args.method, args.path, nonce)
 
@@ -87,6 +89,7 @@ def main():
     response = requests.request(
         args.method.upper(),
         url,
+        port=args.port,
         headers=headers,
         data=payload.encode(),
         cert=cert_tuple,
