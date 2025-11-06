@@ -52,6 +52,95 @@
   - mTLS (client cert signed by Admin X.509 CA), and
   - Detached Ed25519 signature with OpenSSH admin certificate (`X-Admin-Cert`, `X-Admin-Nonce`, `X-Admin-Signature`) over `canonicalJSON(body)+"\n"+METHOD+"\n"+PATH+"\n"+nonce`.
 
+#### Admin Request Example (mTLS + detached signature)
+
+1. **Prepare the review payload** (approve, deny, or revoke). Keep keys lowercase and omit optional fields you do not need:
+
+   ```bash
+   payload='{"action":"approve","producer_id":"<producer-uuid>","fingerprint":"<ssh-fingerprint>","notes":"initial onboarding"}'
+   ```
+
+2. **Canonicalize the JSON** exactly the way the kernel does (round-trip through a JSON parser). `jq -c -S` or `python -m json.tool` both work:
+
+   ```bash
+   canon_payload=$(echo "$payload" | jq -c -S .)
+   ```
+
+3. **Generate a unique nonce** (minimum 16 random bytes). The nonce is replay-protected for 5 minutes:
+
+   ```bash
+   nonce=$(openssl rand -hex 16)
+   ```
+
+4. **Build the string to sign**: `canonicalJSON + "\n" + METHOD + "\n" + PATH + "\n" + nonce` using uppercase HTTP method and the exact request path:
+
+   ```bash
+   signing_string=$(printf '%s\n%s\n%s\n%s' "$canon_payload" "POST" "/auth/review" "$nonce")
+   printf '%s' "$signing_string" > /tmp/admin-signing.bin
+   ```
+
+5. **Sign with the admin Ed25519 private key** that was issued alongside the OpenSSH admin certificate. One option is to use Python + `cryptography` (ensures raw Ed25519 output):
+
+   ```bash
+   signature=$(python - <<'PY'
+import base64, sys
+from cryptography.hazmat.primitives.serialization import load_ssh_private_key
+from cryptography.hazmat.primitives import serialization
+
+with open('/path/to/admin_ed25519', 'rb') as fh:
+    key = load_ssh_private_key(fh.read(), password=None)
+
+with open('/tmp/admin-signing.bin', 'rb') as fh:
+    msg = fh.read()
+
+sig = key.sign(msg)
+print(base64.b64encode(sig).decode().strip())
+PY
+   )
+   ```
+
+   *Ensure the key is in OpenSSH format (`ssh-ed25519 ...`). If it is encrypted, supply the passphrase in `load_ssh_private_key`.*
+
+6. **Flatten the OpenSSH admin certificate** (no newlines) for `X-Admin-Cert`:
+
+   ```bash
+   admin_cert=$(tr -d '\n' < /path/to/admin-cert.pub)
+   ```
+
+7. **Send the request** over mTLS. You can do this manually with `curl` or by using the helper script described below.
+
+#### Admin Helper Script (`admin_request.py`)
+
+To simplify MFA-secured requests, the repository ships with `scripts/admin_request.py`. It wraps payload canonicalization, nonce generation, signature creation, and HTTPS POST in one tool.
+
+```bash
+pip install cryptography requests
+```
+
+Example usage (approve or deny):
+
+```bash
+python scripts/admin_request.py \
+  --host https://kernel.example.com:7600 \
+  --payload '{"action":"approve","producer_id":"<uuid>","fingerprint":"<fp>","notes":"initial onboarding"}' \
+  --prompt-passphrase
+```
+
+Flags:
+
+- `--host` (required): kernel base URL.
+- `--payload`: JSON string or `@file.json`. Use `action=approve|deny|revoke`.
+- `--path` / `--method`: override for `/auth` (GET) or `/auth/revoke`.
+- `--mtls-cert` / `--mtls-key`: client TLS certificate/private key (defaults to `~/.ssh/admin-mtls*.pem`).
+- `--admin-cert` / `--admin-key`: OpenSSH admin certificate and matching Ed25519 private key.
+- `--prompt-passphrase`: securely prompt for the Ed25519 key passphrase when encrypted.
+- `--nonce`: supply your own nonce; otherwise the script generates one.
+- `--verify-ca`: path to CA bundle; defaults to system trust store.
+
+The script prints the HTTP status and any JSON response from the kernel. `200`/`201` include body content (approved/denied info). `204` is success without body (e.g., token revoke). `401`, `400`, or `500` indicate authentication/validation/persistence errors—inspect kernel logs for root cause.
+
+This automated path replaces the legacy `X-SSH-Certificate` header: every admin request must now use mTLS, send `X-Admin-Cert` with the OpenSSH certificate, and supply the detached Ed25519 signature as described.
+
 ### Security Audit & Risks (v2)
 - **Rate Limiting**: Distributed token bucket prevents spam; metrics expose allow/deny by operation.
 - **Replay Protection**: Redis `SETNX reg:nonce:<fp>:<nonce>` with 1h TTL, plus DB unique index on `(fingerprint, nonce)`.
