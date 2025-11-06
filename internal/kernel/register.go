@@ -362,9 +362,9 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
 			continue
 		}
 
-		for _, s := range res {
-			for _, m := range s.Messages {
-				k.processRegistrationMessage(ctx, stream, m)
+	for _, s := range res {
+		for _, m := range s.Messages {
+			k.processRegistrationMessage(ctx, stream, m)
 			}
 		}
 	}
@@ -375,6 +375,8 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 	ev := logging.NewEventLogger()
 
 	// Extract fields
+	msgStart := time.Now()
+	observeRedisLag(m.ID)
 	pubkey, _ := m.Values["pubkey"].(string)
 	payloadStr, _ := m.Values["payload"].(string)
 	nonce, _ := m.Values["nonce"].(string)
@@ -383,7 +385,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 
 	if pubkey == "" || payloadStr == "" || nonce == "" || sigB64 == "" {
 		ev.Registration("message_invalid", "", "", "failed", fmt.Sprintf("missing_fields: stream=%s id=%s", stream, m.ID))
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack message with missing fields: %v", err))
 		}
 		return
@@ -396,7 +398,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 	var payload regPayload
 	if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
 		ev.Registration("payload_invalid", fp, "", "failed", fmt.Sprintf("payload_parse_error: %v", err))
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack message with parse error: %v", err))
 		}
 		return
@@ -416,7 +418,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 		ev.Registration("rate_limited", fp, "", "denied", fmt.Sprintf("rate_limited: key=%s", rateLimitID))
 		// respond to client on same per-nonce response stream for consistency
 		k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "rate_limited"})
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack rate-limited message: %v", err))
 		}
 		return
@@ -424,14 +426,16 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 
 	// Check nonce replay
 	if !k.checkNonceReplay(ctx, fp, nonce) {
+		persistStart := time.Now()
 		// Register producer key with audit record for replay
 		producerID, err := k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "replay", "duplicate_nonce")
+		metrics.RegistrationPersistDuration.Observe(time.Since(persistStart).Seconds())
 		if err != nil {
 			ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for replay: %v", err))
 		}
 		ev.Registration("nonce_replay", fp, producerID, "failed", "duplicate_nonce")
 		k.sendRegistrationResponse(ctx, nonce, map[string]any{"status": "replay", "reason": "duplicate_nonce"})
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack replay message: %v", err))
 		}
 		return
@@ -440,8 +444,10 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 	// Verify certificate first (before signature verification)
 	certValid, _, _, _ := k.verifyCertificate(pubkey)
 	if !certValid {
+		persistStart := time.Now()
 		// Register producer key with audit record for invalid cert
 		producerID, err := k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_cert", "certificate_verification_failed")
+		metrics.RegistrationPersistDuration.Observe(time.Since(persistStart).Seconds())
 		if err != nil {
 			ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for invalid cert: %v", err))
 		}
@@ -451,7 +457,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 			"status":      "invalid_cert",
 			"reason":      "certificate_verification_failed",
 		})
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid cert message: %v", err))
 		}
 		return
@@ -460,8 +466,10 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 
 	// Verify signature (after certificate verification)
 	if !k.verifySignature(pubkey, payloadStr, nonce, sigB64) {
+		persistStart := time.Now()
 		// Register producer key with audit record for invalid signature
 		producerID, err := k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, "invalid_sig", "signature_verification_failed")
+		metrics.RegistrationPersistDuration.Observe(time.Since(persistStart).Seconds())
 		if err != nil {
 			ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key for invalid sig: %v", err))
 		}
@@ -471,7 +479,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 			"status":      "invalid_sig",
 			"reason":      "signature_verification_failed",
 		})
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack invalid sig message: %v", err))
 		}
 		return
@@ -486,10 +494,12 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 
 	var producerID string
 	var err error
+	persistStart := time.Now()
 	producerID, err = k.pg.RegisterProducerKey(ctx, fp, pubkey, payload.ProducerHint, payload.Contact, payload.Meta, payloadStr, sigB64, nonce, status, "")
+	metrics.RegistrationPersistDuration.Observe(time.Since(persistStart).Seconds())
 	if err != nil {
 		ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to register producer key: %v", err))
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack registration error: %v", err))
 		}
 		return
@@ -498,7 +508,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 
 	// Handle deregister action
 	if action == "deregister" {
-		k.handleDeregister(ctx, stream, producerID, fp, m.ID, nonce)
+		k.handleDeregister(ctx, stream, producerID, fp, m.ID, nonce, msgStart)
 		return
 	}
 
@@ -506,7 +516,7 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 	status, statusProducerID, err := k.pg.GetKeyStatus(ctx, fp)
 	if err != nil {
 		ev.Infra("read", "postgres", "failed", fmt.Sprintf("failed to get key status: %v", err))
-		if err := k.rd.AckStream(ctx, stream, m.ID); err != nil {
+		if err := k.ackStreamWithLatency(ctx, stream, msgStart, m.ID); err != nil {
 			ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack status check error: %v", err))
 		}
 		return
@@ -521,25 +531,27 @@ func (k *Kernel) processRegistrationMessage(ctx context.Context, stream string, 
 	// State machine based on current status
 	switch status {
 	case "approved":
-		k.handleKnownApproved(ctx, stream, producerID, fp, m.ID, nonce)
+		k.handleKnownApproved(ctx, stream, producerID, fp, m.ID, nonce, msgStart)
 	case "pending":
-		k.handleKnownPending(ctx, stream, producerID, fp, m.ID, nonce)
+		k.handleKnownPending(ctx, stream, producerID, fp, m.ID, nonce, msgStart)
 	case "revoked", "superseded":
-		k.handleKnownDenied(ctx, stream, &producerID, fp, status, m.ID, nonce)
+		k.handleKnownDenied(ctx, stream, &producerID, fp, status, m.ID, nonce, msgStart)
 	default:
 		// This shouldn't happen after RegisterProducerKey, but handle gracefully
 		ev.Registration("status_unknown", fp, producerID, status, fmt.Sprintf("status_unknown: %s", status))
-		k.handleNewProducer(ctx, stream, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID)
+		k.handleNewProducer(ctx, stream, producerID, fp, payload, payloadStr, sigB64, nonce, m.ID, msgStart)
 	}
 }
 
 // Handle deregister action
-func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
+func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp string, msgID, nonce string, started time.Time) {
 	ev := logging.NewEventLogger()
 
 	ev.Registration("deregister_request", fp, producerID, "pending", fmt.Sprintf("deregister_request: nonce=%s", nonce))
 
+	persistStart := time.Now()
 	err := k.pg.DisableProducer(ctx, producerID)
+	metrics.RegistrationPersistDuration.Observe(time.Since(persistStart).Seconds())
 	if err != nil {
 		ev.Infra("write", "postgres", "failed", fmt.Sprintf("failed to disable producer: %v", err))
 	} else {
@@ -551,13 +563,13 @@ func (k *Kernel) handleDeregister(ctx context.Context, stream, producerID, fp st
 		"producer_id": producerID,
 		"status":      "deregistered",
 	})
-	if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+	if err := k.ackStreamWithLatency(ctx, stream, started, msgID); err != nil {
 		ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack deregister message: %v", err))
 	}
 }
 
 // Handle known approved key
-func (k *Kernel) handleKnownApproved(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
+func (k *Kernel) handleKnownApproved(ctx context.Context, stream, producerID, fp string, msgID, nonce string, started time.Time) {
 	ev := logging.NewEventLogger()
 
 	ev.Registration("status_approved", fp, producerID, "approved", "")
@@ -567,23 +579,23 @@ func (k *Kernel) handleKnownApproved(ctx context.Context, stream, producerID, fp
 		"producer_id": producerID,
 		"status":      "approved",
 	})
-	if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+	if err := k.ackStreamWithLatency(ctx, stream, started, msgID); err != nil {
 		ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack approved message: %v", err))
 	}
 }
 
 // Handle known pending key
-func (k *Kernel) handleKnownPending(ctx context.Context, stream, producerID, fp string, msgID, nonce string) {
+func (k *Kernel) handleKnownPending(ctx context.Context, stream, producerID, fp string, msgID, nonce string, started time.Time) {
 	ev := logging.NewEventLogger()
 
 	// Silent - no response for pending keys per protocol
-	if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+	if err := k.ackStreamWithLatency(ctx, stream, started, msgID); err != nil {
 		ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack pending message: %v", err))
 	}
 }
 
 // Handle known denied key
-func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerID *string, fp, status, msgID, nonce string) {
+func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerID *string, fp, status, msgID, nonce string, started time.Time) {
 	ev := logging.NewEventLogger()
 
 	var pid string
@@ -598,13 +610,13 @@ func (k *Kernel) handleKnownDenied(ctx context.Context, stream string, producerI
 		"status":      "denied",
 		"reason":      status,
 	})
-	if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+	if err := k.ackStreamWithLatency(ctx, stream, started, msgID); err != nil {
 		ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack denied message: %v", err))
 	}
 }
 
 // Handle new producer registration (fallback - should not occur post-RegisterProducerKey)
-func (k *Kernel) handleNewProducer(ctx context.Context, stream, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string) {
+func (k *Kernel) handleNewProducer(ctx context.Context, stream, producerID, fp string, payload regPayload, payloadStr, sigB64, nonce, msgID string, started time.Time) {
 	ev := logging.NewEventLogger()
 
 	ev.Registration("status_pending", fp, producerID, "pending", "")
@@ -614,7 +626,7 @@ func (k *Kernel) handleNewProducer(ctx context.Context, stream, producerID, fp s
 		"producer_id": producerID,
 		"status":      "pending",
 	})
-	if err := k.rd.AckStream(ctx, stream, msgID); err != nil {
+	if err := k.ackStreamWithLatency(ctx, stream, started, msgID); err != nil {
 		ev.Infra("ack", "redis", "failed", fmt.Sprintf("failed to ack new producer message: %v", err))
 	}
 }

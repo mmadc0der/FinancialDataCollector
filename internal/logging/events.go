@@ -3,6 +3,8 @@ package logging
 import (
 	"net/http"
 	"strings"
+
+	"github.com/example/data-kernel/internal/metrics"
 )
 
 // EventLogger provides structured event logging with security-compliant schemas
@@ -417,6 +419,7 @@ func (e *EventLogger) Registration(action, fingerprint, producerID, status, reas
 		fields = append(fields, F("reason_code", actionKey))
 	}
 	e.log(level, "registration", fields...)
+	metrics.RegistrationOutcome.WithLabelValues(stage, actionField, outcome).Inc()
 }
 
 // Token logs token lifecycle events

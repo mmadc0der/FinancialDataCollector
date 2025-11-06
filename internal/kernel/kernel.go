@@ -35,6 +35,8 @@ type Kernel struct {
 	rd  *data.Redis
 	pg  *data.Postgres
 	au  *auth.Verifier
+	producerTracker *activityTracker
+	subjectTracker  *activityTracker
 }
 
 func NewKernel(configPath string) (*Kernel, error) {
@@ -42,7 +44,15 @@ func NewKernel(configPath string) (*Kernel, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
-	return &Kernel{cfg: cfg}, nil
+	return &Kernel{
+		cfg: cfg,
+		producerTracker: newActivityTracker(5*time.Minute, func(count int) {
+			metrics.ProducerActiveGauge.Set(float64(count))
+		}),
+		subjectTracker: newActivityTracker(5*time.Minute, func(count int) {
+			metrics.SubjectActiveGauge.Set(float64(count))
+		}),
+	}, nil
 }
 
 func (k *Kernel) Start(ctx context.Context) error {
@@ -215,6 +225,7 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
 
 		for _, s := range streams {
 			for _, m := range s.Messages {
+				observeRedisLag(m.ID)
 				globalMetricsBatcher.IncRedisRead()
 				id, payload, token := data.DecodeMessage(m)
 				if len(payload) == 0 {
@@ -328,6 +339,15 @@ func (k *Kernel) consumeRedis(ctx context.Context) {
 						}
 						continue
 					}
+				}
+				// producer/subject activity metrics
+				if producerID != "" {
+					metrics.ProducerEventTotal.WithLabelValues(producerID).Inc()
+					k.producerTracker.mark(producerID)
+				}
+				if eventData.SubjectID != "" {
+					metrics.SubjectEventTotal.WithLabelValues(eventData.SubjectID).Inc()
+					k.subjectTracker.mark(eventData.SubjectID)
 				}
 				// route for durable handling; ack will be done after persistence via router callback
 				k.rt.handleLeanEvent(m.ID, eventData.EventID, eventData.TS, eventData.SubjectID, producerID, eventData.Payload, eventData.Tags, schemaID)

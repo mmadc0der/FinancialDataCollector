@@ -1,16 +1,235 @@
 {
   "title": "Data Kernel Overview",
+  "uid": "kernel-overview",
+  "schemaVersion": 42,
+  "version": 1,
+  "refresh": "30s",
+  "time": {"from": "now-1h", "to": "now"},
+  "templating": {"list": []},
   "panels": [
-    {"type": "stat", "title": "WS Connections", "targets": [{"expr": "kernel_ws_connections"}]},
-    {"type": "graph", "title": "Redis Reads/Acks", "targets": [
-      {"expr": "rate(kernel_redis_read_total[5m])", "legendFormat": "read/s"},
-      {"expr": "rate(kernel_redis_ack_total[5m])", "legendFormat": "ack/s"}
-    ]},
-    {"type": "graph", "title": "Redis Batch Duration", "targets": [{"expr": "histogram_quantile(0.95, sum(rate(kernel_redis_batch_seconds_bucket[5m])) by (le))"}]},
-    {"type": "graph", "title": "DLQ Rate", "targets": [{"expr": "rate(kernel_redis_dlq_total[5m])"}]},
-    {"type": "graph", "title": "PG Batch Size", "targets": [{"expr": "histogram_quantile(0.95, sum(rate(kernel_pg_batch_size_bucket[5m])) by (le))"}]},
-    {"type": "graph", "title": "PG Batch Duration", "targets": [{"expr": "histogram_quantile(0.95, sum(rate(kernel_pg_batch_seconds_bucket[5m])) by (le))"}]}
-  ],
-  "templating": {"list": []}
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total EPS",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "horizontal",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}
+        },
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "sum(rate(kernel_producer_events_total[5m]))"}]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active Producers",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "horizontal",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}
+        },
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "kernel_producer_active"}]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Active Subjects",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "horizontal",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}
+        },
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "kernel_subject_active"}]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "DLQ Rate",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "orientation": "horizontal",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}
+        },
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "rate(kernel_redis_dlq_total[5m])"}]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Event Throughput",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "fieldConfig": {"defaults": {"mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(kernel_producer_events_total[5m]))", "legendFormat": "ingest"},
+        {"refId": "B", "expr": "rate(kernel_redis_ack_total[5m])", "legendFormat": "ack"}
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Per Producer EPS (top 10)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "fieldConfig": {"defaults": {"mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "topk(10, rate(kernel_producer_events_total[5m]))", "legendFormat": "{{producer_id}}"}
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Per Subject EPS (top 10)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "fieldConfig": {"defaults": {"mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "topk(10, rate(kernel_subject_events_total[5m]))", "legendFormat": "{{subject_id}}"}
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Redis Pending",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "fieldConfig": {"defaults": {"mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "hidden"},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "kernel_redis_pending"}
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Redis Lag (p50/p95)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "fieldConfig": {"defaults": {"unit": "s", "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.5, sum(rate(kernel_redis_message_lag_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum(rate(kernel_redis_message_lag_seconds_bucket[5m])) by (le))", "legendFormat": "p95"}
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Ack Latency (p50/p95)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "fieldConfig": {"defaults": {"unit": "s", "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.5, sum(rate(kernel_redis_ack_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"refId": "B", "expr": "histogram_quantile(0.95, sum(rate(kernel_redis_ack_latency_seconds_bucket[5m])) by (le))", "legendFormat": "p95"}
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Registration Outcomes",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 28},
+      "fieldConfig": {"defaults": {"mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}, "custom": {"stacking": {"mode": "normal"}}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "table", "placement": "right"},
+        "tooltip": {"mode": "multi"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(kernel_registration_outcome_total[5m])) by (outcome)", "legendFormat": "{{outcome}}"}
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Registration Persist p95",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 28},
+      "fieldConfig": {"defaults": {"unit": "s", "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "hidden"},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(kernel_registration_persist_seconds_bucket[5m])) by (le))"}
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "PG Batch Duration p95",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 36},
+      "fieldConfig": {"defaults": {"unit": "s", "mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "hidden"},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(kernel_pg_batch_seconds_bucket[5m])) by (le))"}
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "PG Batch Size p95",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 36},
+      "fieldConfig": {"defaults": {"mappings": [], "thresholds": {"mode": "absolute", "steps": [{"value": null, "color": "green"}]}}, "overrides": []},
+      "options": {
+        "legend": {"displayMode": "hidden"},
+        "tooltip": {"mode": "single"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "histogram_quantile(0.95, sum(rate(kernel_pg_batch_size_bucket[5m])) by (le))"}
+      ]
+    }
+  ]
 }
 
