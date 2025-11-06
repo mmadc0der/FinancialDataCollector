@@ -362,9 +362,9 @@ func (k *Kernel) consumeRegister(ctx context.Context) {
 			continue
 		}
 
-	for _, s := range res {
-		for _, m := range s.Messages {
-			k.processRegistrationMessage(ctx, stream, m)
+		for _, s := range res {
+			for _, m := range s.Messages {
+				k.processRegistrationMessage(ctx, stream, m)
 			}
 		}
 	}

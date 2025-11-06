@@ -21,7 +21,7 @@ type activityTracker struct {
 
 func newActivityTracker(ttl time.Duration, onUpdate func(int)) *activityTracker {
 	if ttl <= 0 {
-		tl = 5 * time.Minute
+		ttl = 5 * time.Minute
 	}
 	at := &activityTracker{
 		entries:  make(map[string]time.Time),
@@ -106,4 +106,3 @@ func (k *Kernel) ackStreamWithLatency(ctx context.Context, stream string, starte
 	}
 	return err
 }
-

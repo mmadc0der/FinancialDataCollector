@@ -30,11 +30,11 @@ import (
 // context pooling removed; use standard contexts
 
 type Kernel struct {
-	cfg *kernelcfg.Config
-	rt  *router
-	rd  *data.Redis
-	pg  *data.Postgres
-	au  *auth.Verifier
+	cfg             *kernelcfg.Config
+	rt              *router
+	rd              *data.Redis
+	pg              *data.Postgres
+	au              *auth.Verifier
 	producerTracker *activityTracker
 	subjectTracker  *activityTracker
 }
