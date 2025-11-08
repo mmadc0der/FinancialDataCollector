@@ -99,8 +99,18 @@ func drain(ch <-chan event, stop <-chan struct{}, w io.Writer) {
             if n := dropped.Swap(0); n > 0 {
                 _ = enc.Encode(event{TS: time.Now().UnixNano(), Level: "warn", Msg: "logs_dropped", Fields: map[string]any{"count": n}})
             }
-        case <-stop:
-            return
+		case <-stop:
+			for {
+				select {
+				case ev := <-ch:
+					_ = enc.Encode(ev)
+				default:
+					if n := dropped.Swap(0); n > 0 {
+						_ = enc.Encode(event{TS: time.Now().UnixNano(), Level: "warn", Msg: "logs_dropped", Fields: map[string]any{"count": n}})
+					}
+					return
+				}
+			}
         }
     }
 }

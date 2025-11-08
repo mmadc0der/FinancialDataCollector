@@ -117,16 +117,19 @@ func (k *Kernel) Start(ctx context.Context) error {
 			ev.Infra("config", "tls", "failed", err.Error())
 			return err
 		}
+		ev.Infra("config", "tls", "success", fmt.Sprintf("server.tls.cert_file validated: path=%s", k.cfg.Server.TLS.CertFile))
 		if err := checkFile(k.cfg.Server.TLS.KeyFile, "server.tls.key_file"); err != nil {
 			ev.Infra("config", "tls", "failed", err.Error())
 			return err
 		}
+		ev.Infra("config", "tls", "success", fmt.Sprintf("server.tls.key_file validated: path=%s", k.cfg.Server.TLS.KeyFile))
 		tlsEnabled = true
 		if k.cfg.Server.TLS.RequireClientCert {
 			if err := checkFile(k.cfg.Server.TLS.ClientCAFile, "server.tls.client_ca_file"); err != nil {
 				ev.Infra("config", "tls", "failed", err.Error())
 				return err
 			}
+			ev.Infra("config", "tls", "success", fmt.Sprintf("server.tls.client_ca_file validated: path=%s", k.cfg.Server.TLS.ClientCAFile))
 		}
 		if k.cfg.Server.TLS.ClientCAFile != "" {
 			caBytes, err := os.ReadFile(k.cfg.Server.TLS.ClientCAFile)
@@ -141,6 +144,7 @@ func (k *Kernel) Start(ctx context.Context) error {
 				ev.Infra("config", "tls", "failed", err.Error())
 				return err
 			}
+			ev.Infra("config", "tls", "success", fmt.Sprintf("server.tls.client_ca_file loaded: path=%s subjects=%d", k.cfg.Server.TLS.ClientCAFile, len(caPool.Subjects())))
 			if k.cfg.Server.TLS.RequireClientCert {
 				tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
 				tlsCfg.ClientCAs = caPool
