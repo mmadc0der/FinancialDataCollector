@@ -98,17 +98,65 @@ func (k *Kernel) Start(ctx context.Context) error {
 	mux.HandleFunc("/auth/revoke", k.handleRevokeToken)
 	// Configure strict mTLS for admin server
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if k.cfg.Server.TLS.CertFile != "" && k.cfg.Server.TLS.KeyFile != "" && k.cfg.Server.TLS.ClientCAFile != "" {
-		caBytes, err := os.ReadFile(k.cfg.Server.TLS.ClientCAFile)
+	checkFile := func(path, field string) error {
+		if strings.TrimSpace(path) == "" {
+			return fmt.Errorf("%s not configured", field)
+		}
+		info, err := os.Stat(path)
 		if err != nil {
-			return fmt.Errorf("read client ca: %w", err)
+			return fmt.Errorf("%s: %w", field, err)
 		}
-		caPool := x509.NewCertPool()
-		if !caPool.AppendCertsFromPEM(caBytes) {
-			return fmt.Errorf("bad client ca")
+		if info.IsDir() {
+			return fmt.Errorf("%s points to directory", field)
 		}
-		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		tlsCfg.ClientCAs = caPool
+		return nil
+	}
+	tlsEnabled := false
+	if k.cfg.Server.TLS.CertFile != "" || k.cfg.Server.TLS.KeyFile != "" || k.cfg.Server.TLS.ClientCAFile != "" {
+		if err := checkFile(k.cfg.Server.TLS.CertFile, "server.tls.cert_file"); err != nil {
+			ev.Infra("config", "tls", "failed", err.Error())
+			return err
+		}
+		if err := checkFile(k.cfg.Server.TLS.KeyFile, "server.tls.key_file"); err != nil {
+			ev.Infra("config", "tls", "failed", err.Error())
+			return err
+		}
+		tlsEnabled = true
+		if k.cfg.Server.TLS.RequireClientCert {
+			if err := checkFile(k.cfg.Server.TLS.ClientCAFile, "server.tls.client_ca_file"); err != nil {
+				ev.Infra("config", "tls", "failed", err.Error())
+				return err
+			}
+		}
+		if k.cfg.Server.TLS.ClientCAFile != "" {
+			caBytes, err := os.ReadFile(k.cfg.Server.TLS.ClientCAFile)
+			if err != nil {
+				err = fmt.Errorf("read client ca: %w", err)
+				ev.Infra("config", "tls", "failed", err.Error())
+				return err
+			}
+			caPool := x509.NewCertPool()
+			if !caPool.AppendCertsFromPEM(caBytes) {
+				err = errors.New("bad client ca")
+				ev.Infra("config", "tls", "failed", err.Error())
+				return err
+			}
+			if k.cfg.Server.TLS.RequireClientCert {
+				tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+				tlsCfg.ClientCAs = caPool
+			}
+		} else if k.cfg.Server.TLS.RequireClientCert {
+			err := errors.New("server.tls.client_ca_file required when require_client_cert=true")
+			ev.Infra("config", "tls", "failed", err.Error())
+			return err
+		}
+		if k.cfg.Server.TLS.RequireClientCert {
+			ev.Infra("config", "tls", "success", fmt.Sprintf("tls_enabled addr=%s client_auth=require", k.cfg.Server.Listen))
+		} else {
+			ev.Infra("config", "tls", "success", fmt.Sprintf("tls_enabled addr=%s client_auth=optional", k.cfg.Server.Listen))
+		}
+	} else {
+		ev.Infra("config", "tls", "info", "tls_disabled: serving plain HTTP on "+k.cfg.Server.Listen)
 	}
 	server := &http.Server{Addr: k.cfg.Server.Listen, Handler: mux, TLSConfig: tlsCfg}
 
@@ -162,7 +210,7 @@ func (k *Kernel) Start(ctx context.Context) error {
 		}
 	}()
 
-	if k.cfg.Server.TLS.CertFile != "" && k.cfg.Server.TLS.KeyFile != "" {
+	if tlsEnabled {
 		if err := server.ListenAndServeTLS(k.cfg.Server.TLS.CertFile, k.cfg.Server.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
 			return err
 		}
