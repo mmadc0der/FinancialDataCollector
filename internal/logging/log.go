@@ -27,23 +27,25 @@ type Field struct {
 
 func F(key string, value any) Field { return Field{Key: key, Value: value} }
 func Err(err error) Field {
-    if err == nil { return Field{Key: "err", Value: nil} }
-    return Field{Key: "err", Value: err.Error()}
+	if err == nil {
+		return Field{Key: "err", Value: nil}
+	}
+	return Field{Key: "err", Value: err.Error()}
 }
 
 type event struct {
-	TS    int64          `json:"ts"`
-	Level string         `json:"level"`
-	Msg   string         `json:"msg"`
+	TS     int64          `json:"ts"`
+	Level  string         `json:"level"`
+	Msg    string         `json:"msg"`
 	Fields map[string]any `json:"fields,omitempty"`
 }
 
 var (
-    logLevel atomic.Int32
-    logCh    chan event
-    dropped  atomic.Int64
-    stopCh   chan struct{}
-    writer   io.Writer = os.Stdout
+	logLevel atomic.Int32
+	logCh    chan event
+	dropped  atomic.Int64
+	stopCh   chan struct{}
+	writer   io.Writer = os.Stdout
 )
 
 func parseLevel(s string) Level {
@@ -61,44 +63,44 @@ func parseLevel(s string) Level {
 }
 
 func Init(cfg kernelcfg.LoggingConfig) func() {
-    if cfg.Buffer <= 0 {
-        cfg.Buffer = 4096
-    }
-    // Create per-init channels, but keep exporting logCh globally for callers.
-    localLogCh := make(chan event, cfg.Buffer)
-    logCh = localLogCh
-    logLevel.Store(int32(parseLevel(cfg.Level)))
-    localStop := make(chan struct{})
-    stopCh = localStop // retained for diagnostics if needed, not used by drain
-    // Select output writer and capture it for this drain instance
-    switch cfg.Output {
-    case "stderr":
-        writer = os.Stderr
-    case "stdout", "":
-        writer = os.Stdout
-    default:
-        f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-        if err == nil {
-            writer = f
-        }
-    }
-    localWriter := writer
-    go drain(localLogCh, localStop, localWriter)
-    return func() { close(localStop) }
+	if cfg.Buffer <= 0 {
+		cfg.Buffer = 4096
+	}
+	// Create per-init channels, but keep exporting logCh globally for callers.
+	localLogCh := make(chan event, cfg.Buffer)
+	logCh = localLogCh
+	logLevel.Store(int32(parseLevel(cfg.Level)))
+	localStop := make(chan struct{})
+	stopCh = localStop // retained for diagnostics if needed, not used by drain
+	// Select output writer and capture it for this drain instance
+	switch cfg.Output {
+	case "stderr":
+		writer = os.Stderr
+	case "stdout", "":
+		writer = os.Stdout
+	default:
+		f, err := os.OpenFile(cfg.Output, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err == nil {
+			writer = f
+		}
+	}
+	localWriter := writer
+	go drain(localLogCh, localStop, localWriter)
+	return func() { close(localStop) }
 }
 
 func drain(ch <-chan event, stop <-chan struct{}, w io.Writer) {
-    flushTicker := time.NewTicker(10 * time.Second)
-    defer flushTicker.Stop()
-    enc := json.NewEncoder(w)
-    for {
-        select {
-        case ev := <-ch:
-            _ = enc.Encode(ev)
-        case <-flushTicker.C:
-            if n := dropped.Swap(0); n > 0 {
-                _ = enc.Encode(event{TS: time.Now().UnixNano(), Level: "warn", Msg: "logs_dropped", Fields: map[string]any{"count": n}})
-            }
+	flushTicker := time.NewTicker(10 * time.Second)
+	defer flushTicker.Stop()
+	enc := json.NewEncoder(w)
+	for {
+		select {
+		case ev := <-ch:
+			_ = enc.Encode(ev)
+		case <-flushTicker.C:
+			if n := dropped.Swap(0); n > 0 {
+				_ = enc.Encode(event{TS: time.Now().UnixNano(), Level: "warn", Msg: "logs_dropped", Fields: map[string]any{"count": n}})
+			}
 		case <-stop:
 			for {
 				select {
@@ -111,8 +113,8 @@ func drain(ch <-chan event, stop <-chan struct{}, w io.Writer) {
 					return
 				}
 			}
-        }
-    }
+		}
+	}
 }
 
 func allowed(l Level) bool { return l >= Level(logLevel.Load()) }
@@ -155,4 +157,3 @@ func Debug(msg string, fields ...Field) { log(DebugLevel, msg, fields...) }
 func Info(msg string, fields ...Field)  { log(InfoLevel, msg, fields...) }
 func Warn(msg string, fields ...Field)  { log(WarnLevel, msg, fields...) }
 func Error(msg string, fields ...Field) { log(ErrorLevel, msg, fields...) }
-
