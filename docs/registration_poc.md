@@ -120,23 +120,39 @@ pip install cryptography requests
 Example usage (approve or deny):
 
 ```bash
-python scripts/admin_request.py \
-  --host https://kernel.example.com:7600 \
+python scripts/admin_request.py request \
+  --host kernel.example.com \
+  --port 7600 \
   --payload '{"action":"approve","producer_id":"<uuid>","fingerprint":"<fp>","notes":"initial onboarding"}' \
   --prompt-passphrase
 ```
 
-Flags:
+Helpful flags under the `request` subcommand:
 
-- `--host` (required): kernel base URL.
+- `--host` (required): kernel hostname/IP (scheme assumed `https`).
 - `--payload`: JSON string or `@file.json`. Use `action=approve|deny|revoke`.
 - `--path` / `--method`: override for `/auth` (GET) or `/auth/revoke`.
-- `--port`: optional port override if the host string omits one.
-- `--mtls-cert` / `--mtls-key`: client TLS certificate/private key (defaults to `~/.ssh/admin-mtls*.pem`).
+- `--port`: defaults to 443.
+- `--mtls-cert` / `--mtls-key`: TLS client cert/key (defaults to `~/.ssh/admin-mtls*.pem`).
 - `--admin-cert` / `--admin-key`: OpenSSH admin certificate and matching Ed25519 private key.
 - `--prompt-passphrase`: securely prompt for the Ed25519 key passphrase when encrypted.
 - `--nonce`: supply your own nonce; otherwise the script generates one.
 - `--verify-ca`: path to CA bundle; defaults to system trust store.
+
+There is also a `generate-csr` subcommand to produce a TLS private key + CSR:
+
+```bash
+python scripts/admin_request.py generate-csr \
+  --output-cert ~/.ssh/admin-mtls.pem \
+  --output-key ~/.ssh/admin-mtls-key.pem \
+  --output-csr ~/.ssh/admin-mtls.csr \
+  --subject "/CN=admin-ops" \
+  --san DNS:admin-ops
+```
+
+`generate-csr` only produces the key and CSR. You must submit the CSR to the Admin X.509 CA and install the signed certificate at the `--output-cert` path before sending requests.
+
+The TLS materials (`--mtls-cert`/`--mtls-key`) are standard X.509 artifacts used for the HTTPS handshake. The admin Ed25519 key and OpenSSH certificate (`--admin-key`/`--admin-cert`) are separate and power the detached signature headers. Both sets are required; the helper script aborts early if any file is missing and explains how to generate/request the missing piece.
 
 The script prints the HTTP status and any JSON response from the kernel. `200`/`201` include body content (approved/denied info). `204` is success without body (e.g., token revoke). `401`, `400`, or `500` indicate authentication/validation/persistence errors—inspect kernel logs for root cause.
 
