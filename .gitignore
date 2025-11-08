@@ -17,6 +17,9 @@ coverage.out
 ssh/
 modules.d/**/ssh/
 
+# Kernel TLS identity
+tls/
+
 # Go
 bin/
 dist/
