@@ -18,8 +18,9 @@ build:
 	mkdir -p bin
 	GO111MODULE=on go build -o $(BIN) ./cmd/kernel
 
+run: SHELL := /bin/bash
 run: build
-	./$(BIN) --config ./config/kernel.yaml | cat
+	set -o pipefail; ./$(BIN) --config ./config/kernel.yaml | cat
 
 producer:
 	go run ./modules.d/producer-example
